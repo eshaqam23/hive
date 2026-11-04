@@ -7,8 +7,10 @@
     "hive": "./scripts/hive.mjs"
   },
   "scripts": {
+    "backend": "python3 backend/server.py",
     "dev": "vite --host 127.0.0.1",
-    "hive": "vite --host 127.0.0.1 --open",
+    "frontend": "vite --host 127.0.0.1",
+    "hive": "node scripts/hive.mjs",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1"
   },

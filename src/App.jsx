@@ -1,133 +1,105 @@
 import React, { useEffect, useMemo, useState } from "react";
 
-const MORPHOLOGIES = {
-  quadcopter: {
-    label: "Quadcopter",
-    summary: "Aerial robot for inspection and scouting.",
-    capabilities: [
-      { name: "Forward camera", kind: "sensor" },
-      { name: "IMU", kind: "sensor" },
-      { name: "Altitude hold", kind: "flight" },
-      { name: "Velocity control", kind: "control" },
-    ],
-    topics: [
-      { name: "/camera/front/image_raw", type: "sensor_msgs/Image", viewer: "image" },
-      { name: "/imu/data", type: "sensor_msgs/Imu", viewer: "readout" },
-      { name: "/battery", type: "sensor_msgs/BatteryState", viewer: "readout" },
-      { name: "/cmd_vel", type: "geometry_msgs/Twist", viewer: "raw" },
-    ],
-  },
-  manipulator: {
-    label: "Manipulator",
-    summary: "Stationary arm for grasping and placement tasks.",
-    capabilities: [
-      { name: "Joint state feedback", kind: "sensor" },
-      { name: "Gripper", kind: "actuator" },
-      { name: "Trajectory control", kind: "control" },
-    ],
-    topics: [
-      { name: "/joint_states", type: "sensor_msgs/JointState", viewer: "readout" },
-      { name: "/gripper/state", type: "hive_msgs/GripperState", viewer: "readout" },
-      { name: "/arm_controller/trajectory", type: "trajectory_msgs/JointTrajectory", viewer: "raw" },
-    ],
-  },
-  mobileManipulator: {
-    label: "Mobile manipulator",
-    summary: "RC platform with an arm for mobile manipulation.",
-    capabilities: [
-      { name: "Drive base", kind: "mobility" },
-      { name: "Manipulator", kind: "actuator" },
-      { name: "Wrist camera", kind: "sensor" },
-      { name: "Gripper", kind: "actuator" },
-    ],
-    topics: [
-      { name: "/wrist_camera/image_raw", type: "sensor_msgs/Image", viewer: "image" },
-      { name: "/joint_states", type: "sensor_msgs/JointState", viewer: "readout" },
-      { name: "/battery", type: "sensor_msgs/BatteryState", viewer: "readout" },
-      { name: "/cmd_vel", type: "geometry_msgs/Twist", viewer: "raw" },
-    ],
-  },
-  rcCar: {
-    label: "RC car",
-    summary: "Wheeled ground robot for fast indoor navigation.",
-    capabilities: [
-      { name: "Throttle and steering", kind: "control" },
-      { name: "Forward camera", kind: "sensor" },
-      { name: "Odometry", kind: "localization" },
-    ],
-    topics: [
-      { name: "/camera/front/image_raw", type: "sensor_msgs/Image", viewer: "image" },
-      { name: "/odom", type: "nav_msgs/Odometry", viewer: "readout" },
-      { name: "/cmd_drive", type: "ackermann_msgs/AckermannDrive", viewer: "raw" },
-    ],
-  },
-  treadedCar: {
-    label: "Treaded car",
-    summary: "Tracked ground robot for rougher terrain.",
-    capabilities: [
-      { name: "Tracked drive", kind: "mobility" },
-      { name: "Depth camera", kind: "sensor" },
-      { name: "Battery telemetry", kind: "sensor" },
-    ],
-    topics: [
-      { name: "/depth/image_raw", type: "sensor_msgs/Image", viewer: "image" },
-      { name: "/battery", type: "sensor_msgs/BatteryState", viewer: "readout" },
-      { name: "/cmd_vel", type: "geometry_msgs/Twist", viewer: "raw" },
-    ],
-  },
-};
+const API_BASE_URL = import.meta.env.VITE_HIVE_API_URL || "http://127.0.0.1:8787/api";
+const FLEET_STORAGE_KEY = "hive:fleet:manual-rc-v1";
 
-const seedRobots = [
-  robotFromPreset({
-    id: "aero-1",
-    name: "Aero One",
-    morphology: "quadcopter",
-    description: "Demo quadcopter for visual inspection and fleet command previews.",
-    repoUrl: "https://github.com/example/aero-one-ros2",
-    host: "192.168.1.42",
-    status: "connected",
-  }),
-  robotFromPreset({
-    id: "momo-2",
-    name: "MoMo",
-    morphology: "mobileManipulator",
-    description: "Mobile manipulator on an RC base with a wrist camera and gripper.",
-    repoUrl: "https://github.com/example/momo-ros2",
-    host: "192.168.1.51",
-    status: "offline",
-  }),
-  robotFromPreset({
-    id: "track-7",
-    name: "Track Seven",
-    morphology: "treadedCar",
-    description: "Tracked rover demo profile for rough terrain monitoring.",
-    repoUrl: "https://github.com/example/track-seven-ros2",
-    host: "192.168.1.77",
-    status: "offline",
-  }),
+const DRIVE_CONTROLS = [
+  { action: "forward", label: "Forward" },
+  { action: "left", label: "Left rotation" },
+  { action: "right", label: "Right rotation" },
+  { action: "backward", label: "Backward" },
+  { action: "stop", label: "Stop" },
 ];
 
-const topicSamples = {
-  image: "Simulated camera stream",
-  readout: "battery: 87% | signal: strong | latency: 24ms",
-  raw: "{ linear: { x: 0.0, y: 0.0 }, angular: { z: 0.0 } }",
+const GRIPPER_CONTROLS = [
+  { action: "gripper_open", label: "Open gripper" },
+  { action: "gripper_close", label: "Close gripper" },
+];
+
+const PRESET_ROBOTS = {
+  cameraRcCar: {
+    label: "Camera RC Car",
+    summary: "RC car with /cmd_vel control and a Realsense camera node.",
+    capabilities: [
+      { name: "Manual drive", kind: "/cmd_vel" },
+      { name: "Realsense camera", kind: "sensor" },
+    ],
+    topics: [
+      { name: "/cmd_vel", type: "geometry_msgs/msg/Twist", viewer: "raw" },
+      { name: "/camera/raw", type: "sensor_msgs/msg/Image", viewer: "raw" },
+    ],
+    controls: DRIVE_CONTROLS,
+  },
+  lidarRcCar: {
+    label: "LiDAR RC Car",
+    summary: "RC car with /cmd_vel control and an RP LiDAR node.",
+    capabilities: [
+      { name: "Manual drive", kind: "/cmd_vel" },
+      { name: "RP LiDAR", kind: "2D lidar" },
+    ],
+    topics: [
+      { name: "/cmd_vel", type: "geometry_msgs/msg/Twist", viewer: "raw" },
+      { name: "/scan", type: "sensor_msgs/msg/LaserScan", viewer: "raw" },
+    ],
+    controls: DRIVE_CONTROLS,
+  },
+  gripperRcCar: {
+    label: "Gripper RC Car",
+    summary: "RC car with /cmd_vel control and an open/close gripper.",
+    capabilities: [
+      { name: "Manual drive", kind: "/cmd_vel" },
+      { name: "Gripper", kind: "actuator" },
+    ],
+    topics: [
+      { name: "/cmd_vel", type: "geometry_msgs/msg/Twist", viewer: "raw" },
+      { name: "/gripper_command", type: "std_msgs/msg/String", viewer: "raw" },
+    ],
+    controls: [...DRIVE_CONTROLS, ...GRIPPER_CONTROLS],
+  },
 };
 
-function robotFromPreset({ id, name, morphology, description, repoUrl, host, status = "offline" }) {
-  const presetKey = MORPHOLOGIES[morphology] ? morphology : "quadcopter";
-  const preset = MORPHOLOGIES[presetKey];
+function robotFromPreset({
+  id,
+  name,
+  preset,
+  description,
+  host,
+  domainId,
+  status = "offline",
+  mode,
+  lastCommand,
+  lastError,
+}) {
+  const presetKey = PRESET_ROBOTS[preset] ? preset : "cameraRcCar";
+  const robotPreset = PRESET_ROBOTS[presetKey];
   return {
     id: id || makeId(),
-    name: name || "Unnamed robot",
-    morphology: presetKey,
-    description: description || preset.summary,
-    repoUrl: repoUrl || "",
-    host: host || "localhost",
+    name: name || robotPreset.label,
+    preset: presetKey,
+    description: description || robotPreset.summary,
+    host: host || "",
+    domainId: Number(domainId),
     status,
-    mode: status === "connected" ? "Ready" : "Idle",
-    capabilities: preset.capabilities,
-    topics: preset.topics,
+    mode: mode || (status === "connected" ? "Ready" : "Idle"),
+    capabilities: robotPreset.capabilities,
+    topics: robotPreset.topics,
+    controls: robotPreset.controls,
+    lastCommand: lastCommand || "",
+    lastError: lastError || "",
   };
+}
+
+function nextDomainFromSet(usedDomains) {
+  let domainId = 42;
+  while (usedDomains.has(domainId)) domainId += 1;
+  return domainId;
+}
+
+function nextDomainId(robots) {
+  const usedDomains = new Set(
+    robots.map((robot) => Number(robot.domainId)).filter((domainId) => Number.isInteger(domainId)),
+  );
+  return nextDomainFromSet(usedDomains);
 }
 
 function makeId() {
@@ -136,22 +108,48 @@ function makeId() {
 }
 
 function loadFleet() {
-  const saved = localStorage.getItem("hive:fleet");
-  if (!saved) return seedRobots;
+  const saved = localStorage.getItem(FLEET_STORAGE_KEY);
+  if (!saved) return [];
 
   try {
     const parsed = JSON.parse(saved);
-    if (!Array.isArray(parsed) || !parsed.length) return seedRobots;
+    if (!Array.isArray(parsed)) return [];
 
-    return parsed.map((robot) => ({
-      ...robotFromPreset(robot),
-      ...robot,
-      capabilities: Array.isArray(robot.capabilities) ? robot.capabilities : robotFromPreset(robot).capabilities,
-      topics: Array.isArray(robot.topics) ? robot.topics : robotFromPreset(robot).topics,
-    }));
+    const usedDomains = new Set();
+    return parsed.map((robot) => {
+      const presetRobot = robotFromPreset(robot);
+      const domainId = Number(robot.domainId);
+      const safeDomainId =
+        Number.isInteger(domainId) && domainId >= 0 && domainId <= 232 && !usedDomains.has(domainId)
+          ? domainId
+          : nextDomainFromSet(usedDomains);
+      usedDomains.add(safeDomainId);
+
+      return {
+        ...presetRobot,
+        ...robot,
+        domainId: safeDomainId,
+        capabilities: presetRobot.capabilities,
+        topics: presetRobot.topics,
+        controls: presetRobot.controls,
+      };
+    });
   } catch {
-    return seedRobots;
+    return [];
   }
+}
+
+async function postApi(path, payload) {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.ok === false) {
+    throw new Error(data.error || data.stderr || `Request failed with status ${response.status}`);
+  }
+  return data;
 }
 
 export default function App() {
@@ -169,7 +167,7 @@ export default function App() {
   const selectedRobot = robots.find((robot) => robot.id === selectedRobotId) || robots[0];
 
   useEffect(() => {
-    localStorage.setItem("hive:fleet", JSON.stringify(robots));
+    localStorage.setItem(FLEET_STORAGE_KEY, JSON.stringify(robots));
   }, [robots]);
 
   useEffect(() => {
@@ -177,7 +175,7 @@ export default function App() {
   }, [robots, selectedRobot]);
 
   function addRobot(formData) {
-    const robot = robotFromPreset(formData);
+    const robot = robotFromPreset({ ...formData, domainId: Number(formData.domainId) || nextDomainId(robots) });
     setRobots((current) => [...current, robot]);
     setSelectedRobotId(robot.id);
     setSelectedTopic(robot.topics[0]);
@@ -188,17 +186,35 @@ export default function App() {
     setRobots((current) => current.map((robot) => (robot.id === id ? { ...robot, ...patch } : robot)));
   }
 
-  function connectRobot(robot) {
+  async function connectRobot(robot) {
     updateRobot(robot.id, { status: "connecting", mode: "Connecting" });
 
-    window.setTimeout(() => {
-      updateRobot(robot.id, { status: "connected", mode: "Ready" });
+    try {
+      await postApi("/robots/connect", { ip: robot.host, domain_id: robot.domainId });
+      updateRobot(robot.id, { status: "connected", mode: "Ready", lastError: "" });
       setSelectedTopic(robot.topics[0]);
-    }, 900);
+    } catch (error) {
+      updateRobot(robot.id, { status: "failed", mode: "Connection failed", lastError: error.message });
+    }
   }
 
   function disconnectRobot(robot) {
     updateRobot(robot.id, { status: "offline", mode: "Idle" });
+  }
+
+  async function sendRobotControl(robot, action) {
+    updateRobot(robot.id, { mode: `Sending ${action.replaceAll("_", " ")}`, lastError: "" });
+
+    try {
+      await postApi("/robots/control", { ip: robot.host, domain_id: robot.domainId, action });
+      updateRobot(robot.id, {
+        mode: action === "stop" ? "Stopped" : action.replaceAll("_", " "),
+        lastCommand: action,
+        lastError: "",
+      });
+    } catch (error) {
+      updateRobot(robot.id, { mode: "Command failed", lastError: error.message });
+    }
   }
 
   function sendCommand(text) {
@@ -283,6 +299,7 @@ export default function App() {
             onSelectTopic={setSelectedTopic}
             onConnect={() => connectRobot(selectedRobot)}
             onDisconnect={() => disconnectRobot(selectedRobot)}
+            onControl={(action) => sendRobotControl(selectedRobot, action)}
           />
         )}
 
@@ -314,10 +331,11 @@ function FleetView({ robots, onAddRobot, onSelect }) {
             <button className="robot-card" key={robot.id} onClick={() => onSelect(robot)}>
               <div className="card-header">
                 <span className={`status-pill ${robot.status}`}>{robot.status}</span>
-                <span>{MORPHOLOGIES[robot.morphology].label}</span>
+                <span>{PRESET_ROBOTS[robot.preset].label}</span>
               </div>
               <h2>{robot.name}</h2>
               <p>{robot.description}</p>
+              <small>ROS domain {robot.domainId}</small>
               <div className="capability-row">
                 {robot.capabilities.slice(0, 3).map((capability) => (
                   <span key={capability.name}>{capability.name}</span>
@@ -325,12 +343,19 @@ function FleetView({ robots, onAddRobot, onSelect }) {
               </div>
             </button>
           ))}
+          {!robots.length && (
+            <div className="empty-fleet">
+              <strong>No robots yet</strong>
+              <span>Add one of the RC car presets to start manual control.</span>
+            </div>
+          )}
         </div>
       </section>
 
       {isAddingRobot && (
         <div className="modal-backdrop" onMouseDown={() => setIsAddingRobot(false)}>
           <AddRobotForm
+            suggestedDomainId={nextDomainId(robots)}
             onAddRobot={(robot) => {
               onAddRobot(robot);
               setIsAddingRobot(false);
@@ -343,16 +368,16 @@ function FleetView({ robots, onAddRobot, onSelect }) {
   );
 }
 
-function AddRobotForm({ onAddRobot, onClose }) {
+function AddRobotForm({ onAddRobot, onClose, suggestedDomainId }) {
   const [form, setForm] = useState({
     name: "",
-    morphology: "quadcopter",
+    preset: "cameraRcCar",
     description: "",
-    repoUrl: "",
     host: "",
+    domainId: suggestedDomainId,
   });
 
-  const preset = MORPHOLOGIES[form.morphology];
+  const preset = PRESET_ROBOTS[form.preset];
 
   function updateField(event) {
     const { name, value } = event.target;
@@ -365,10 +390,10 @@ function AddRobotForm({ onAddRobot, onClose }) {
       ...form,
       name: form.name.trim(),
       description: form.description.trim() || preset.summary,
-      repoUrl: form.repoUrl.trim(),
-      host: form.host.trim() || "localhost",
+      host: form.host.trim(),
+      domainId: Number(form.domainId),
     });
-    setForm({ name: "", morphology: "quadcopter", description: "", repoUrl: "", host: "" });
+    setForm({ name: "", preset: "cameraRcCar", description: "", host: "", domainId: suggestedDomainId });
   }
 
   return (
@@ -389,9 +414,9 @@ function AddRobotForm({ onAddRobot, onClose }) {
           <input name="name" value={form.name} onChange={updateField} placeholder="Scout 3" required />
         </label>
         <label>
-          Morphology
-          <select name="morphology" value={form.morphology} onChange={updateField}>
-            {Object.entries(MORPHOLOGIES).map(([key, value]) => (
+          Preset robot
+          <select name="preset" value={form.preset} onChange={updateField}>
+            {Object.entries(PRESET_ROBOTS).map(([key, value]) => (
               <option key={key} value={key}>
                 {value.label}
               </option>
@@ -399,12 +424,20 @@ function AddRobotForm({ onAddRobot, onClose }) {
           </select>
         </label>
         <label>
-          GitHub ROS 2 workspace
-          <input name="repoUrl" value={form.repoUrl} onChange={updateField} placeholder="https://github.com/..." />
+          Robot IP address
+          <input name="host" value={form.host} onChange={updateField} placeholder="192.168.1.20" required />
         </label>
         <label>
-          Host
-          <input name="host" value={form.host} onChange={updateField} placeholder="192.168.1.20 or robot.local" />
+          ROS domain ID
+          <input
+            min="0"
+            max="232"
+            name="domainId"
+            type="number"
+            value={form.domainId}
+            onChange={updateField}
+            required
+          />
         </label>
         <label className="wide">
           Description
@@ -423,12 +456,12 @@ function AddRobotForm({ onAddRobot, onClose }) {
   );
 }
 
-function RobotView({ robot, selectedTopic, onSelectTopic, onConnect, onDisconnect }) {
+function RobotView({ robot, selectedTopic, onSelectTopic, onConnect, onDisconnect, onControl }) {
   return (
     <section className="stack robot-page">
       <header className="robot-hero">
         <div>
-          <p className="eyebrow">{MORPHOLOGIES[robot.morphology].label}</p>
+          <p className="eyebrow">{PRESET_ROBOTS[robot.preset].label}</p>
           <h1>{robot.name}</h1>
           <p>{robot.description}</p>
         </div>
@@ -436,6 +469,7 @@ function RobotView({ robot, selectedTopic, onSelectTopic, onConnect, onDisconnec
           <span className={`status-pill ${robot.status}`}>{robot.status}</span>
           <strong>{robot.mode}</strong>
           <small>{robot.host}</small>
+          <small>ROS domain {robot.domainId}</small>
           {robot.status === "connected" ? (
             <button onClick={onDisconnect}>Disconnect</button>
           ) : (
@@ -443,6 +477,7 @@ function RobotView({ robot, selectedTopic, onSelectTopic, onConnect, onDisconnec
               {robot.status === "connecting" ? "Connecting..." : "Connect"}
             </button>
           )}
+          {robot.lastError && <small className="error-text">{robot.lastError}</small>}
         </div>
       </header>
 
@@ -453,13 +488,9 @@ function RobotView({ robot, selectedTopic, onSelectTopic, onConnect, onDisconnec
               <p className="eyebrow">Profile</p>
               <h2>Capabilities</h2>
             </div>
-            {robot.repoUrl ? (
-              <a href={robot.repoUrl} target="_blank" rel="noreferrer">
-                View repo
-              </a>
-            ) : (
-              <span>No repo linked</span>
-            )}
+            <span>
+              {robot.host} · domain {robot.domainId}
+            </span>
           </div>
           <div className="capability-list">
             {robot.capabilities.map((capability) => (
@@ -474,13 +505,20 @@ function RobotView({ robot, selectedTopic, onSelectTopic, onConnect, onDisconnec
         <section className="panel topics-panel">
           <div className="section-title">
             <div>
-              <p className="eyebrow">Live ROS 2</p>
+              <p className="eyebrow">Manual control</p>
+              <h2>Drive</h2>
+            </div>
+            <span>{robot.status === "connected" ? "connected" : "connect first"}</span>
+          </div>
+          <ManualControlPanel robot={robot} onControl={onControl} />
+          <div className="section-title compact-title">
+            <div>
+              <p className="eyebrow">ROS 2</p>
               <h2>Topics</h2>
             </div>
-            <span>{robot.status === "connected" ? "subscribed" : "offline preview"}</span>
           </div>
-          <div className="topic-layout">
-            <div className="topic-list">
+          <div className="topic-list">
+            <div className="topic-list-inner">
               {robot.topics.map((topic) => (
                 <button
                   className={selectedTopic?.name === topic.name ? "active" : ""}
@@ -492,7 +530,6 @@ function RobotView({ robot, selectedTopic, onSelectTopic, onConnect, onDisconnec
                 </button>
               ))}
             </div>
-            <TopicViewer topic={selectedTopic || robot.topics[0]} status={robot.status} />
           </div>
         </section>
       </div>
@@ -500,26 +537,46 @@ function RobotView({ robot, selectedTopic, onSelectTopic, onConnect, onDisconnec
   );
 }
 
-function TopicViewer({ topic, status }) {
-  if (!topic) return null;
-
-  if (topic.viewer === "image") {
-    return (
-      <div className="viewer camera-view">
-        <div className="camera-frame">
-          <span>{status === "connected" ? "Live" : "Preview"}</span>
-          <strong>{topicSamples.image}</strong>
-        </div>
-        <small>{topic.name}</small>
-      </div>
-    );
-  }
+function ManualControlPanel({ robot, onControl }) {
+  const driveControls = robot.controls.filter((control) => !control.action.startsWith("gripper"));
+  const gripperControls = robot.controls.filter((control) => control.action.startsWith("gripper"));
+  const isDisabled = robot.status !== "connected";
 
   return (
-    <div className="viewer">
-      <p className="eyebrow">{topic.viewer === "readout" ? "Telemetry" : "Message"}</p>
-      <h3>{topic.name}</h3>
-      <pre>{topicSamples[topic.viewer]}</pre>
+    <div className="manual-control">
+      <div className="control-grid">
+        {driveControls.map((control) => (
+          <button
+            className={control.action === "stop" ? "control-button stop-button" : "control-button"}
+            disabled={isDisabled}
+            key={control.action}
+            onClick={() => onControl(control.action)}
+          >
+            {control.label}
+          </button>
+        ))}
+      </div>
+
+      {gripperControls.length > 0 && (
+        <div className="gripper-controls">
+          {gripperControls.map((control) => (
+            <button
+              className="control-button"
+              disabled={isDisabled}
+              key={control.action}
+              onClick={() => onControl(control.action)}
+            >
+              {control.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <small>
+        {robot.lastCommand
+          ? `Last command: ${robot.lastCommand.replaceAll("_", " ")}`
+          : "Connect before sending manual commands."}
+      </small>
     </div>
   );
 }

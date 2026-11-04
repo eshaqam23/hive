@@ -22,6 +22,7 @@ class ErrorBoundary extends React.Component {
           <button
             onClick={() => {
               localStorage.removeItem("hive:fleet");
+              localStorage.removeItem("hive:fleet:manual-rc-v1");
               window.location.reload();
             }}
           >
