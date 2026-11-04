@@ -543,7 +543,13 @@ textarea {
   gap: 12px;
 }
 
-.control-grid,
+.drive-pad {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: repeat(3, minmax(68px, auto));
+}
+
 .gripper-controls {
   display: grid;
   gap: 10px;
@@ -560,6 +566,44 @@ textarea {
   padding: 12px;
 }
 
+.drive-button {
+  align-items: center;
+  display: grid;
+  gap: 4px;
+  justify-items: center;
+  min-height: 68px;
+}
+
+.drive-button.forward {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.drive-button.left {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.drive-button.stop {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+.drive-button.right {
+  grid-column: 3;
+  grid-row: 2;
+}
+
+.drive-button.backward {
+  grid-column: 2;
+  grid-row: 3;
+}
+
+.control-symbol {
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
 .control-button:hover:not(:disabled) {
   border-color: #f5b301;
   transform: translateY(-1px);
@@ -573,7 +617,9 @@ textarea {
 .stop-button {
   background: #2b2418;
   color: #fffaf0;
-  grid-column: 1 / -1;
+  border-color: #2b2418;
+  border-radius: 999px;
+  min-height: 56px;
 }
 
 .error-text {

@@ -80,11 +80,11 @@ npm run build
 
 ## Current Scope
 
-Hive now has a backend route for ROS 2 manual control commands. It assumes the operator laptop and robot are on the same network and that ROS Wi-Fi/static peer setup is valid for the robot IP entered during onboarding.
+Hive now has backend routes for ROS 2 manual control commands. It assumes the operator laptop and robot are on the same network and that ROS Wi-Fi/static peer setup is valid for the robot IP entered during onboarding.
 
 Each robot profile stores its own ROS domain ID. Hive auto-assigns the next unused domain starting at `42`, and the user can edit that value while onboarding. This lets multiple robots use the same topic names, such as `/cmd_vel`, without sharing one ROS domain.
 
-For each ROS command, the backend runs:
+When a robot connects, the backend starts a persistent per-robot ROS worker with:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
@@ -94,15 +94,15 @@ export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
 export ROS_STATIC_PEERS='<USER_DEFINED_ROBOT_IP>'
 ```
 
-Then it publishes the requested command to `/cmd_vel`.
+That worker creates long-lived `rclpy` publishers for `/cmd_vel` and `/gripper_command`. Manual drive buttons send lightweight HTTP requests to the worker instead of spawning `ros2 topic pub` for every button press.
 
 ## Manual Control Commands
 
-- Forward: `ros2 topic pub --once -w 1 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.5}, angular: {z: 0.0}}"`
-- Backward: `ros2 topic pub --once -w 1 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: -0.5}, angular: {z: 0.0}}"`
-- Left rotation: `ros2 topic pub --once -w 1 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0}, angular: {z: 1.0}}"`
-- Right rotation: `ros2 topic pub --once -w 1 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0}, angular: {z: -1.0}}"`
-- Stop: `ros2 topic pub --once -w 1 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0}, angular: {z: 0.0}}"`
+- Forward: `Twist(linear.x=0.5, angular.z=0.0)`
+- Backward: `Twist(linear.x=-0.5, angular.z=0.0)`
+- Left rotation: `Twist(linear.x=0.0, angular.z=1.0)`
+- Right rotation: `Twist(linear.x=0.0, angular.z=-1.0)`
+- Stop: `Twist(linear.x=0.0, angular.z=0.0)`
 
 The gripper commands currently publish string messages to `/gripper_command`. Update `backend/server.py` once the gripper robot's final ROS interface is known.
 

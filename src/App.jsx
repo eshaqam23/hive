@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 const API_BASE_URL = import.meta.env.VITE_HIVE_API_URL || "http://127.0.0.1:8787/api";
 const FLEET_STORAGE_KEY = "hive:fleet:manual-rc-v1";
@@ -198,7 +198,12 @@ export default function App() {
     }
   }
 
-  function disconnectRobot(robot) {
+  async function disconnectRobot(robot) {
+    try {
+      await postApi("/robots/disconnect", { ip: robot.host, domain_id: robot.domainId });
+    } catch {
+      // The UI should still let the operator drop a stale local connection state.
+    }
     updateRobot(robot.id, { status: "offline", mode: "Idle" });
   }
 
@@ -538,23 +543,68 @@ function RobotView({ robot, selectedTopic, onSelectTopic, onConnect, onDisconnec
 }
 
 function ManualControlPanel({ robot, onControl }) {
-  const driveControls = robot.controls.filter((control) => !control.action.startsWith("gripper"));
+  const repeatTimer = useRef(null);
   const gripperControls = robot.controls.filter((control) => control.action.startsWith("gripper"));
   const isDisabled = robot.status !== "connected";
 
+  function clearRepeat() {
+    if (repeatTimer.current) {
+      window.clearInterval(repeatTimer.current);
+      repeatTimer.current = null;
+    }
+  }
+
+  function startDrive(action) {
+    if (isDisabled) return;
+    clearRepeat();
+    onControl(action);
+    if (action !== "stop") {
+      repeatTimer.current = window.setInterval(() => onControl(action), 100);
+    }
+  }
+
+  function stopDrive() {
+    if (isDisabled) return;
+    clearRepeat();
+    onControl("stop");
+  }
+
+  function sendOneShot(action) {
+    if (isDisabled) return;
+    clearRepeat();
+    onControl(action);
+  }
+
+  useEffect(() => clearRepeat, []);
+
+  function driveButton(action, label, symbol) {
+    const isStop = action === "stop";
+
+    return (
+      <button
+        className={`control-button drive-button ${isStop ? "stop-button" : ""} ${action}`}
+        disabled={isDisabled}
+        key={action}
+        onClick={() => isStop && sendOneShot("stop")}
+        onPointerCancel={!isStop ? stopDrive : undefined}
+        onPointerDown={() => (isStop ? sendOneShot("stop") : startDrive(action))}
+        onPointerLeave={!isStop ? stopDrive : undefined}
+        onPointerUp={!isStop ? stopDrive : undefined}
+      >
+        <span className="control-symbol">{symbol}</span>
+        <span>{label}</span>
+      </button>
+    );
+  }
+
   return (
     <div className="manual-control">
-      <div className="control-grid">
-        {driveControls.map((control) => (
-          <button
-            className={control.action === "stop" ? "control-button stop-button" : "control-button"}
-            disabled={isDisabled}
-            key={control.action}
-            onClick={() => onControl(control.action)}
-          >
-            {control.label}
-          </button>
-        ))}
+      <div className="drive-pad" aria-label="Manual drive controls">
+        {driveButton("forward", "Forward", "↑")}
+        {driveButton("left", "Rotate left", "↺")}
+        {driveButton("stop", "Stop", "■")}
+        {driveButton("right", "Rotate right", "↻")}
+        {driveButton("backward", "Backward", "↓")}
       </div>
 
       {gripperControls.length > 0 && (
@@ -564,7 +614,7 @@ function ManualControlPanel({ robot, onControl }) {
               className="control-button"
               disabled={isDisabled}
               key={control.action}
-              onClick={() => onControl(control.action)}
+              onClick={() => sendOneShot(control.action)}
             >
               {control.label}
             </button>

@@ -6,35 +6,36 @@ expects ROS 2 Jazzy to be installed at /opt/ros/jazzy.
 """
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import argparse
 import json
 import os
 import re
-import shlex
+import select
+import signal
 import subprocess
+import sys
+import threading
+import time
 from typing import Any
 
 
 HOST = os.environ.get("HIVE_BACKEND_HOST", "127.0.0.1")
 PORT = int(os.environ.get("HIVE_BACKEND_PORT", "8787"))
-ROS_SETUP = os.environ.get("HIVE_ROS_SETUP", "/opt/ros/jazzy/setup.bash")
 
 IP_OR_HOST_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 
-TWIST_COMMANDS = {
-    "forward": 'ros2 topic pub --once -w 1 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.5}, angular: {z: 0.0}}"',
-    "backward": 'ros2 topic pub --once -w 1 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: -0.5}, angular: {z: 0.0}}"',
-    "left": 'ros2 topic pub --once -w 1 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0}, angular: {z: 1.0}}"',
-    "right": 'ros2 topic pub --once -w 1 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0}, angular: {z: -1.0}}"',
-    "stop": 'ros2 topic pub --once -w 1 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0}, angular: {z: 0.0}}"',
+TWIST_VALUES = {
+    "forward": {"linear_x": 0.5, "angular_z": 0.0},
+    "backward": {"linear_x": -0.5, "angular_z": 0.0},
+    "left": {"linear_x": 0.0, "angular_z": 1.0},
+    "right": {"linear_x": 0.0, "angular_z": -1.0},
+    "stop": {"linear_x": 0.0, "angular_z": 0.0},
 }
 
-# Update these once the gripper robot's ROS interface is finalized.
-GRIPPER_COMMANDS = {
-    "gripper_open": 'ros2 topic pub --once -w 1 /gripper_command std_msgs/msg/String "{data: open}"',
-    "gripper_close": 'ros2 topic pub --once -w 1 /gripper_command std_msgs/msg/String "{data: close}"',
-}
-
-CONTROL_COMMANDS = {**TWIST_COMMANDS, **GRIPPER_COMMANDS}
+GRIPPER_VALUES = {"gripper_open": "open", "gripper_close": "close"}
+CONTROL_ACTIONS = {*TWIST_VALUES.keys(), *GRIPPER_VALUES.keys()}
+ROBOT_WORKERS: dict[tuple[str, int], "RobotWorker"] = {}
+ROBOT_WORKERS_LOCK = threading.Lock()
 
 
 def validate_peer(peer: str) -> str:
@@ -55,40 +56,122 @@ def validate_domain_id(domain_id: Any) -> int:
     return parsed
 
 
-def ros_environment_command(peer: str, domain_id: int, ros_command: str) -> str:
-    quoted_peer = shlex.quote(peer)
-    quoted_setup = shlex.quote(ROS_SETUP)
-    return " && ".join(
-        [
-            f"source {quoted_setup}",
-            f"export ROS_DOMAIN_ID={domain_id}",
-            "unset ROS_LOCALHOST_ONLY",
-            "export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST",
-            f"export ROS_STATIC_PEERS={quoted_peer}",
-            ros_command,
-        ]
-    )
+def worker_key(peer: str, domain_id: int) -> tuple[str, int]:
+    return (validate_peer(peer), validate_domain_id(domain_id))
 
 
-def run_ros_command(peer: str, domain_id: int, ros_command: str, timeout_seconds: int = 8) -> dict[str, Any]:
-    peer = validate_peer(peer)
-    domain_id = validate_domain_id(domain_id)
-    command = ros_environment_command(peer, domain_id, ros_command)
-    completed = subprocess.run(
-        ["bash", "-lc", command],
-        capture_output=True,
-        text=True,
-        timeout=timeout_seconds,
-        check=False,
-    )
-    return {
-        "command": command,
-        "returncode": completed.returncode,
-        "stdout": completed.stdout.strip(),
-        "stderr": completed.stderr.strip(),
-        "ok": completed.returncode == 0,
-        "domain_id": domain_id,
-    }
+class RobotWorker:
+    def __init__(self, peer: str, domain_id: int) -> None:
+        self.peer = validate_peer(peer)
+        self.domain_id = validate_domain_id(domain_id)
+        self.process: subprocess.Popen[str] | None = None
+
+    def start(self) -> None:
+        if self.is_running():
+            return
+
+        env = os.environ.copy()
+        env["ROS_DOMAIN_ID"] = str(self.domain_id)
+        env.pop("ROS_LOCALHOST_ONLY", None)
+        env["ROS_AUTOMATIC_DISCOVERY_RANGE"] = "LOCALHOST"
+        env["ROS_STATIC_PEERS"] = self.peer
+
+        self.process = subprocess.Popen(
+            [
+                sys.executable,
+                os.path.abspath(__file__),
+                "--robot-worker",
+                "--peer",
+                self.peer,
+                "--domain-id",
+                str(self.domain_id),
+            ],
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            text=True,
+            bufsize=1,
+        )
+        self.wait_until_ready()
+
+    def wait_until_ready(self, timeout_seconds: float = 10.0) -> None:
+        if not self.process or not self.process.stdout:
+            raise RuntimeError("Robot worker failed to start.")
+
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                raise RuntimeError(f"Robot worker exited with code {self.process.returncode}.")
+
+            readable, _, _ = select.select([self.process.stdout], [], [], 0.1)
+            if not readable:
+                continue
+
+            line = self.process.stdout.readline().strip()
+            if not line:
+                continue
+
+            payload = json.loads(line)
+            if payload.get("ok"):
+                return
+            raise RuntimeError(payload.get("error", "Robot worker failed to initialize."))
+
+        self.stop()
+        raise RuntimeError("Robot worker timed out while starting.")
+
+    def is_running(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def send_action(self, action: str) -> None:
+        if action not in CONTROL_ACTIONS:
+            raise ValueError(f"Unsupported control action: {action}")
+        if not self.is_running() or not self.process or not self.process.stdin:
+            raise RuntimeError("Robot worker is not connected.")
+
+        self.process.stdin.write(json.dumps({"action": action}) + "\n")
+        self.process.stdin.flush()
+
+    def stop(self) -> None:
+        if not self.process:
+            return
+
+        if self.is_running():
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+        self.process = None
+
+
+def get_or_start_worker(peer: str, domain_id: int) -> RobotWorker:
+    key = worker_key(peer, domain_id)
+    with ROBOT_WORKERS_LOCK:
+        worker = ROBOT_WORKERS.get(key)
+        if worker is None:
+            worker = RobotWorker(peer=key[0], domain_id=key[1])
+            ROBOT_WORKERS[key] = worker
+        worker.start()
+        return worker
+
+
+def stop_worker(peer: str, domain_id: int) -> bool:
+    key = worker_key(peer, domain_id)
+    with ROBOT_WORKERS_LOCK:
+        worker = ROBOT_WORKERS.pop(key, None)
+    if not worker:
+        return False
+    worker.stop()
+    return True
+
+
+def stop_all_workers() -> None:
+    with ROBOT_WORKERS_LOCK:
+        workers = list(ROBOT_WORKERS.values())
+        ROBOT_WORKERS.clear()
+    for worker in workers:
+        worker.stop()
 
 
 class HiveRequestHandler(BaseHTTPRequestHandler):
@@ -115,6 +198,8 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
                 self.handle_connect(body)
             elif self.path == "/api/robots/control":
                 self.handle_control(body)
+            elif self.path == "/api/robots/disconnect":
+                self.handle_disconnect(body)
             else:
                 self.write_json(404, {"ok": False, "error": "Not found"})
         except ValueError as error:
@@ -127,20 +212,25 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
     def handle_connect(self, body: dict[str, Any]) -> None:
         peer = validate_peer(str(body.get("ip", "")))
         domain_id = validate_domain_id(body.get("domain_id"))
-        result = run_ros_command(peer, domain_id, "ros2 node list", timeout_seconds=6)
-        status = 200 if result["ok"] else 502
-        self.write_json(status, result)
+        get_or_start_worker(peer, domain_id)
+        self.write_json(200, {"ok": True, "ip": peer, "domain_id": domain_id, "mode": "persistent_worker"})
 
     def handle_control(self, body: dict[str, Any]) -> None:
         peer = validate_peer(str(body.get("ip", "")))
         domain_id = validate_domain_id(body.get("domain_id"))
         action = str(body.get("action", "")).strip()
-        if action not in CONTROL_COMMANDS:
+        if action not in CONTROL_ACTIONS:
             raise ValueError(f"Unsupported control action: {action}")
 
-        result = run_ros_command(peer, domain_id, CONTROL_COMMANDS[action])
-        status = 200 if result["ok"] else 502
-        self.write_json(status, {**result, "action": action})
+        worker = get_or_start_worker(peer, domain_id)
+        worker.send_action(action)
+        self.write_json(200, {"ok": True, "ip": peer, "domain_id": domain_id, "action": action})
+
+    def handle_disconnect(self, body: dict[str, Any]) -> None:
+        peer = validate_peer(str(body.get("ip", "")))
+        domain_id = validate_domain_id(body.get("domain_id"))
+        stopped = stop_worker(peer, domain_id)
+        self.write_json(200, {"ok": True, "ip": peer, "domain_id": domain_id, "stopped": stopped})
 
     def read_json(self) -> dict[str, Any]:
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -162,10 +252,79 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    signal.signal(signal.SIGINT, lambda _signum, _frame: (stop_all_workers(), sys.exit(0)))
+    signal.signal(signal.SIGTERM, lambda _signum, _frame: (stop_all_workers(), sys.exit(0)))
     server = ThreadingHTTPServer((HOST, PORT), HiveRequestHandler)
     print(f"Hive backend listening on http://{HOST}:{PORT}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        stop_all_workers()
+
+
+def publish_twist(publisher: Any, twist_type: Any, action: str) -> None:
+    values = TWIST_VALUES[action]
+    message = twist_type()
+    message.linear.x = values["linear_x"]
+    message.angular.z = values["angular_z"]
+    publisher.publish(message)
+
+
+def publish_gripper(publisher: Any, string_type: Any, action: str) -> None:
+    message = string_type()
+    message.data = GRIPPER_VALUES[action]
+    publisher.publish(message)
+
+
+def run_robot_worker(peer: str, domain_id: int) -> None:
+    peer = validate_peer(peer)
+    domain_id = validate_domain_id(domain_id)
+
+    os.environ["ROS_DOMAIN_ID"] = str(domain_id)
+    os.environ.pop("ROS_LOCALHOST_ONLY", None)
+    os.environ["ROS_AUTOMATIC_DISCOVERY_RANGE"] = "LOCALHOST"
+    os.environ["ROS_STATIC_PEERS"] = peer
+
+    try:
+        import rclpy
+        from geometry_msgs.msg import Twist
+        from std_msgs.msg import String
+
+        rclpy.init(args=None)
+        node = rclpy.create_node(f"hive_controller_domain_{domain_id}")
+        cmd_vel_publisher = node.create_publisher(Twist, "/cmd_vel", 10)
+        gripper_publisher = node.create_publisher(String, "/gripper_command", 10)
+
+        print(json.dumps({"ok": True, "domain_id": domain_id, "ip": peer}), flush=True)
+
+        for line in sys.stdin:
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            action = str(payload.get("action", "")).strip()
+            if action in TWIST_VALUES:
+                publish_twist(cmd_vel_publisher, Twist, action)
+            elif action in GRIPPER_VALUES:
+                publish_gripper(gripper_publisher, String, action)
+            else:
+                print(json.dumps({"ok": False, "error": f"Unsupported action: {action}"}), flush=True)
+            rclpy.spin_once(node, timeout_sec=0.0)
+
+        node.destroy_node()
+        rclpy.shutdown()
+    except Exception as error:  # noqa: BLE001 - worker reports initialization failures as JSON.
+        print(json.dumps({"ok": False, "error": str(error)}), flush=True)
+        raise
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Hive backend")
+    parser.add_argument("--robot-worker", action="store_true", help="Run as a persistent per-robot ROS worker")
+    parser.add_argument("--peer", default="", help="Robot IP address or hostname")
+    parser.add_argument("--domain-id", type=int, default=42, help="ROS domain ID for this worker")
+    args = parser.parse_args()
+
+    if args.robot_worker:
+        run_robot_worker(args.peer, args.domain_id)
+    else:
+        main()

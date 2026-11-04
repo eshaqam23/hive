@@ -11,7 +11,7 @@
     "hive": "./scripts/hive.mjs"
   },
   "scripts": {
-    "backend": "python3 backend/server.py",
+    "backend": "bash -lc 'source ${HIVE_ROS_SETUP:-/opt/ros/jazzy/setup.bash} && python3 backend/server.py'",
     "dev": "vite --host 127.0.0.1",
     "frontend": "vite --host 127.0.0.1",
     "hive": "node scripts/hive.mjs",
