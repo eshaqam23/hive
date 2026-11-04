@@ -294,9 +294,9 @@ small {
 .robot-card {
   color: inherit;
   display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto auto 1fr auto auto;
   gap: 14px;
-  height: 230px;
+  height: 250px;
   overflow: hidden;
   padding: 22px;
   text-align: left;
@@ -308,8 +308,7 @@ small {
 }
 
 .robot-card h2,
-.panel h2,
-.viewer h3 {
+.panel h2 {
   margin: 0;
 }
 
@@ -358,6 +357,22 @@ small {
 .chip {
   background: #fff1c2;
   color: #735000;
+}
+
+.empty-fleet {
+  align-items: center;
+  border: 1px dashed #f0dca5;
+  border-radius: 18px;
+  color: #7c6f58;
+  display: grid;
+  min-height: 230px;
+  place-items: center;
+  text-align: center;
+}
+
+.empty-fleet strong,
+.empty-fleet span {
+  display: block;
 }
 
 .panel {
@@ -478,6 +493,11 @@ textarea {
   overflow: hidden;
 }
 
+.topics-panel {
+  gap: 16px;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+}
+
 .capability-list {
   display: grid;
   gap: 12px;
@@ -502,22 +522,62 @@ textarea {
   text-transform: capitalize;
 }
 
-.topic-layout {
-  display: grid;
-  gap: 16px;
-  grid-template-columns: 280px 1fr;
-  margin-top: 20px;
-  min-height: 0;
-  overflow: hidden;
-}
-
 .topic-list {
-  display: grid;
-  gap: 8px;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
   padding-right: 4px;
+}
+
+.topic-list-inner {
+  display: grid;
+  gap: 8px;
+}
+
+.compact-title {
+  align-items: end;
+}
+
+.manual-control {
+  display: grid;
+  gap: 12px;
+}
+
+.control-grid,
+.gripper-controls {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.control-button {
+  background: #fff7e6;
+  border: 1px solid #f0dca5;
+  border-radius: 16px;
+  color: #2b2418;
+  font-weight: 800;
+  min-height: 54px;
+  padding: 12px;
+}
+
+.control-button:hover:not(:disabled) {
+  border-color: #f5b301;
+  transform: translateY(-1px);
+}
+
+.control-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.stop-button {
+  background: #2b2418;
+  color: #fffaf0;
+  grid-column: 1 / -1;
+}
+
+.error-text {
+  color: #991b1b;
 }
 
 .topic-list button {
@@ -679,8 +739,7 @@ textarea {
     max-height: 42vh;
   }
 
-  .two-column,
-  .topic-layout {
+  .two-column {
     grid-template-columns: 1fr;
   }
 
