@@ -3,6 +3,10 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
   "bin": {
     "hive": "./scripts/hive.mjs"
   },
@@ -15,8 +19,7 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "^5.0.4",
-    "vite": "^7.1.9",
+    "vite": "^6.3.6",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },

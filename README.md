@@ -32,10 +32,10 @@ The current version has a React front end and a small Python backend. The first 
 
 - Ubuntu 24.04
 - ROS 2 Jazzy installed at `/opt/ros/jazzy`
-- Node.js and npm
+- Node.js 18+ and npm 9+
 - Python 3
 
-This project was built and tested with Node `v24.18.0` and npm `11.16.0`.
+The frontend uses Vite 6 so it can run on Ubuntu 24.04 systems that have Node 18 installed.
 
 ## Install
 
