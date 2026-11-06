@@ -1,0 +1,28 @@
+{
+  "name": "hive",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "hive": "./scripts/hive.mjs"
+  },
+  "scripts": {
+    "backend": "python3 backend/server.py",
+    "dev": "vite --host 127.0.0.1",
+    "frontend": "vite --host 127.0.0.1",
+    "hive": "node scripts/hive.mjs",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@react-three/drei": "^10.7.9",
+    "@react-three/fiber": "^9.8.2",
+    "@vitejs/plugin-react": "^5.0.4",
+    "@xyflow/react": "^12.12.1",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "three": "^0.187.0",
+    "vite": "^7.1.9",
+    "zustand": "^5.0.16"
+  }
+}

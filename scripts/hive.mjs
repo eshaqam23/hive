@@ -2,7 +2,7 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const viteBin = fileURLToPath(new URL("../node_modules/vite/bin/vite.js", import.meta.url));
+const viteBin = fileURLToPath(new URL("../frontend/node_modules/vite/bin/vite.js", import.meta.url));
 const backendScript = fileURLToPath(new URL("../backend/server.py", import.meta.url));
 
 const backend = spawn("python3", [backendScript], {
@@ -11,6 +11,7 @@ const backend = spawn("python3", [backendScript], {
 });
 
 const frontend = spawn(process.execPath, [viteBin, "--host", "127.0.0.1", "--open"], {
+  cwd: fileURLToPath(new URL("../frontend", import.meta.url)),
   stdio: "inherit",
   shell: false,
 });

@@ -108,7 +108,12 @@ The gripper commands currently publish string messages to `/gripper_command`. Up
 
 ## Project Structure
 
-- `src/`: React frontend
+- `frontend/`: React + Vite app (its own `package.json`; run `npm run install:all` once from the root)
+  - `frontend/src/pipeline/`: the single Hive page: React Flow board, Three.js stage, Add Robot dialog, command bar
 - `backend/`: Python backend for local ROS 2 command execution
 - `scripts/hive.mjs`: combined launcher for backend and frontend
+
+Hive is now one pipeline page. Add robots with **+ Robot** (name, preset, IP, ROS domain), press **Connect** on the robot node, then drive it with Command nodes or the command bar. Robots without a connection stay simulation-only in the 3D stage.
+
+Developed by Rokesh & Tommy.
 
