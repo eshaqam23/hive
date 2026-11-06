@@ -28,10 +28,9 @@ TWIST_COMMANDS = {
     "stop": 'ros2 topic pub --once -w 1 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0}, angular: {z: 0.0}}"',
 }
 
-# Update these once the gripper robot's ROS interface is finalized.
 GRIPPER_COMMANDS = {
-    "gripper_open": 'ros2 topic pub --once -w 1 /gripper_command std_msgs/msg/String "{data: open}"',
-    "gripper_close": 'ros2 topic pub --once -w 1 /gripper_command std_msgs/msg/String "{data: close}"',
+    "gripper_open": 'ros2 topic pub --once -w 1 /gripper_open std_msgs/msg/Bool "{data: true}"',
+    "gripper_close": 'ros2 topic pub --once -w 1 /gripper_open std_msgs/msg/Bool "{data: false}"',
 }
 
 CONTROL_COMMANDS = {**TWIST_COMMANDS, **GRIPPER_COMMANDS}
