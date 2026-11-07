@@ -194,6 +194,15 @@
   background: transparent;
 }
 
+.hexagon-background {
+  height: 100%;
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  width: 100%;
+  z-index: -1;
+}
+
 .react-flow__handle {
   border-width: 2px;
   height: 14px;
@@ -263,7 +272,7 @@
 }
 
 .flow-node {
-  background: #ffffff;
+  background: #f1e2bf;
   border: 2px solid #e8d79f;
   border-radius: 16px;
   box-shadow: 0 6px 18px rgba(43, 36, 24, 0.08);
@@ -326,14 +335,14 @@
 }
 
 .command-node {
-  background: #2b2418;
-  border-color: #2b2418;
+  background: #70500f;
+  border-color: #70500f;
   color: #fff7e6;
 }
 
 .command-node .node-icon {
-  background: #f5b301;
-  color: #2b2418;
+  background: #3f2d10;
+  color: #ffd166;
 }
 
 .command-node.selected {
@@ -341,10 +350,10 @@
 }
 
 .command-node textarea {
-  background: #1c1710;
-  border: 1px solid #4a3f2c;
+  background: #c69f4c;
+  border: 1px solid #d7ad5b;
   border-radius: 10px;
-  color: #ffe9a8;
+  color: #3f2d10;
   font-family: ui-monospace, "SF Mono", monospace;
   font-size: 13px;
   padding: 8px 10px;
@@ -352,8 +361,12 @@
   width: 100%;
 }
 
+.command-node textarea::placeholder {
+  color: #5c451d;
+}
+
 .command-node textarea:focus {
-  border-color: #f5b301;
+  border-color: #ffe09a;
   outline: none;
 }
 
@@ -365,16 +378,16 @@
 }
 
 .run-button {
-  background: #f5b301;
+  background: #3f2d10;
   border: 0;
   border-radius: 10px;
-  color: #2b2418;
+  color: #ffd166;
   font-weight: 800;
   padding: 6px 14px;
 }
 
 .run-button:hover {
-  background: #ffc933;
+  background: #533c12;
 }
 
 .node-hint {

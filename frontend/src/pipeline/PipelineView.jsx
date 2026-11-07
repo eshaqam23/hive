@@ -1,5 +1,5 @@
-import React, { Suspense, useMemo, useState } from "react";
-import { Background, BackgroundVariant, Controls, MiniMap, ReactFlow } from "@xyflow/react";
+import React, { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Controls, MiniMap, ReactFlow, useViewport } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import "./pipeline.css";
 import { nodeTypes } from "./nodes";
@@ -9,6 +9,79 @@ import { edgeTypes } from "./edges";
 import { usePipeline } from "./store";
 
 const Stage3D = React.lazy(() => import("./Stage3D"));
+
+function HexagonBackground() {
+  const { x, y, zoom } = useViewport();
+  const svgRef = useRef(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return undefined;
+
+    const observer = new ResizeObserver(([entry]) => {
+      setSize({ width: entry.contentRect.width, height: entry.contentRect.height });
+    });
+    observer.observe(svg);
+    return () => observer.disconnect();
+  }, []);
+
+  const path = useMemo(() => {
+    const side = 23;
+    const halfWidth = (Math.sqrt(3) * side) / 2;
+    const columnStep = halfWidth * 2;
+    const rowStep = side * 1.5;
+    const worldLeft = -x / zoom - side;
+    const worldRight = (size.width - x) / zoom + side;
+    const worldTop = -y / zoom - side;
+    const worldBottom = (size.height - y) / zoom + side;
+    let segments = "";
+
+    if (!size.width || !size.height) return segments;
+
+    const firstRow = Math.ceil((worldTop - side) / rowStep);
+    const lastRow = Math.floor((worldBottom + side) / rowStep);
+
+    for (let row = firstRow; row <= lastRow; row += 1) {
+      const centerY = row * rowStep;
+      const rowOffset = row * halfWidth;
+      const firstColumn = Math.ceil((worldLeft - halfWidth - rowOffset) / columnStep);
+      const lastColumn = Math.floor((worldRight + halfWidth - rowOffset) / columnStep);
+
+      for (let column = firstColumn; column <= lastColumn; column += 1) {
+        const centerX = rowOffset + column * columnStep;
+        const points = [
+          [0, -side],
+          [halfWidth, -side / 2],
+          [halfWidth, side / 2],
+          [0, side],
+          [-halfWidth, side / 2],
+          [-halfWidth, -side / 2],
+        ];
+
+        for (const [pointX, pointY] of points) {
+          const screenX = x + (centerX + pointX) * zoom;
+          const screenY = y + (centerY + pointY) * zoom;
+          segments += `${segments.length === 0 || segments.endsWith("Z") ? "M" : "L"}${screenX.toFixed(3)} ${screenY.toFixed(3)}`;
+        }
+        segments += "Z";
+      }
+    }
+
+    return segments;
+  }, [size.height, size.width, x, y, zoom]);
+
+  return (
+    <svg
+      ref={svgRef}
+      aria-hidden="true"
+      className="hexagon-background"
+      viewBox={size.width && size.height ? `0 0 ${size.width} ${size.height}` : undefined}
+    >
+      <path d={path} fill="none" stroke="#e2cf93" strokeOpacity="0.35" strokeWidth="1" />
+    </svg>
+  );
+}
 
 // Quick commands without wiring a node: goes to the selected robot, or all robots.
 function CommandBar() {
@@ -108,9 +181,16 @@ export default function PipelineView() {
             deleteKeyCode={["Backspace", "Delete"]}
             proOptions={{ hideAttribution: true }}
           >
-            <Background variant={BackgroundVariant.Dots} gap={20} size={1.6} color="#e2cf93" />
+            <HexagonBackground />
             <Controls showInteractive={false} />
-            <MiniMap pannable zoomable nodeColor={(node) => (node.type === "command" ? "#2b2418" : "#f5b301")} />
+            <MiniMap
+              pannable
+              zoomable
+              bgColor="#fffdf7"
+              maskColor="rgba(226, 207, 147, 0.3)"
+              nodeColor={(node) => (node.type === "command" ? "#70500f" : "#f1e2bf")}
+              nodeStrokeColor={(node) => (node.type === "command" ? "#70500f" : "#e8d79f")}
+            />
           </ReactFlow>
           <div className="board-hint">Drag a Command's right dot to a robot · click a wire's × to remove it · drag a wire's end to re-route</div>
         </div>
