@@ -22,7 +22,7 @@ export function CommandNode({ id, data, selected }) {
         value={data.text}
         rows={3}
         spellCheck={false}
-        placeholder="forward 3, left 90, wave"
+        placeholder="forward 3, scan, seek Objective 1"
         onChange={(event) => updateNodeData(id, { text: event.target.value })}
         onKeyDown={(event) => {
           if ((event.metaKey || event.ctrlKey) && event.key === "Enter") runCommand(id);
@@ -51,12 +51,14 @@ export function RobotNode({ id, data, selected }) {
   const busy = usePipeline((state) => state.busy[id]);
   const log = usePipeline((state) => state.logs[id]);
   const conn = usePipeline((state) => state.conn[id]);
+  const position = usePipeline((state) => state.robotPositions[id]);
   const selectRobot = usePipeline((state) => state.selectRobot);
   const updateNodeData = usePipeline((state) => state.updateNodeData);
   const removeNode = usePipeline((state) => state.removeNode);
   const connectRobot = usePipeline((state) => state.connectRobot);
   const disconnectRobot = usePipeline((state) => state.disconnectRobot);
   const type = ROBOT_TYPES[data.robotType];
+  const coordinates = position ?? { x: 0, z: 0 };
 
   const status = conn?.status ?? "offline";
   const hasHost = Boolean(data.host);
@@ -93,6 +95,9 @@ export function RobotNode({ id, data, selected }) {
           {hasHost ? CONNECTION_LABEL[status] : "Simulated"}
         </span>
       </div>
+      <div className="robot-coordinates">
+        Position <span>X {coordinates.x.toFixed(2)}</span><span>Z {coordinates.z.toFixed(2)}</span>
+      </div>
 
       {hasHost && (
         <div className="conn-actions">
@@ -125,4 +130,58 @@ export function RobotNode({ id, data, selected }) {
   );
 }
 
-export const nodeTypes = { command: CommandNode, robot: RobotNode };
+export function ObjectiveNode({ id, data, selected }) {
+  const updateNodeData = usePipeline((state) => state.updateNodeData);
+  const removeNode = usePipeline((state) => state.removeNode);
+  const located = usePipeline((state) => Boolean(state.locatedObjectives[id]));
+
+  function updateCoordinate(key, value) {
+    updateNodeData(id, { [key]: value === "" ? 0 : Number(value) });
+  }
+
+  return (
+    <div className={`flow-node objective-node ${selected ? "selected" : ""} ${located ? "located" : ""}`}>
+      <header>
+        <span className="node-icon objective-icon">●</span>
+        <input
+          className="node-name nodrag"
+          value={data.name}
+          onChange={(event) => updateNodeData(id, { name: event.target.value })}
+          aria-label="Objective name"
+        />
+        <button className="node-close nodrag" onClick={() => removeNode(id)} aria-label="Remove objective">
+          ×
+        </button>
+      </header>
+      <div className="objective-coordinates">
+        <label>
+          X
+          <input
+            type="number"
+            step="0.1"
+            className="nodrag nowheel"
+            value={data.x}
+            onChange={(event) => updateCoordinate("x", event.target.value)}
+            aria-label="Objective X coordinate"
+          />
+        </label>
+        <label>
+          Z
+          <input
+            type="number"
+            step="0.1"
+            className="nodrag nowheel"
+            value={data.z}
+            onChange={(event) => updateCoordinate("z", event.target.value)}
+            aria-label="Objective Z coordinate"
+          />
+        </label>
+      </div>
+      <div className="objective-note">
+        {located ? "Located by camera scan" : "Not located · camera scan within 15 units"}
+      </div>
+    </div>
+  );
+}
+
+export const nodeTypes = { command: CommandNode, robot: RobotNode, objective: ObjectiveNode };

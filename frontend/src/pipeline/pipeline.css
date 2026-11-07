@@ -412,6 +412,77 @@
   margin-top: 6px;
 }
 
+.robot-coordinates {
+  color: #7a6b49;
+  display: flex;
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 11px;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.robot-coordinates span:first-of-type {
+  margin-left: auto;
+}
+
+.objective-node {
+  background: #fff1c2;
+  border-color: #e8c35a;
+}
+
+.objective-node.selected {
+  border-color: #f5b301;
+}
+
+.objective-node.located {
+  border-color: #f5b301;
+  box-shadow: 0 0 0 4px rgba(245, 179, 1, 0.28);
+}
+
+.objective-node.located .objective-icon {
+  box-shadow: 0 0 12px rgba(245, 179, 1, 0.8);
+}
+
+.objective-icon {
+  background: #f5b301;
+  color: #2b2418;
+}
+
+.objective-node .node-name {
+  color: #2b2418;
+}
+
+.objective-coordinates {
+  display: flex;
+  gap: 10px;
+}
+
+.objective-coordinates label {
+  align-items: center;
+  color: #7a6b49;
+  display: flex;
+  flex: 1;
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 12px;
+  gap: 6px;
+}
+
+.objective-coordinates input {
+  background: #fffdf7;
+  border: 1px solid #e8d79f;
+  border-radius: 6px;
+  color: #2b2418;
+  min-width: 0;
+  padding: 4px 6px;
+  width: 100%;
+}
+
+.objective-note {
+  color: #8a7a55;
+  font-size: 11px;
+  margin-top: 6px;
+}
+
 .status-pip {
   background: #b9b09a;
   border-radius: 50%;

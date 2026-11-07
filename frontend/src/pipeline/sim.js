@@ -6,19 +6,19 @@ export const ROBOT_TYPES = {
     label: "Camera RC Car",
     summary: "RC car with /cmd_vel control and a Realsense camera node.",
     color: "#2f8f9d",
-    verbs: ["forward", "back", "left", "right", "spin", "scan", "stop"],
+    verbs: ["forward", "back", "left", "right", "spin", "scan", "seek", "stop"],
   },
   lidar: {
     label: "LiDAR RC Car",
     summary: "RC car with /cmd_vel control and an RP LiDAR node.",
     color: "#7a5cc2",
-    verbs: ["forward", "back", "left", "right", "spin", "scan", "stop"],
+    verbs: ["forward", "back", "left", "right", "spin", "scan", "seek", "stop"],
   },
   gripper: {
     label: "Gripper RC Car",
     summary: "RC car with /cmd_vel control and an open/close gripper.",
     color: "#d9822b",
-    verbs: ["forward", "back", "left", "right", "spin", "open", "close", "wave", "stop"],
+    verbs: ["forward", "back", "left", "right", "spin", "open", "close", "wave", "seek", "stop"],
   },
 };
 
@@ -63,11 +63,12 @@ const ALIASES = {
   wave: "wave",
   stop: "stop",
   halt: "stop",
+  seek: "seek",
 };
 
 const DEFAULT_AMOUNT = { forward: 2, back: 2, left: 90, right: 90, spin: 360 };
 
-// "forward 3, left 90, wave, then open" -> [{ raw, verb, amount }]
+// "forward 3, seek Objective 1, wave" -> [{ raw, verb, amount }]
 export function parseCommand(text) {
   const parts = text
     .toLowerCase()
@@ -80,6 +81,14 @@ export function parseCommand(text) {
     // "go" is only a fallback so "go left 90" means left, not forward.
     const verbWord = words.find((word) => ALIASES[word] && word !== "go") ?? words.find((word) => ALIASES[word]);
     const verb = verbWord ? ALIASES[verbWord] : null;
+    if (verb === "seek") {
+      return {
+        raw: part,
+        verb,
+        targetName: part.slice(part.indexOf(verbWord) + verbWord.length).trim(),
+      };
+    }
+
     const numberMatch = part.match(/-?\d+(\.\d+)?/);
     const requested = numberMatch ? Math.abs(parseFloat(numberMatch[0])) : DEFAULT_AMOUNT[verb];
     // Keep robots on the stage: cap distance and rotation.
@@ -147,14 +156,41 @@ export function enqueue(sim, steps) {
     }
     sim.queue.push({ ...step, duration: durationOf(step, sim) });
   }
+  sim.busy = Boolean(sim.current || sim.queue.length);
 }
 
 // Advances one robot by dt seconds. Returns true if its busy flag changed.
-export function stepRobot(sim, dt) {
+export function stepRobot(sim, dt, onScan, objectivesById) {
   const wasBusy = sim.busy;
 
-  if (!sim.current && sim.queue.length) {
-    sim.current = sim.queue.shift();
+  while (!sim.current && sim.queue.length) {
+    const next = sim.queue.shift();
+    if (next.verb === "seek") {
+      const objective = objectivesById?.[next.targetId];
+      if (!objective) continue;
+
+      const dx = objective.x - sim.x;
+      const dz = objective.z - sim.z;
+      const distance = Math.hypot(dx, dz);
+      const targetHeading = Math.atan2(-dx, -dz);
+      const turn = Math.atan2(
+        Math.sin(targetHeading - sim.heading),
+        Math.cos(targetHeading - sim.heading),
+      );
+      const approach = [];
+
+      if (Math.abs(turn) > 1e-6) {
+        approach.push({
+          verb: turn > 0 ? "left" : "right",
+          amount: (Math.abs(turn) * 180) / Math.PI,
+        });
+      }
+      if (distance > 2) approach.push({ verb: "forward", amount: distance - 2 });
+      sim.queue.unshift(...approach.map((step) => ({ ...step, duration: durationOf(step, sim) })));
+      continue;
+    }
+
+    sim.current = next;
     sim.elapsed = 0;
     const action = BACKEND_ACTION[sim.current.verb];
     if (action) sim.outbox.push(action);
@@ -200,7 +236,10 @@ export function stepRobot(sim, dt) {
     }
 
     if (sim.elapsed >= step.duration - 1e-6) {
-      if (step.verb === "scan") sim.scanT = 0;
+      if (step.verb === "scan") {
+        sim.scanT = 0;
+        onScan?.();
+      }
       if (step.verb === "wave") sim.waveT = 0;
       // Real robots keep driving until told to stop.
       if (MOVING_VERBS.has(step.verb)) sim.outbox.push("stop");

@@ -115,5 +115,6 @@ The gripper commands currently publish string messages to `/gripper_command`. Up
 
 Hive is now one pipeline page. Add robots with **+ Robot** (name, preset, IP, ROS domain), press **Connect** on the robot node, then drive it with Command nodes or the command bar. Robots without a connection stay simulation-only in the 3D stage.
 
-Developed by Rokesh & Tommy.
+Camera robots can run `scan` to locate all objectives within 15 floor-plane units. Newly scanned objectives glow yellow for two seconds and retain a yellow discovery ring. Once located, any robot can run `seek <objective name>` to turn toward that objective and approach to within 2 units. Objective coordinates use the stage's X/Z floor plane.
 
+Developed by Rokesh & Tommy.

@@ -14,6 +14,8 @@ export const simState = {};
 
 // Per-robot promise chain so backend calls (e.g. "forward" then "stop") stay ordered.
 const chains = {};
+let positionUpdateElapsed = 0;
+let positionsDirty = false;
 
 function nextDomainId(nodes) {
   const used = new Set(
@@ -64,7 +66,13 @@ function loadSaved() {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
     if (!saved || !Array.isArray(saved.nodes) || !Array.isArray(saved.edges)) return null;
     const valid = saved.nodes.every(
-      (node) => node.type === "command" || (node.type === "robot" && ROBOT_TYPES[node.data?.robotType]),
+      (node) =>
+        node.type === "command" ||
+        (node.type === "robot" && ROBOT_TYPES[node.data?.robotType]) ||
+        (node.type === "objective" &&
+          typeof node.data?.name === "string" &&
+          Number.isFinite(node.data?.x) &&
+          Number.isFinite(node.data?.z)),
     );
     if (!valid) return null;
 
@@ -81,6 +89,14 @@ function loadSaved() {
 }
 
 const initial = loadSaved() ?? initialGraph();
+const initialRobotPositions = Object.fromEntries(
+  initial.nodes
+    .filter((node) => node.type === "robot")
+    .map((node) => {
+      const { x, z } = simState[node.id];
+      return [node.id, { x, z }];
+    }),
+);
 
 function saveGraph({ nodes, edges }) {
   try {
@@ -110,6 +126,9 @@ function saveGraph({ nodes, edges }) {
 export const usePipeline = create((set, get) => ({
   nodes: initial.nodes,
   edges: initial.edges,
+  robotPositions: initialRobotPositions,
+  locatedObjectives: {},
+  scanHighlights: {},
   busy: {}, // robotId -> boolean
   logs: {}, // robotId -> string
   conn: {}, // robotId -> { status: "offline"|"connecting"|"connected"|"failed", error? }
@@ -134,6 +153,21 @@ export const usePipeline = create((set, get) => ({
       }
       delete simState[node.id];
     }
+    set({
+      robotPositions: Object.fromEntries(
+        Object.entries(get().robotPositions).filter(([id]) => !deleted.some((node) => node.id === id)),
+      ),
+      locatedObjectives: Object.fromEntries(
+        Object.entries(get().locatedObjectives).filter(
+          ([id]) => !deleted.some((node) => node.id === id),
+        ),
+      ),
+      scanHighlights: Object.fromEntries(
+        Object.entries(get().scanHighlights).filter(
+          ([id]) => !deleted.some((node) => node.id === id),
+        ),
+      ),
+    });
   },
 
   suggestedDomainId: () => nextDomainId(get().nodes),
@@ -144,12 +178,28 @@ export const usePipeline = create((set, get) => ({
       x: 420 + (robotCount % 2) * 40,
       y: 20 + robotCount * 130,
     });
-    set({ nodes: [...get().nodes, node], selectedRobotId: node.id });
+    const sim = simState[node.id];
+    set({
+      nodes: [...get().nodes, node],
+      robotPositions: { ...get().robotPositions, [node.id]: { x: sim.x, z: sim.z } },
+      selectedRobotId: node.id,
+    });
   },
 
   addCommand: () => {
     const count = get().nodes.filter((node) => node.type === "command").length;
     set({ nodes: [...get().nodes, commandNode({ x: 40, y: 120 + count * 200 }, "wave")] });
+  },
+
+  addObjective: () => {
+    const objectives = get().nodes.filter((node) => node.type === "objective");
+    const node = {
+      id: nextId("objective"),
+      type: "objective",
+      position: { x: 520, y: 120 + objectives.length * 150 },
+      data: { name: `Objective ${objectives.length + 1}`, x: 0, z: 0 },
+    };
+    set({ nodes: [...get().nodes, node] });
   },
 
   removeNode: (id) => {
@@ -162,12 +212,36 @@ export const usePipeline = create((set, get) => ({
     set({
       nodes: get().nodes.filter((node) => node.id !== id),
       edges: get().edges.filter((edge) => edge.source !== id && edge.target !== id),
+      robotPositions: Object.fromEntries(
+        Object.entries(get().robotPositions).filter(([robotId]) => robotId !== id),
+      ),
+      locatedObjectives: Object.fromEntries(
+        Object.entries(get().locatedObjectives).filter(([objectiveId]) => objectiveId !== id),
+      ),
+      scanHighlights: Object.fromEntries(
+        Object.entries(get().scanHighlights).filter(([objectiveId]) => objectiveId !== id),
+      ),
     });
   },
 
   updateNodeData: (id, patch) =>
     set({
       nodes: get().nodes.map((node) => (node.id === id ? { ...node, data: { ...node.data, ...patch } } : node)),
+      ...(get().nodes.some(
+        (node) =>
+          node.id === id &&
+          node.type === "objective" &&
+          (patch.x !== undefined || patch.z !== undefined),
+      )
+        ? {
+            locatedObjectives: Object.fromEntries(
+              Object.entries(get().locatedObjectives).filter(([objectiveId]) => objectiveId !== id),
+            ),
+            scanHighlights: Object.fromEntries(
+              Object.entries(get().scanHighlights).filter(([objectiveId]) => objectiveId !== id),
+            ),
+          }
+        : {}),
     }),
 
   selectRobot: (id) => set({ selectedRobotId: id }),
@@ -227,37 +301,117 @@ export const usePipeline = create((set, get) => ({
   dispatch: (text, targets) => {
     const steps = parseCommand(text);
     const logs = { ...get().logs };
+    const nodes = get().nodes;
+    const objectives = nodes.filter((node) => node.type === "objective");
+    const locatedObjectives = get().locatedObjectives;
+    const busy = { ...get().busy };
+
     for (const target of targets) {
       const supported = ROBOT_TYPES[target.data.robotType].verbs;
-      const accepted = steps.filter((step) => step.verb && supported.includes(step.verb));
-      const rejected = steps.filter((step) => !step.verb || !supported.includes(step.verb));
+      const accepted = [];
+      const rejected = [];
+
+      for (const step of steps) {
+        if (step.verb === "seek") {
+          const matches = objectives.filter(
+            (objective) => objective.data.name.trim().toLowerCase() === step.targetName,
+          );
+          if (!step.targetName || matches.length !== 1) {
+            rejected.push(step.raw);
+          } else if (!locatedObjectives[matches[0].id]) {
+            rejected.push(`${step.raw} (scan within 15 units first)`);
+          } else {
+            accepted.push({ verb: "seek", targetId: matches[0].id });
+          }
+        } else if (step.verb && supported.includes(step.verb)) {
+          accepted.push(step);
+        } else {
+          rejected.push(step.raw);
+        }
+      }
+
       const sim = simState[target.id];
       enqueue(sim, accepted);
 
       let message = rejected.length
-        ? `Skipped: ${rejected.map((step) => step.raw).join(", ")}`
+        ? `Skipped: ${rejected.join(", ")}`
         : `Running ${accepted.length} step${accepted.length === 1 ? "" : "s"}`;
+      if (accepted.length && rejected.length) {
+        message += `; running ${accepted.length} step${accepted.length === 1 ? "" : "s"}`;
+      }
       if (target.data.host && !sim.live) message += " (not connected, simulation only)";
       logs[target.id] = message;
+      busy[target.id] = sim.busy;
     }
     set({
       logs,
-      busy: { ...get().busy, ...Object.fromEntries(targets.map((target) => [target.id, true])) },
+      busy,
     });
   },
 
   // Called once per frame from the 3D stage.
   tick: (dt) => {
     let changed = false;
+    let moved = false;
     const busy = { ...get().busy };
+    const nodes = get().nodes;
+    const objectivesById = Object.fromEntries(
+      nodes.filter((node) => node.type === "objective").map((node) => [node.id, node.data]),
+    );
+    let locatedObjectives;
+    let scanHighlights;
+
     for (const [id, sim] of Object.entries(simState)) {
-      if (stepRobot(sim, dt)) {
+      const previousX = sim.x;
+      const previousZ = sim.z;
+      const robot = nodes.find((node) => node.id === id && node.type === "robot");
+      const locateObjectives = () => {
+        if (robot?.data.robotType !== "camera") return;
+        const found = nodes.filter(
+          (node) =>
+            node.type === "objective" &&
+            Math.hypot(node.data.x - sim.x, node.data.z - sim.z) <= 15,
+        );
+        if (found.length) {
+          locatedObjectives ??= { ...get().locatedObjectives };
+          scanHighlights ??= { ...get().scanHighlights };
+          for (const objective of found) {
+            locatedObjectives[objective.id] = true;
+            const expiresAt = Date.now() + 2000;
+            scanHighlights[objective.id] = expiresAt;
+            setTimeout(() => {
+              const current = get().scanHighlights[objective.id];
+              if (current !== expiresAt) return;
+              const nextHighlights = { ...get().scanHighlights };
+              delete nextHighlights[objective.id];
+              set({ scanHighlights: nextHighlights });
+            }, 2000);
+          }
+        }
+      };
+
+      if (stepRobot(sim, dt, locateObjectives, objectivesById)) {
         busy[id] = sim.busy;
         changed = true;
       }
+      if (sim.x !== previousX || sim.z !== previousZ) moved = true;
       if (sim.outbox.length) flushOutbox(id);
     }
-    if (changed) set({ busy });
+    if (moved) positionsDirty = true;
+    positionUpdateElapsed += dt;
+    const updates = {};
+    if (positionsDirty && positionUpdateElapsed >= 0.1) {
+      const robotPositions = Object.fromEntries(
+        Object.entries(simState).map(([id, sim]) => [id, { x: sim.x, z: sim.z }]),
+      );
+      updates.robotPositions = robotPositions;
+      positionsDirty = false;
+      positionUpdateElapsed = 0;
+    }
+    if (changed) updates.busy = busy;
+    if (locatedObjectives) updates.locatedObjectives = locatedObjectives;
+    if (scanHighlights) updates.scanHighlights = scanHighlights;
+    if (Object.keys(updates).length) set(updates);
   },
 }));
 
