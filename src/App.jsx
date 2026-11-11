@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import ExecutiveView from "./executive/ExecutiveView.jsx";
 
 const API_BASE_URL = import.meta.env.VITE_HIVE_API_URL || "http://127.0.0.1:8787/api";
 const FLEET_STORAGE_KEY = "hive:fleet:manual-rc-v1";
@@ -258,6 +259,9 @@ export default function App() {
           <button className={view === "command" ? "active" : ""} onClick={() => setView("command")}>
             Command
           </button>
+          <button className={view === "executive" ? "active" : ""} onClick={() => setView("executive")}>
+            Executive
+          </button>
         </nav>
 
         <div className="robot-list">
@@ -304,6 +308,8 @@ export default function App() {
         )}
 
         {view === "command" && <CommandView robots={robots} messages={messages} onSend={sendCommand} />}
+
+        {view === "executive" && <ExecutiveView />}
       </main>
     </div>
   );

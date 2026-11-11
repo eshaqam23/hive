@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const viteBin = fileURLToPath(new URL("../node_modules/vite/bin/vite.js", import.meta.url));
@@ -9,10 +10,31 @@ const backendScript = fileURLToPath(new URL("../backend/server.py", import.meta.
 // Override with HIVE_PYTHON if needed.
 const python = process.env.HIVE_PYTHON || (process.platform === "win32" ? "python" : "python3");
 const backendOnly = process.argv.includes("--backend-only");
+const noExecutive = process.argv.includes("--no-executive");
+
+// Executive service (FastAPI). Prefer the backend virtualenv created from backend/requirements.txt.
+const backendDir = fileURLToPath(new URL("../backend/", import.meta.url));
+const venvPython = fileURLToPath(
+  new URL(process.platform === "win32" ? "../backend/.venv/Scripts/python.exe" : "../backend/.venv/bin/python", import.meta.url),
+);
+const execPython = process.env.HIVE_EXEC_PYTHON || (existsSync(venvPython) ? venvPython : python);
 
 const backend = spawn(python, [backendScript], {
   stdio: "inherit",
   shell: false,
+});
+
+const executive = noExecutive
+  ? null
+  : spawn(execPython, ["-m", "hive_exec"], { cwd: backendDir, stdio: "inherit", shell: false });
+
+executive?.on("error", (err) => {
+  console.error(`Failed to start the Executive with "${execPython}": ${err.message}`);
+  console.error("Create backend/.venv (see README) or set HIVE_EXEC_PYTHON.");
+});
+
+executive?.on("exit", (code) => {
+  if (code) console.error(`Executive service exited with code ${code}; manual control keeps running.`);
 });
 
 const frontend = backendOnly
@@ -24,6 +46,7 @@ const frontend = backendOnly
 
 function stopChildren() {
   if (!backend.killed) backend.kill("SIGTERM");
+  if (executive && !executive.killed) executive.kill("SIGTERM");
   if (frontend && !frontend.killed) frontend.kill("SIGTERM");
 }
 

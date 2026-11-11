@@ -129,7 +129,7 @@ LOCATIONS: dict[str, Location] = {
         Location("work_area", "Work area", "area", 70, 30),
         Location("pickup_zone", "Pickup zone", "zone", 72, 34, within="work_area"),
         Location("dropoff_zone", "Drop-off zone", "zone", 15, 70),
-        Location("camera_post", "Camera post", "post", 88, 10),
+        Location("camera_post", "Camera post", "post", 80, 10),
         Location("lidar_post", "LiDAR post", "post", 40, 82),
     ]
 }
