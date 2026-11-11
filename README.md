@@ -118,23 +118,61 @@ robots (`camera_01`, `lidar_01`, `gripper_01`). It runs as a separate FastAPI se
   action servers (Delivery B, see `docs/delivery-b-agenticros.md`).
 - Details: `docs/executive-architecture.md`. Run evidence: `docs/run-report.md`.
 
-### Clean start (Windows PowerShell; use `python3` and `.venv/bin/` on Ubuntu)
+### One-time setup
 
-```bash
+Windows PowerShell (on Ubuntu use `python3` and `.venv/bin/python` instead of `.venv\Scripts\python`):
+
+```powershell
 npm install
 cd backend
 python -m venv .venv
-.venv/Scripts/python -m pip install -r requirements.txt
-.venv/Scripts/python -m pytest -q          # deterministic tests (fake fleet, Baseline, scripted mock)
+.venv\Scripts\python -m pip install -r requirements.txt
 cd ..
-copy .env.example .env                    # then set QWEN_BASE_URL for live Qwen
-npm run hive                               # manual-control backend + Executive + Vite
+copy .env.example .env      # optional; only needed for live Qwen or non-default settings
 ```
 
-`npm run hive -- --no-executive` starts the original app only. The Executive alone runs with
-`cd backend && .venv/Scripts/python -m hive_exec`.
+### Run the Executive
 
-### Serving Qwen3-8B (GPU host, not this laptop)
+**Fake robots (default):**
+
+```powershell
+npm run hive
+```
+
+This starts the manual-control backend (port 8787), the Executive (port 8788) and the frontend,
+then opens the browser. Click **Executive** in the sidebar. Stop everything with Ctrl+C.
+
+Other ways to start it:
+
+- `npm run hive -- --no-executive`: the original app only.
+- `cd backend; .venv\Scripts\python -m hive_exec`: the Executive service alone.
+
+**Through ROS 2 / AgenticROS Synapse (Delivery B):** needs WSL `Ubuntu-24.04` with ROS 2 Jazzy.
+First-time build inside Ubuntu (details in `docs/delivery-b-agenticros.md`):
+
+```bash
+sudo apt install ros-jazzy-rosbridge-suite build-essential python3-colcon-common-extensions
+# plus Node.js 20 or newer
+bash ros/build.sh
+HIVE_CORE_PATCH=1 bash bridge/scripts/build-core.sh
+```
+
+Then use three terminals:
+
+```powershell
+# 1: fake ROS robots + rosbridge
+wsl -d Ubuntu-24.04 -- bash /mnt/c/path/to/hive/ros/run_fake_fleet.sh
+# 2: Synapse bridge
+wsl -d Ubuntu-24.04 -- node /mnt/c/path/to/hive/bridge/server.mjs
+# 3: the app, using the ROS path
+$env:HIVE_GATEWAY="synapse"; npm run hive
+```
+
+Replace `/mnt/c/path/to/hive` with the repo location as seen from WSL. From Git Bash, prefix `wsl`
+commands with `MSYS_NO_PATHCONV=1`. The transport badge turns green after the first task
+completes a round trip.
+
+**With live Qwen:** Qwen3-8B needs a GPU host running vLLM:
 
 ```bash
 pip install vllm
@@ -142,20 +180,74 @@ vllm serve Qwen/Qwen3-8B --host 127.0.0.1 --port 8000 --max-model-len 12288 --se
 ssh -L 8000:127.0.0.1:8000 gpu-host        # from the operator laptop
 ```
 
-Then set `QWEN_BASE_URL=http://127.0.0.1:8000/v1` and `QWEN_API_KEY` in `.env`. On startup the
-Executive probes `/v1/models` plus one schema-constrained request, and enables live generation
-only if both pass (`POST /api/exec/planner/probe` re-checks). Smoke evaluation:
-`cd backend && .venv/Scripts/python scripts/smoke_eval.py --execute`.
+Set `QWEN_BASE_URL=http://127.0.0.1:8000/v1` and `QWEN_API_KEY` in `.env`, then restart.
+On startup the Executive checks that the model is listed and answers one request in the plan
+format, and it enables Qwen only if both pass. The Qwen badge shows the result.
+Without a server, choosing Qwen shows a planner error; it never falls back to Baseline silently.
 
-### Demo
+### Test
 
-1. Executive page: Scenario **Unknown object/route** and **Reset run**.
-2. Plan the default command: *Find the red block in the work area, check the pickup corridor, and bring the block to the drop-off area.*
-3. Approve revision 1. The camera inspects and the lidar scans concurrently, and the map updates from their reports.
-4. Approve revision 2 (transport by `gripper_01`). The mission completes only after confirmed placement.
+**1. Automated tests** (no robots, ROS or Qwen needed; about 10 seconds):
 
-Fault checkboxes (route blocked, block missing, two red blocks, gripper unavailable or fault after
-pickup, navigation fault after pickup, uncertain place, hangs, low battery) apply on the next reset.
+```powershell
+cd backend
+.venv\Scripts\python -m pytest -q
+```
+
+They cover the contracts, the plan checks, the five acceptance stories on the fake fleet,
+cancellation, duplicate and stale events, recovery, the HTTP API, and the Qwen client against
+a scripted mock server (not real Qwen).
+
+**2. Manual demo in the app** (fake robots, Baseline planner):
+
+1. Run `npm run hive` and open **Executive**.
+2. Scenario **Unknown object/route**, then **Reset run**.
+3. Planner **Baseline** (pick Qwen only if a server is configured).
+4. Keep the default command, *Find the red block in the work area, check the pickup corridor, and
+   bring the block to the drop-off area.*, and click **Plan mission**.
+5. **Approve r1**: the camera and lidar work at the same time, and the map updates from their reports.
+6. **Approve r2**: the gripper drives, picks, returns and places. The mission shows **Completed**.
+
+Each run holds one mission, so click **Reset run** before the next one. Other cases to try:
+
+| Setup before Reset run | Command | Expected |
+|---|---|---|
+| Scenario **Known object** | default | One transport plan, completed |
+| (none) | `Take a picture of the work area.` | Camera only; others idle |
+| (none) | `Bring the block over here.` | Clarification question, nothing runs |
+| (none) | `Fly the drone over the warehouse.` | Rejected |
+| fault `route_blocked` | default | Blocked after scanning |
+| fault `block_missing` | default | Blocked: block not found |
+| fault `two_red_blocks` | default | Asks which block; answer e.g. `red_block_2` |
+| Known + `nav_fault_after_pickup` | default | Failure while carrying, then a recovery plan to approve, then completed |
+| Known + `gripper_fault_after_pickup` | default | Blocked, block still held |
+| Known + `uncertain_place` | default | Blocked, no retry |
+| Known + `low_battery_gripper` | default | Validation fails; Approve disabled |
+| Known + `hang_navigate` | default, approve, then **Cancel mission** | Shows canceling, then canceled |
+
+**Export JSON** downloads the full run (plans, approvals, events, timeline).
+
+**3. ROS / Synapse path** (with terminals 1 and 2 from above running):
+
+```powershell
+wsl -d Ubuntu-24.04 -- node /mnt/c/path/to/hive/bridge/check.mjs   # transport check, expect 8/8
+cd backend
+.venv\Scripts\python scripts\b_e2e.py        # eight stories through Synapse, expect 8/8
+```
+
+Results are saved to `docs/evidence/b-e2e.json`.
+
+**4. Live Qwen** (only with a configured server):
+
+```powershell
+curl -X POST http://127.0.0.1:8788/api/exec/planner/probe      # must report "ok": true
+cd backend
+.venv\Scripts\python scripts\smoke_eval.py --execute            # 10 commands x 2, report in reports/
+.venv\Scripts\python scripts\b_e2e.py --planner qwen            # Qwen through the ROS path
+```
+
+To check the smoke-evaluation script itself without Qwen, run
+`.venv\Scripts\python scripts\smoke_eval.py --planner baseline --execute`. Its results are labeled Baseline.
 
 ## Project Structure
 
