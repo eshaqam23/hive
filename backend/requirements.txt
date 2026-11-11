@@ -1,0 +1,12 @@
+# HIVE Executive service (Python 3.12). Pinned versions verified on Windows 11 / Python 3.12.10.
+fastapi==0.162.4
+starlette==1.10.0
+uvicorn==0.54.0
+pydantic==2.14.3
+pydantic_core==2.50.4
+httpx==0.28.1
+websockets==17.4
+python-dotenv==1.2.4
+# tests
+pytest==9.2.0
+pytest-asyncio==1.4.1.post1

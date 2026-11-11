@@ -5,3 +5,12 @@ dist
 npm-debug.log*
 __pycache__/
 *.py[cod]
+.venv/
+backend/.venv/
+.pytest_cache/
+reports/*.json
+ros/build/
+ros/install/
+ros/log/
+bridge/node_modules/
+bridge/vendor/
