@@ -1,0 +1,44 @@
+{
+  "192.168.1.20:42": {
+    "online": true,
+    "nodes": [
+      "/realsense2_camera_node",
+      "/base_driver",
+      "/robot_state_publisher"
+    ],
+    "topics": {
+      "/cmd_vel": "geometry_msgs/msg/Twist",
+      "/camera/raw": "sensor_msgs/msg/Image",
+      "/gripper_open": "std_msgs/msg/Bool",
+      "/hive/command": "std_msgs/msg/String",
+      "/tf": "tf2_msgs/msg/TFMessage"
+    },
+    "subscribers": {
+      "/cmd_vel": 1,
+      "/gripper_open": 1,
+      "/hive/command": 1
+    }
+  },
+  "192.168.1.31:43": {
+    "online": false,
+    "nodes": [
+      "/base_driver"
+    ],
+    "topics": {
+      "/cmd_vel": "geometry_msgs/msg/Twist"
+    },
+    "subscribers": {
+      "/cmd_vel": 1
+    }
+  },
+  "192.168.1.44:44": {
+    "online": true,
+    "nodes": [
+      "/realsense2_camera_node"
+    ],
+    "topics": {
+      "/camera/raw": "sensor_msgs/msg/Image"
+    },
+    "subscribers": {}
+  }
+}

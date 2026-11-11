@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""A mock of the ROS 2 Jazzy `ros2` CLI, faithful at the interface Hive uses.
+
+Discovery is simulated from the environment exactly as DDS would scope it: a robot is visible only
+when ROS_DOMAIN_ID matches and its IP is in ROS_STATIC_PEERS. Robots are defined in
+$HIVE_MOCK_ROOT/robots.json; every message a robot receives is appended to
+$HIVE_MOCK_ROOT/robots/<ip>_<domain>.jsonl with a timestamp, so tests can check order and timing.
+Flags and messages follow ros2cli on the jazzy branch (verb/pub.py, verb/list.py, verb/info.py).
+"""
+import json, os, signal, sys, time
+
+ROOT = os.environ["HIVE_MOCK_ROOT"]
+import random
+DISCOVERY_DELAY = float(os.environ.get("HIVE_MOCK_DISCOVERY", "0.8"))  # DDS discovery takes ~1 s
+try:  # optional jitter (seconds), like real DDS discovery, read from a file so a running backend picks it up
+    DISCOVERY_DELAY += random.uniform(0, float(open(os.path.join(os.environ["HIVE_MOCK_ROOT"], "jitter")).read()))
+except (OSError, ValueError):
+    pass
+
+def robots():
+    try:
+        return json.load(open(f"{ROOT}/robots.json"))
+    except FileNotFoundError:
+        return {}
+
+def visible():
+    domain = os.environ.get("ROS_DOMAIN_ID", "0")
+    peers = [p.strip() for p in os.environ.get("ROS_STATIC_PEERS", "").split(";") if p.strip()]
+    return [(k, r) for k, r in robots().items() if r.get("online", True) and k.split(":")[1] == domain and k.split(":")[0] in peers]
+
+def log(key, topic, msg):
+    with open(f"{ROOT}/robots/{key.replace(':', '_')}.jsonl", "a") as f:
+        f.write(json.dumps({"t": time.time(), "topic": topic, "msg": msg, "pid": os.getpid()}) + "\n")
+
+def take(args, *names, has_value=True, default=None):
+    for n in names:
+        if n in args:
+            i = args.index(n)
+            if has_value:
+                v = args[i + 1]; del args[i:i + 2]; return v
+            del args[i]; return True
+    return default
+
+def main(argv):
+    with open(f"{ROOT}/calls.log", "a") as f:
+        f.write(json.dumps({"t": time.time(), "argv": argv, "domain": os.environ.get("ROS_DOMAIN_ID"), "peers": os.environ.get("ROS_STATIC_PEERS"), "range": os.environ.get("ROS_AUTOMATIC_DISCOVERY_RANGE")}) + "\n")
+    if not argv:
+        return "usage: ros2 <command>"
+    cmd, args = argv[0], list(argv[1:])
+    no_daemon = take(args, "--no-daemon", has_value=False, default=False)
+    spin = float(take(args, "--spin-time", default="0.5"))
+    if cmd == "node" and args[:1] == ["list"]:
+        time.sleep(min(spin, DISCOVERY_DELAY))
+        for _, r in visible():
+            for n in r.get("nodes", []): print(n)
+        return 0                                  # like the real CLI: exit 0 even when nothing is found
+    if cmd == "topic" and args[:1] == ["list"]:
+        time.sleep(min(spin, DISCOVERY_DELAY))
+        show_types = "-t" in args or "--show-types" in args
+        seen = {}
+        for _, r in visible():
+            seen.update(r.get("topics", {}))
+        for name, typ in sorted(seen.items()):
+            print(f"{name} [{typ}]" if show_types else name)
+        return 0
+    if cmd == "topic" and args[:1] == ["info"]:
+        time.sleep(min(spin, DISCOVERY_DELAY))
+        topic = args[1]
+        subs = sum(r.get("subscribers", {}).get(topic, 0) for _, r in visible())
+        typ = next((r.get("topics", {}).get(topic) for _, r in visible() if topic in r.get("topics", {})), None)
+        if typ is None and not subs:
+            return f"Unknown topic '{topic}'"
+        print(f"Type: {typ}\nPublisher count: 0\nSubscription count: {subs}")
+        return 0
+    if cmd == "topic" and args[:1] == ["pub"]:
+        args = args[1:]
+        once = take(args, "-1", "--once", has_value=False, default=False)
+        times = int(take(args, "-t", "--times", default="0"))
+        rate = float(take(args, "-r", "--rate", default="1.0"))
+        take(args, "-p", "--print", default="1")
+        wait = take(args, "-w", "--wait-matching-subscriptions", default=None)
+        max_wait = take(args, "--max-wait-time-secs", default=None)
+        take(args, "-n", "--node-name", default=None)
+        take(args, "--keep-alive", default="0.1")
+        topic, typ, msg = args[0], args[1], (args[2] if len(args) > 2 else "{}")
+        if once: times = 1
+        wait = int(wait) if wait is not None else (1 if times else 0)
+        if max_wait is not None and wait == 0:
+            return "--max-wait-time-secs option is only effective with --wait-matching-subscriptions, --once or --times"
+        time.sleep(DISCOVERY_DELAY)                # discovery before any subscriber can match
+        def subs():
+            return [k for k, r in visible() if r.get("subscribers", {}).get(topic, 0)]
+        waited = 0.0
+        while len(subs()) < wait:
+            if waited == 0: print(f"Waiting for at least {wait} matching subscription(s)...", flush=True)
+            if max_wait is not None and float(max_wait) <= waited:
+                return f"Timed out waiting for subscribers: Expected {wait} subscriber but only got {len(subs())} subscribers"
+            time.sleep(0.1); waited += 0.1
+        print("publisher: beginning loop", flush=True)
+        stop = {"now": False}
+        signal.signal(signal.SIGTERM, lambda *_: stop.update(now=True))
+        count = 0
+        while not stop["now"]:
+            for k in subs(): log(k, topic, msg)
+            count += 1
+            if times and count >= times: break
+            time.sleep(1.0 / rate)
+        return 0
+    return f"mock ros2: unsupported command {argv}"
+
+sys.exit(main(sys.argv[1:]))
