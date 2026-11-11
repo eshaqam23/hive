@@ -28,11 +28,6 @@ def make_gateway(settings: ExecSettings) -> RobotGateway:
         from .gateway.synapse import SynapseGateway
 
         return SynapseGateway(settings.bridge_url, label="AgenticROS / Corebrum Synapse bridge")
-    if settings.gateway == "rclpy":
-        from .gateway.synapse import SynapseGateway
-
-        return SynapseGateway(settings.bridge_url, kind="rclpy_fallback",
-                              label="rclpy FALLBACK (not AgenticROS)")
     raise ValueError(f"Unknown HIVE_GATEWAY {settings.gateway}")
 
 

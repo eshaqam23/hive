@@ -1,0 +1,117 @@
+HIVE patch v1 for @corebrum/core 0.8.16 (Corebrum Synapse 6f7b7840e2b3345f66412a0fb800f294cb94667c).
+Fixes, for the rosbridge transport only: (1) request feedback when onFeedback is set,
+(2) cancel by the goal's rosbridge id (caller may supply goalId), (3) pass GoalStatus through.
+
+diff -ruN a/src/transport/rosbridge/actions.ts b/src/transport/rosbridge/actions.ts
+--- a/src/transport/rosbridge/actions.ts	2026-11-11 16:48:37.947083211 -0500
++++ b/src/transport/rosbridge/actions.ts	2026-11-11 16:48:38.093239732 -0500
+@@ -9,6 +9,8 @@
+   actionType: string;
+   args?: Record<string, unknown>;
+   onFeedback?: (feedback: ActionFeedbackMessage) => void;
++  /** HIVE patch v1: caller-supplied rosbridge goal id so the goal can be canceled by id. */
++  goalId?: string;
+   timeoutMs?: number;
+ }
+ 
+@@ -25,7 +27,7 @@
+    * @returns The action result
+    */
+   async sendGoal(options: ActionGoalOptions): Promise<ActionResultMessage> {
+-    const id = this.client.nextId("action");
++    const id = options.goalId ?? this.client.nextId("action");
+     const timeoutMs = options.timeoutMs ?? 120_000; // Actions can be long-running
+ 
+     // Register feedback handler if provided
+@@ -54,6 +56,8 @@
+       action: options.action,
+       action_type: options.actionType,
+       args: options.args,
++      // HIVE patch v1: rosbridge only streams feedback when asked to.
++      feedback: options.onFeedback !== undefined,
+     });
+ 
+     try {
+@@ -71,10 +75,11 @@
+    *
+    * @param action - The action server name
+    */
+-  async cancelGoal(action: string): Promise<void> {
++  async cancelGoal(action: string, goalId?: string): Promise<void> {
+     this.client.send({
+       op: "cancel_action_goal",
+-      id: this.client.nextId("cancel"),
++      // HIVE patch v1: rosbridge cancels the handler registered under the goal id.
++      id: goalId ?? this.client.nextId("cancel"),
+       action,
+     });
+   }
+diff -ruN a/src/transport/rosbridge/adapter.ts b/src/transport/rosbridge/adapter.ts
+--- a/src/transport/rosbridge/adapter.ts	2026-11-11 16:48:37.947601951 -0500
++++ b/src/transport/rosbridge/adapter.ts	2026-11-11 16:48:38.093783030 -0500
+@@ -94,6 +94,7 @@
+       action: options.action,
+       actionType: options.actionType,
+       args: options.args,
++      goalId: options.goalId,
+       onFeedback: options.onFeedback
+         ? (feedback) => options.onFeedback!(feedback.values)
+         : undefined,
+@@ -101,11 +102,12 @@
+     return {
+       result: response.result,
+       values: response.values,
++      status: response.status,
+     };
+   }
+ 
+-  async cancelActionGoal(action: string): Promise<void> {
+-    await this.actionClient.cancelGoal(action);
++  async cancelActionGoal(action: string, goalId?: string): Promise<void> {
++    await this.actionClient.cancelGoal(action, goalId);
+   }
+ 
+   async listTopics(): Promise<TopicInfo[]> {
+diff -ruN a/src/transport/rosbridge/types.ts b/src/transport/rosbridge/types.ts
+--- a/src/transport/rosbridge/types.ts	2026-11-11 16:48:37.949667978 -0500
++++ b/src/transport/rosbridge/types.ts	2026-11-11 16:48:38.094002193 -0500
+@@ -87,6 +87,8 @@
+   action: string;
+   values?: Record<string, unknown>;
+   result: boolean;
++  /** action_msgs/GoalStatus code sent by rosbridge (HIVE patch v1 passes it through). */
++  status?: number;
+ }
+ 
+ export interface ActionCancelMessage extends RosbridgeMessage {
+diff -ruN a/src/transport/transport.ts b/src/transport/transport.ts
+--- a/src/transport/transport.ts	2026-11-11 16:48:37.950331143 -0500
++++ b/src/transport/transport.ts	2026-11-11 16:48:38.094288600 -0500
+@@ -62,7 +62,7 @@
+   sendActionGoal(options: ActionGoalOptions): Promise<ActionResult>;
+ 
+   /** Cancel an in-progress action goal. */
+-  cancelActionGoal(action: string): Promise<void>;
++  cancelActionGoal(action: string, goalId?: string): Promise<void>;
+ 
+   // --- Introspection ---
+ 
+diff -ruN a/src/transport/types.ts b/src/transport/types.ts
+--- a/src/transport/types.ts	2026-11-11 16:48:37.951098122 -0500
++++ b/src/transport/types.ts	2026-11-11 16:48:38.094166400 -0500
+@@ -58,11 +58,15 @@
+   actionType: string;
+   args?: Record<string, unknown>;
+   onFeedback?: (feedback: Record<string, unknown>) => void;
++  /** HIVE patch v1: caller-supplied goal id (rosbridge) for targeted cancellation. */
++  goalId?: string;
+ }
+ 
+ export interface ActionResult {
+   result: boolean;
+   values?: Record<string, unknown>;
++  /** HIVE patch v1: terminal action_msgs/GoalStatus when the transport provides it. */
++  status?: number;
+ }
+ 
+ // --- Introspection ---

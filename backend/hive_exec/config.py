@@ -58,7 +58,7 @@ class QwenSettings:
 class ExecSettings:
     host: str = "127.0.0.1"
     port: int = 8788
-    gateway: str = "fake"  # fake | synapse | rclpy
+    gateway: str = "fake"  # fake | synapse
     default_planner: str = "qwen"  # qwen | baseline (operator can choose per mission)
     sim_time_scale: float = 1.0
     bridge_url: str = "ws://127.0.0.1:8790"

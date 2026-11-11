@@ -1,0 +1,108 @@
+{
+  "checked_at": "2026-11-11T21:49:13.576Z",
+  "core_version": "0.8.16",
+  "synapse_commit": "6f7b7840e2b3345f66412a0fb800f294cb94667c",
+  "patch": "corebrum-core-rosbridge-actions.v1.patch",
+  "rosbridge": "ws://127.0.0.1:9090",
+  "results": [
+    {
+      "name": "success: scan_route completes",
+      "pass": true,
+      "observed": {
+        "result": true,
+        "rosStatus": 4,
+        "hiveStatus": "succeeded",
+        "ms": 643
+      }
+    },
+    {
+      "name": "feedback: progress messages reach the client",
+      "pass": true,
+      "observed": {
+        "feedbackCount": 4,
+        "sample": {
+          "run_id": "check-1794433750624",
+          "attempt_id": "chk-1",
+          "phase": "accepted",
+          "progress": 0
+        }
+      }
+    },
+    {
+      "name": "terminal status: rosbridge GoalStatus exposed to caller",
+      "pass": true,
+      "observed": {
+        "status": 4,
+        "note": "HIVE status is also in values.status"
+      }
+    },
+    {
+      "name": "rejection: goal rejected by server is distinguishable",
+      "pass": true,
+      "observed": {
+        "result": false,
+        "rosStatus": 0,
+        "error": "Action goal was rejected",
+        "ms": 33,
+        "serverReason": {
+          "code": "stale_run",
+          "message": "run stale-run != check-1794433750624"
+        }
+      }
+    },
+    {
+      "name": "abort: failed skill returns aborted with HIVE error",
+      "pass": true,
+      "observed": {
+        "result": true,
+        "rosStatus": 6,
+        "hiveStatus": "failed",
+        "error": "route_blocked",
+        "ms": 820
+      }
+    },
+    {
+      "name": "targeted cancel: only the addressed goal is canceled",
+      "pass": true,
+      "observed": {
+        "lidar": {
+          "result": true,
+          "rosStatus": 5,
+          "hiveStatus": "canceled",
+          "ms": 639
+        },
+        "lidarStillActive": false
+      }
+    },
+    {
+      "name": "cancel isolation: concurrent goal on another robot unaffected",
+      "pass": true,
+      "observed": {
+        "result": true,
+        "rosStatus": 4,
+        "hiveStatus": "succeeded",
+        "ms": 439
+      }
+    },
+    {
+      "name": "concurrency: two robots execute in parallel",
+      "pass": true,
+      "observed": {
+        "camera": {
+          "result": true,
+          "rosStatus": 4,
+          "hiveStatus": "succeeded",
+          "ms": 618
+        },
+        "lidar": {
+          "result": true,
+          "rosStatus": 4,
+          "hiveStatus": "succeeded",
+          "ms": 639
+        },
+        "wallMs": 640,
+        "observations": 1
+      }
+    }
+  ]
+}
