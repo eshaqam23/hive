@@ -106,9 +106,65 @@ Then it publishes the requested command to `/cmd_vel`.
 
 The gripper commands currently publish string messages to `/gripper_command`. Update `backend/server.py` once the gripper robot's final ROS interface is known.
 
+## Executive (mission planning prototype)
+
+The Executive turns an English mission into a validated, operator-approved plan for three
+robots (`camera_01`, `lidar_01`, `gripper_01`). It runs as a separate FastAPI service on
+`127.0.0.1:8788`, and its page is under **Executive** in the sidebar. Manual control above is unchanged.
+
+- Planner: `Qwen/Qwen3-8B` (non-thinking) on a separately hosted vLLM endpoint, or the
+  **Baseline** templates. Baseline output is always labeled and is never substituted for Qwen.
+- Transport: in-process fake fleet (Delivery A) or AgenticROS/Corebrum Synapse to ROS 2 fake
+  action servers (Delivery B, see `docs/delivery-b-agenticros.md`).
+- Details: `docs/executive-architecture.md`. Run evidence: `docs/run-report.md`.
+
+### Clean start (Windows PowerShell; use `python3` and `.venv/bin/` on Ubuntu)
+
+```bash
+npm install
+cd backend
+python -m venv .venv
+.venv/Scripts/python -m pip install -r requirements.txt
+.venv/Scripts/python -m pytest -q          # deterministic tests (fake fleet, Baseline, scripted mock)
+cd ..
+copy .env.example .env                    # then set QWEN_BASE_URL for live Qwen
+npm run hive                               # manual-control backend + Executive + Vite
+```
+
+`npm run hive -- --no-executive` starts the original app only. The Executive alone runs with
+`cd backend && .venv/Scripts/python -m hive_exec`.
+
+### Serving Qwen3-8B (GPU host, not this laptop)
+
+```bash
+pip install vllm
+vllm serve Qwen/Qwen3-8B --host 127.0.0.1 --port 8000 --max-model-len 12288 --seed 1234 --api-key "$KEY"
+ssh -L 8000:127.0.0.1:8000 gpu-host        # from the operator laptop
+```
+
+Then set `QWEN_BASE_URL=http://127.0.0.1:8000/v1` and `QWEN_API_KEY` in `.env`. On startup the
+Executive probes `/v1/models` plus one schema-constrained request, and enables live generation
+only if both pass (`POST /api/exec/planner/probe` re-checks). Smoke evaluation:
+`cd backend && .venv/Scripts/python scripts/smoke_eval.py --execute`.
+
+### Demo
+
+1. Executive page: Scenario **Unknown object/route** and **Reset run**.
+2. Plan the default command: *Find the red block in the work area, check the pickup corridor, and bring the block to the drop-off area.*
+3. Approve revision 1. The camera inspects and the lidar scans concurrently, and the map updates from their reports.
+4. Approve revision 2 (transport by `gripper_01`). The mission completes only after confirmed placement.
+
+Fault checkboxes (route blocked, block missing, two red blocks, gripper unavailable or fault after
+pickup, navigation fault after pickup, uncertain place, hangs, low battery) apply on the next reset.
+
 ## Project Structure
 
 - `src/`: React frontend
 - `backend/`: Python backend for local ROS 2 command execution
-- `scripts/hive.mjs`: combined launcher for backend and frontend
+- `scripts/hive.mjs`: combined launcher for backend, Executive and frontend
+- `src/executive/`: Executive page
+- `backend/hive_exec/`: Executive service (contracts, planner, validator, scheduler, gateways)
+- `backend/tests/`: Executive tests
+- `ros/`, `bridge/`: Delivery B (ROS 2 fake action servers, Synapse bridge)
+- `docs/`: architecture, Delivery B notes, run report
 
