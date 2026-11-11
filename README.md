@@ -117,6 +117,7 @@ robots (`camera_01`, `lidar_01`, `gripper_01`). It runs as a separate FastAPI se
 - Transport: in-process fake fleet (Delivery A) or AgenticROS/Corebrum Synapse to ROS 2 fake
   action servers (Delivery B, see `docs/delivery-b-agenticros.md`).
 - Details: `docs/executive-architecture.md`. Run evidence: `docs/run-report.md`.
+- Teammates: start with `docs/next-steps.md`.
 
 ### One-time setup
 
