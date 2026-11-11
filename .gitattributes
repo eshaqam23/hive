@@ -1,0 +1,5 @@
+# Files executed inside Ubuntu/WSL must keep LF endings even on Windows checkouts.
+*.sh text eol=lf
+ros/** text eol=lf
+bridge/** text eol=lf
+backend/hive_exec/sim/*.py text eol=lf
