@@ -17,6 +17,9 @@ class SubmitReceipt:
 
     accepted_for_delivery: bool
     detail: str = ""
+    # True when the command may have reached the robot but delivery was not confirmed
+    # (e.g. timeout). The outcome is then uncertain and must not be retried blindly.
+    delivery_unknown: bool = False
 
 
 @dataclass

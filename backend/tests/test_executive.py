@@ -207,3 +207,20 @@ async def test_reset_discards_prior_run(make_exec):
     await ex.reset("unknown")
     assert ex.run_id != old_run and ex.mission is None and not ex.attempts
     assert ex.world.objects == {}
+
+
+async def test_late_result_for_uncertain_attempt_is_reconciled_not_advanced(make_exec):
+    ex = await make_exec("known", ["hang_navigate"])
+    await ex.create_mission(DEMO)
+    await approve_latest(ex)
+    await wait_for(ex, {"executing"})
+    att = next(iter(ex.attempts.values()))
+    base = dict(run_id=ex.run_id, attempt_id=att.attempt_id, robot_id=att.robot_id)
+    await ex.handle_event(TaskEvent(event_id="u1", seq=900, status="uncertain", **base))
+    assert await wait_for(ex, DONE) == "blocked"
+    await ex.handle_event(TaskEvent(event_id="u2", seq=901, status="succeeded",
+                                    result={"location_id": "pickup_zone"}, **base))
+    assert ex.robots["gripper_01"].location_id == "pickup_zone"  # effect reconciled
+    assert ex.mission.status == "blocked"  # plan not advanced
+    assert sum(1 for a in ex.attempts.values()) == 1  # nothing redispatched
+    await ex.reset("unknown")

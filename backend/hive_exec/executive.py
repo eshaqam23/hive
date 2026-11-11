@@ -126,8 +126,20 @@ class Executive:
 
     # ================================================================ setup
     async def start(self, scenario: str = "unknown") -> None:
+        if hasattr(self.gateway, "on_disconnect"):
+            self.gateway.on_disconnect(self._on_transport_lost)
         await self.gateway.start(self.handle_event)
-        await self.reset(scenario=scenario)
+        try:
+            # A coordinated reset also stops work a previous Executive process may have left running.
+            await self.reset(scenario=scenario)
+        except Exception as exc:  # noqa: BLE001 - keep serving; the UI shows the transport as disconnected
+            self.log("transport", f"Initial coordinated reset failed: {exc}. Reset again once the transport is up.")
+
+    async def _on_transport_lost(self, reason: str) -> None:
+        async with self.lock:
+            m = self.mission
+            if m and m.status not in TERMINAL_MISSION:
+                self._block(m, f"{reason} New work is blocked until a coordinated reset.")
 
     def log(self, kind: str, message: str, **data: Any) -> None:
         self.timeline.append({"seq": next(self._tl), "t": self.clock(), "kind": kind, "message": message,
@@ -163,7 +175,11 @@ class Executive:
             self.run_id = f"run-{uuid.uuid4().hex[:8]}"
             self.scenario = scenario
             self.faults = list(faults or [])
-            await self.gateway.reset(self.run_id, self.faults)
+            try:
+                await self.gateway.reset(self.run_id, self.faults)
+            except Exception as exc:  # noqa: BLE001
+                self.log("reset", f"Coordinated reset failed: {exc}")
+                raise ExecError(f"Coordinated reset failed: {exc}", 503) from exc
             self.world = ObservedWorld(self.clock)
             self.robots = initial_robot_states(self.clock)
             await self.refresh_status()
@@ -522,6 +538,9 @@ class Executive:
         if m is None or m.status != "executing":
             return
         plan = self._active_plan(m)
+        if not self.gateway.info().connected:
+            self._block(m, "Robot transport is disconnected; new work is blocked until a coordinated reset.")
+            return
         await self.refresh_status()
         for task in plan.tasks:
             rt = m.tasks[f"{plan.revision}:{task.task_id}"]
@@ -549,11 +568,18 @@ class Executive:
             self.robots[task.robot_id].current_attempt_id = attempt_id
             self.log("dispatch", f"{task.task_id} -> {task.robot_id}: {task.skill} {params}", attempt_id=attempt_id)
             receipt = await self.gateway.submit(env)
+            if att.status in TERMINAL_STATUSES:
+                continue  # events already settled this attempt while the receipt was in flight
             if not receipt.accepted_for_delivery:
-                att.status = "failed"
-                rt.state, rt.error = "failed", {"code": "submit_failed", "message": receipt.detail}
+                status = "uncertain" if receipt.delivery_unknown else "failed"
+                att.status = status
+                rt.state = status
+                rt.error = {"code": "delivery_unknown" if receipt.delivery_unknown else "submit_failed",
+                            "message": receipt.detail}
                 self.robots[task.robot_id].current_attempt_id = None
-                await self._on_task_failure(m, rt, "failed")
+                self.log("dispatch", f"{task.task_id} submit {'not confirmed' if receipt.delivery_unknown else 'failed'}:"
+                         f" {receipt.detail}")
+                await self._on_task_failure(m, rt, status)
                 return
         if all(m.tasks[f"{plan.revision}:{t.task_id}"].state in TERMINAL_STATUSES | {"skipped"} for t in plan.tasks):
             await self._finish_revision(m, plan)
@@ -578,6 +604,15 @@ class Executive:
             self.log("event_stale", f"Out-of-order event {ev.event_id} (seq {ev.seq} <= {att.last_seq}) ignored.")
             return
         if att.status in TERMINAL_STATUSES:
+            if att.status == "uncertain" and ev.status in ("succeeded", "failed", "canceled") and not att.effects_applied:
+                # Credible late result for an uncertain attempt: reconcile effects, never advance the plan.
+                self.seen_events.add(ev.event_id)
+                self.raw_events.append(ev.model_dump())
+                att.last_seq = ev.seq
+                self._apply_effects(att, ev)
+                self.log("reconcile", f"Late {ev.status} for uncertain attempt {att.attempt_id} reconciled into "
+                         "the observed world; the mission stays blocked.")
+                return
             self.log("event_late", f"Event {ev.event_id} after terminal status {att.status} ignored.")
             return
         self.seen_events.add(ev.event_id)
@@ -631,7 +666,8 @@ class Executive:
         """Apply effects from accepted terminal results exactly once per attempt."""
         if att.effects_applied:
             return
-        att.effects_applied = True
+        if ev.status != "uncertain":
+            att.effects_applied = True
         robot = self.robots.get(att.robot_id)
         # Battery comes from robot telemetry (gateway status), which already reflects the work;
         # energy_used_pct is recorded for the timeline only so completed work is never charged twice.
