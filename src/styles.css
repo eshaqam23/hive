@@ -208,6 +208,11 @@
   .btn-secondary:hover:not(:disabled) {
     border-color: var(--color-ink);
   }
+  /* destructive confirmations only */
+  .btn-danger {
+    background: var(--color-danger);
+    color: var(--color-sidebar);
+  }
   .btn:disabled {
     opacity: 0.45;
   }

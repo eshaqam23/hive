@@ -106,6 +106,11 @@ const CloseIcon = (p) => (
     <path d="m6 6 12 12M18 6 6 18" />
   </Icon>
 );
+const TrashIcon = (p) => (
+  <Icon {...p}>
+    <path d="M4.5 6.5h15M9.5 6.5V4.5h5v2M6.5 6.5l.8 12.6a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12.6M10 10.5v6M14 10.5v6" />
+  </Icon>
+);
 const ChevronLeftIcon = (p) => (
   <Icon {...p}>
     <path d="M14.5 6 8.5 12l6 6" />
@@ -382,6 +387,7 @@ export default function App() {
   const [selectedRobotId, setSelectedRobotId] = useState(robots[0]?.id);
   const [selectedTopic, setSelectedTopic] = useState(null);
   const [addingPreset, setAddingPreset] = useState(null);
+  const [removingRobotId, setRemovingRobotId] = useState(null);
   const [pressed, setPressed] = useState(null);
   const [messages, setMessages] = useState([{ role: "agent", text: "Hive is ready." }]);
   const pressTimer = useRef(0);
@@ -420,6 +426,18 @@ export default function App() {
 
   function updateRobot(id, patch) {
     setRobots((current) => current.map((robot) => (robot.id === id ? { ...robot, ...patch } : robot)));
+  }
+
+  /* A robot that may be live is told to stop and disconnect as it leaves the fleet. If that request
+     fails, the backend's deadman still stops a robot whose keepalives have ended. */
+  function removeRobot(robot) {
+    setRemovingRobotId(null);
+    if (driveRef.current.robotId === robot.id) endDriveLocally();
+    if (robot.status === "connected" || robot.status === "connecting") {
+      postApi("/robots/disconnect", target(robot)).catch(() => {});
+    }
+    setRobots((current) => current.filter((r) => r.id !== robot.id));
+    if (view === "robot" && selectedRobot?.id === robot.id) setView("home");
   }
 
   /* ---------------------------------------------------------------- connection */
@@ -626,7 +644,7 @@ export default function App() {
   useEffect(() => {
     function onKeyDown(event) {
       if (event.defaultPrevented || event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
-      if (addingPreset !== null) return;
+      if (addingPreset !== null || removingRobotId !== null) return;
       const robot = selectedRobot;
       if (!robot || robot.status !== "connected") return;
       const el = event.target instanceof Element ? event.target : null;
@@ -653,7 +671,12 @@ export default function App() {
     };
   });
 
-  const robotActions = { onConnect: connectRobot, onDisconnect: disconnectRobot };
+  const robotActions = {
+    onConnect: connectRobot,
+    onDisconnect: disconnectRobot,
+    onRemove: (robot) => setRemovingRobotId(robot.id),
+  };
+  const robotToRemove = robots.find((robot) => robot.id === removingRobotId);
   const driveActions = (robot) => ({
     onPress: (action) => pressDrive(robot, action),
     onRelease: (action) => releaseDrive(robot, action),
@@ -729,6 +752,10 @@ export default function App() {
           suggestedDomainId={nextDomainId(robots)}
           takenDomains={Object.fromEntries(robots.map((r) => [r.domainId, r.name]))}
         />
+      )}
+
+      {robotToRemove && (
+        <RemoveRobotDialog onClose={() => setRemovingRobotId(null)} onConfirm={() => removeRobot(robotToRemove)} robot={robotToRemove} />
       )}
     </div>
   );
@@ -1019,7 +1046,7 @@ function LibraryList({ robots, selectedRobotId, onOpen, onAdd, className = "" })
 
 /* ================================================================== home */
 
-function HomeView({ robots, messages, onAdd, onOpen, setView, onConnect, onDisconnect }) {
+function HomeView({ robots, messages, onAdd, onOpen, setView, onConnect, onDisconnect, onRemove }) {
   const live = robots.filter((robot) => robot.status === "connected").length;
   const domains = robots.map((robot) => robot.domainId).filter(Number.isInteger);
   const domainRange = domains.length
@@ -1080,7 +1107,14 @@ function HomeView({ robots, messages, onAdd, onOpen, setView, onConnect, onDisco
           </SectionHead>
           <div className="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(272px,1fr))]">
             {robots.map((robot) => (
-              <RobotCard key={robot.id} onConnect={onConnect} onDisconnect={onDisconnect} onOpen={onOpen} robot={robot} />
+              <RobotCard
+                key={robot.id}
+                onConnect={onConnect}
+                onDisconnect={onDisconnect}
+                onOpen={onOpen}
+                onRemove={onRemove}
+                robot={robot}
+              />
             ))}
             <AddCard onAdd={() => onAdd("cameraRcCar")} />
           </div>
@@ -1105,7 +1139,7 @@ function HomeView({ robots, messages, onAdd, onOpen, setView, onConnect, onDisco
 
 /* A robot's card: its car's 3D model with its information. The card opens the robot; the play button
    (Spotify) connects it. */
-function RobotCard({ robot, onOpen, onConnect, onDisconnect }) {
+function RobotCard({ robot, onOpen, onConnect, onDisconnect, onRemove }) {
   const preset = PRESET_ROBOTS[robot.preset];
   const live = robot.status === "connected";
   return (
@@ -1116,6 +1150,18 @@ function RobotCard({ robot, onOpen, onConnect, onDisconnect }) {
         <span className="absolute left-3 top-3 rounded-full bg-panel/80 px-2.5 py-1 backdrop-blur">
           <StatusBadge compact status={robot.status} />
         </span>
+        <button
+          aria-label={`Remove ${robot.name}`}
+          className="ctl reveal pointer-events-auto absolute right-3 top-3 z-10 size-9 bg-panel/80 backdrop-blur hover:text-danger"
+          onClick={(event) => {
+            event.stopPropagation();
+            onRemove(robot);
+          }}
+          title={`Remove ${robot.name}`}
+          type="button"
+        >
+          <TrashIcon size={17} />
+        </button>
         <PlayButton
           className="reveal pointer-events-auto absolute bottom-3 right-3 z-10"
           onConnect={onConnect}
@@ -1237,11 +1283,24 @@ function EmptyFleet({ onAdd }) {
 
 /* ================================================================== robot */
 
-function RobotView({ robot, selectedTopic, onSelectTopic, onConnect, onDisconnect, onPress, onRelease, onStop, onGripper, pressed, onBack }) {
+function RobotView({
+  robot,
+  selectedTopic,
+  onSelectTopic,
+  onConnect,
+  onDisconnect,
+  onRemove,
+  onPress,
+  onRelease,
+  onStop,
+  onGripper,
+  pressed,
+  onBack,
+}) {
   const preset = PRESET_ROBOTS[robot.preset];
   return (
     <div>
-      <div className="px-8 pt-5">
+      <div className="flex items-center justify-between gap-4 px-8 pt-5">
         <button
           className="inline-flex min-h-11 items-center gap-1.5 rounded-lg pr-3 text-[14px] font-medium text-muted transition-colors hover:text-ink"
           onClick={onBack}
@@ -1249,6 +1308,14 @@ function RobotView({ robot, selectedTopic, onSelectTopic, onConnect, onDisconnec
         >
           <ChevronLeftIcon size={18} />
           Home
+        </button>
+        <button
+          className="inline-flex min-h-11 items-center gap-1.5 rounded-lg pl-3 text-[14px] font-medium text-muted transition-colors hover:text-danger"
+          onClick={() => onRemove(robot)}
+          type="button"
+        >
+          <TrashIcon size={17} />
+          Remove robot
         </button>
       </div>
 
@@ -1889,6 +1956,68 @@ function AddRobotDialog({ initialPreset, onAdd, onClose, suggestedDomainId, take
               </button>
             </div>
           </form>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function RemoveRobotDialog({ robot, onConfirm, onClose }) {
+  const cancelRef = useRef(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const live = robot.status === "connected" || robot.status === "connecting";
+
+  /* focus starts on Cancel so a stray Enter never removes a robot */
+  useEffect(() => {
+    const opener = document.activeElement;
+    cancelRef.current?.focus();
+    const onKey = (e) => {
+      if (e.key === "Escape") onCloseRef.current();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+    };
+  }, []);
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center overscroll-contain bg-sidebar/75 p-6 backdrop-blur-sm"
+      onMouseDown={onClose}
+    >
+      <section
+        aria-describedby="remove-robot-body"
+        aria-labelledby="remove-robot-title"
+        aria-modal="true"
+        className="w-full max-w-[460px] animate-enter rounded-2xl border border-line-strong bg-card p-6 shadow-float"
+        onMouseDown={(e) => e.stopPropagation()}
+        role="alertdialog"
+      >
+        <div className="flex items-center gap-4">
+          <ModelThumb preset={robot.preset} size={56} />
+          <div className="min-w-0">
+            <p className="text-[14px] font-semibold text-muted">Remove robot</p>
+            <h2 className="truncate font-display text-[28px] leading-tight tracking-title" id="remove-robot-title">
+              {robot.name}
+            </h2>
+          </div>
+        </div>
+        <p className="mt-4 text-[15px] leading-relaxed text-muted" id="remove-robot-body">
+          {live
+            ? "Hive will stop and disconnect this robot, then remove it from your fleet. "
+            : "This removes the robot from your fleet. "}
+          Its name, address and domain {robot.domainId} are forgotten; add it again to bring it back.
+        </p>
+        <div className="mt-6 flex flex-wrap justify-end gap-3">
+          <button className="btn btn-secondary" onClick={onClose} ref={cancelRef} type="button">
+            Cancel
+          </button>
+          <button className="btn btn-danger" onClick={onConfirm} type="button">
+            <TrashIcon size={17} />
+            Remove robot
+          </button>
         </div>
       </section>
     </div>
