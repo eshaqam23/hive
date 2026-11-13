@@ -5,3 +5,6 @@ dist
 npm-debug.log*
 __pycache__/
 *.py[cod]
+backend/test/mock_ros/robots/
+backend/test/mock_ros/calls.log
+backend/test/mock_ros/jitter

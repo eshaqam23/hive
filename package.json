@@ -4,14 +4,13 @@
   "version": "0.1.0",
   "type": "module",
   "engines": {
-    "node": ">=18.0.0",
-    "npm": ">=9.0.0"
+    "node": ">=20.19.0"
   },
   "bin": {
     "hive": "./scripts/hive.mjs"
   },
   "scripts": {
-    "backend": "bash -lc 'source ${HIVE_ROS_SETUP:-/opt/ros/jazzy/setup.bash} && python3 backend/server.py'",
+    "backend": "python3 backend/server.py",
     "dev": "vite --host 127.0.0.1",
     "frontend": "vite --host 127.0.0.1",
     "hive": "node scripts/hive.mjs",
@@ -19,9 +18,14 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
-    "vite": "^6.3.6",
+    "@vitejs/plugin-react": "^5.0.4",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1"
+    "react-dom": "^19.1.1",
+    "three": "^0.170.0",
+    "vite": "^7.1.9"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.5",
+    "tailwindcss": "^4.3.5"
+  }
 }
