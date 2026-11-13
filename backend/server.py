@@ -1,26 +1,16 @@
 #!/usr/bin/env python3
-"""Local Hive backend for ROS 2 robot control.
+"""Local Hive backend for ROS 2 manual robot control.
 
-Runs on the operator laptop (Ubuntu 24.04, ROS 2 Jazzy at /opt/ros/jazzy) and drives robots with the
-`ros2` CLI, scoped to one robot at a time by ROS_DOMAIN_ID and ROS_STATIC_PEERS.
-
-Safety model
-  * One command channel per robot and topic group. A new command kills any older process still in
-    flight on that channel, so the newest command always wins: a stop can never be overtaken by a
-    drive command that was still discovering the robot.
-  * Driving is hold-to-drive: /cmd_vel is published at DRIVE_RATE_HZ while the operator holds a
-    control. The page sends a keepalive every 250 ms; if keepalives stop for DEADMAN_SECONDS (tab
-    closed, browser crashed, Wi-Fi dropped) the backend stops the robot itself.
-  * Every stop kills the stream first, then publishes a zero Twist and waits for it to be delivered.
-  * Only the Hive web app's own origins may call the API (HIVE_ALLOWED_ORIGINS), so another website
-    open in the same browser cannot drive a robot.
+This backend is intended to run on Ubuntu 24.04 on the operator laptop. It
+expects ROS 2 Jazzy to be installed at /opt/ros/jazzy.
 """
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import argparse
 import json
 import os
 import re
-import shlex
+import select
 import signal
 import subprocess
 import sys
@@ -28,442 +18,226 @@ import threading
 import time
 from typing import Any
 
+
 HOST = os.environ.get("HIVE_BACKEND_HOST", "127.0.0.1")
 PORT = int(os.environ.get("HIVE_BACKEND_PORT", "8787"))
-ROS_SETUP = os.environ.get("HIVE_ROS_SETUP", "/opt/ros/jazzy/setup.bash")
-ALLOWED_ORIGINS = {
-    o.strip()
-    for o in os.environ.get(
-        "HIVE_ALLOWED_ORIGINS",
-        "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:4173,http://localhost:4173",
-    ).split(",")
-    if o.strip()
-}
-
-CMD_VEL = "/cmd_vel"
-GRIPPER_TOPIC = "/gripper_open"
-COMMAND_TOPIC = os.environ.get("HIVE_COMMAND_TOPIC", "/hive/command")
-DRIVE_RATE_HZ = 10
-DEADMAN_SECONDS = 1.0
-SUBSCRIBER_WAIT_SECONDS = 4      # how long a one-shot publish waits for the robot to be listening
-DISCOVERY_SPIN_SECONDS = 2.5     # how long connect / status listen for the robot's nodes and topics
-MAX_COMMAND_LENGTH = 500
-MAX_BODY_BYTES = 64 * 1024
 
 IP_OR_HOST_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
-SPLIT = "__HIVE_SPLIT__"
 
-LINEAR_SPEED = 0.5
-ANGULAR_SPEED = 1.0
-TWISTS = {
-    "forward": (LINEAR_SPEED, 0.0),
-    "backward": (-LINEAR_SPEED, 0.0),
-    "left": (0.0, ANGULAR_SPEED),
-    "right": (0.0, -ANGULAR_SPEED),
-    "stop": (0.0, 0.0),
+TWIST_VALUES = {
+    "forward": {"linear_x": 0.5, "angular_z": 0.0},
+    "backward": {"linear_x": -0.5, "angular_z": 0.0},
+    "left": {"linear_x": 0.0, "angular_z": 1.0},
+    "right": {"linear_x": 0.0, "angular_z": -1.0},
+    "stop": {"linear_x": 0.0, "angular_z": 0.0},
 }
-GRIPPER = {"gripper_open": "true", "gripper_close": "false"}
-CONTROL_ACTIONS = set(TWISTS) | set(GRIPPER)
+
+GRIPPER_VALUES = {"gripper_open": "open", "gripper_close": "close"}
+CONTROL_ACTIONS = {*TWIST_VALUES.keys(), *GRIPPER_VALUES.keys()}
+ROBOT_WORKERS: dict[tuple[str, int], "RobotWorker"] = {}
+ROBOT_WORKERS_LOCK = threading.Lock()
 
 
-class ApiError(Exception):
-    def __init__(self, status: int, message: str, **extra: Any):
-        super().__init__(message)
-        self.status, self.message, self.extra = status, message, extra
-
-
-# ------------------------------------------------------------------ validation
-
-
-def validate_peer(peer: Any) -> str:
-    peer = str(peer or "").strip()
+def validate_peer(peer: str) -> str:
+    peer = (peer or "").strip()
     if not peer or not IP_OR_HOST_RE.match(peer):
-        raise ApiError(400, "A valid robot IP address or hostname is required.")
+        raise ValueError("A valid robot IP address or hostname is required.")
     return peer
 
 
 def validate_domain_id(domain_id: Any) -> int:
     try:
         parsed = int(domain_id)
-    except (TypeError, ValueError):
-        raise ApiError(400, "A valid ROS domain ID is required.") from None
+    except (TypeError, ValueError) as error:
+        raise ValueError("A valid ROS domain ID is required.") from error
+
     if parsed < 0 or parsed > 232:
-        raise ApiError(400, "ROS domain ID must be between 0 and 232.")
+        raise ValueError("ROS domain ID must be between 0 and 232.")
     return parsed
 
 
-def ros_installed() -> bool:
-    return os.path.isfile(ROS_SETUP)
+def worker_key(peer: str, domain_id: int) -> tuple[str, int]:
+    return (validate_peer(peer), validate_domain_id(domain_id))
 
 
-def require_ros() -> None:
-    if not ros_installed():
-        raise ApiError(
-            503,
-            f"ROS 2 was not found at {ROS_SETUP}. Install ROS 2 Jazzy, or point HIVE_ROS_SETUP at your setup.bash.",
+class RobotWorker:
+    def __init__(self, peer: str, domain_id: int) -> None:
+        self.peer = validate_peer(peer)
+        self.domain_id = validate_domain_id(domain_id)
+        self.process: subprocess.Popen[str] | None = None
+
+    def start(self) -> None:
+        if self.is_running():
+            return
+
+        env = os.environ.copy()
+        env["ROS_DOMAIN_ID"] = str(self.domain_id)
+        env.pop("ROS_LOCALHOST_ONLY", None)
+        env["ROS_AUTOMATIC_DISCOVERY_RANGE"] = "LOCALHOST"
+        env["ROS_STATIC_PEERS"] = self.peer
+
+        self.process = subprocess.Popen(
+            [
+                sys.executable,
+                os.path.abspath(__file__),
+                "--robot-worker",
+                "--peer",
+                self.peer,
+                "--domain-id",
+                str(self.domain_id),
+            ],
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            text=True,
+            bufsize=1,
         )
+        self.wait_until_ready()
+
+    def wait_until_ready(self, timeout_seconds: float = 10.0) -> None:
+        if not self.process or not self.process.stdout:
+            raise RuntimeError("Robot worker failed to start.")
+
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                raise RuntimeError(f"Robot worker exited with code {self.process.returncode}.")
+
+            readable, _, _ = select.select([self.process.stdout], [], [], 0.1)
+            if not readable:
+                continue
+
+            line = self.process.stdout.readline().strip()
+            if not line:
+                continue
+
+            payload = json.loads(line)
+            if payload.get("ok"):
+                return
+            raise RuntimeError(payload.get("error", "Robot worker failed to initialize."))
+
+        self.stop()
+        raise RuntimeError("Robot worker timed out while starting.")
+
+    def is_running(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def send_action(self, action: str) -> None:
+        if action not in CONTROL_ACTIONS:
+            raise ValueError(f"Unsupported control action: {action}")
+        if not self.is_running() or not self.process or not self.process.stdin:
+            raise RuntimeError("Robot worker is not connected.")
+
+        self.process.stdin.write(json.dumps({"action": action}) + "\n")
+        self.process.stdin.flush()
+
+    def stop(self) -> None:
+        if not self.process:
+            return
+
+        if self.is_running():
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+        self.process = None
 
 
-def twist(action: str) -> str:
-    linear, angular = TWISTS[action]
-    return f"{{linear: {{x: {linear}}}, angular: {{z: {angular}}}}}"
+def get_or_start_worker(peer: str, domain_id: int) -> RobotWorker:
+    key = worker_key(peer, domain_id)
+    with ROBOT_WORKERS_LOCK:
+        worker = ROBOT_WORKERS.get(key)
+        if worker is None:
+            worker = RobotWorker(peer=key[0], domain_id=key[1])
+            ROBOT_WORKERS[key] = worker
+        worker.start()
+        return worker
 
 
-# ------------------------------------------------------------------ running ros2
+def stop_worker(peer: str, domain_id: int) -> bool:
+    key = worker_key(peer, domain_id)
+    with ROBOT_WORKERS_LOCK:
+        worker = ROBOT_WORKERS.pop(key, None)
+    if not worker:
+        return False
+    worker.stop()
+    return True
 
 
-def ros_script(peer: str, domain_id: int, command: str) -> str:
-    """The shell script for one ros2 call, scoped to one robot. Non-login bash, so the operator's
-    own profile cannot change the ROS environment underneath us."""
-    return " && ".join(
-        [
-            f"source {shlex.quote(ROS_SETUP)}",
-            f"export ROS_DOMAIN_ID={domain_id}",
-            "unset ROS_LOCALHOST_ONLY",
-            "export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST",
-            f"export ROS_STATIC_PEERS={shlex.quote(peer)}",
-            command,
-        ]
-    )
-
-
-def spawn(peer: str, domain_id: int, command: str) -> subprocess.Popen:
-    # its own process group, so the whole tree (bash and ros2) can be killed together
-    return subprocess.Popen(
-        ["bash", "-c", ros_script(peer, domain_id, command)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
-
-
-def kill(proc: subprocess.Popen | None) -> None:
-    if proc is None or proc.poll() is not None:
-        return
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-        proc.wait(timeout=1.5)
-    except (ProcessLookupError, PermissionError):
-        pass
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-
-
-def explain(stderr: str, topic: str) -> str:
-    text = (stderr or "").strip()
-    if "Timed out waiting for subscribers" in text:
-        if topic == CMD_VEL:
-            return f"Nothing on the robot is listening on {topic}. Check that its driver node is running."
-        return f"Nothing on the robot is listening on {topic}. Check that a node on the robot subscribes to it."
-    if "No such file or directory" in text and "setup.bash" in text:
-        return f"ROS 2 was not found at {ROS_SETUP}."
-    if "command not found" in text and "ros2" in text:
-        return "The ros2 command was not found after sourcing ROS 2."
-    return text.splitlines()[-1] if text else "The ros2 command failed."
-
-
-# ------------------------------------------------------------------ per-robot channels
-
-
-class Channel:
-    """Serialises the commands for one robot on one topic group. The newest command wins: starting a
-    command kills whatever older process is still in flight on this channel."""
-
-    def __init__(self, key: tuple[str, int, str]):
-        self.peer, self.domain_id, self.name = key
-        self.lock = threading.Lock()
-        self.proc: subprocess.Popen | None = None
-        self.generation = 0
-        self.streaming_action: str | None = None
-        self.last_keepalive = 0.0
-
-    def _replace(self, command: str) -> tuple[subprocess.Popen, int]:
-        kill(self.proc)
-        self.generation += 1
-        self.proc = spawn(self.peer, self.domain_id, command)
-        return self.proc, self.generation
-
-    def publish_once(self, topic: str, msg_type: str, msg: str) -> dict[str, Any]:
-        """Publish one message and wait until the robot has received it (or report why not)."""
-        command = (
-            f"exec ros2 topic pub --once -w 1 --max-wait-time-secs {SUBSCRIBER_WAIT_SECONDS} -p 0 "
-            f"-n hive_{self.name} {shlex.quote(topic)} {msg_type} {shlex.quote(msg)}"
-        )
-        with self.lock:
-            self.streaming_action = None
-            proc, generation = self._replace(command)
-        try:
-            _, stderr = proc.communicate(timeout=SUBSCRIBER_WAIT_SECONDS + 6)
-        except subprocess.TimeoutExpired:
-            kill(proc)
-            raise ApiError(504, f"Publishing to {topic} timed out.") from None
-        if generation != self.generation:
-            raise ApiError(409, "A newer command replaced this one.", superseded=True)
-        if proc.returncode != 0:
-            raise ApiError(502, explain(stderr, topic))
-        return {"ok": True, "topic": topic}
-
-    def start_stream(self, action: str) -> dict[str, Any]:
-        command = (
-            f"exec ros2 topic pub -r {DRIVE_RATE_HZ} -w 1 --max-wait-time-secs {SUBSCRIBER_WAIT_SECONDS} -p 0 "
-            f"-n hive_teleop {CMD_VEL} geometry_msgs/msg/Twist {shlex.quote(twist(action))}"
-        )
-        with self.lock:
-            self._replace(command)
-            self.streaming_action = action
-            self.last_keepalive = time.monotonic()
-        return {"ok": True, "streaming": True, "action": action}
-
-    def keepalive(self) -> dict[str, Any]:
-        with self.lock:
-            proc = self.proc
-            if self.streaming_action is None or proc is None:
-                return {"ok": True, "streaming": False}
-            self.last_keepalive = time.monotonic()
-            if proc.poll() is None:
-                return {"ok": True, "streaming": True, "action": self.streaming_action}
-            # the stream ended by itself: usually nothing on the robot listens on /cmd_vel
-            self.streaming_action = None
-            _, stderr = proc.communicate()
-        raise ApiError(502, explain(stderr, CMD_VEL), streaming=False)
-
-    def stop(self) -> dict[str, Any]:
-        """Kill the stream, then publish a zero Twist and wait for delivery."""
-        result = self.publish_once(CMD_VEL, "geometry_msgs/msg/Twist", twist("stop"))
-        return {**result, "streaming": False, "action": "stop"}
-
-    def deadman_expired(self) -> bool:
-        return (
-            self.streaming_action is not None
-            and time.monotonic() - self.last_keepalive > DEADMAN_SECONDS
-        )
-
-    def shutdown(self) -> None:
-        with self.lock:
-            self.streaming_action = None
-            kill(self.proc)
-
-
-channels: dict[tuple[str, int, str], Channel] = {}
-channels_lock = threading.Lock()
-
-
-def channel(peer: str, domain_id: int, name: str) -> Channel:
-    key = (peer, domain_id, name)
-    with channels_lock:
-        if key not in channels:
-            channels[key] = Channel(key)
-        return channels[key]
-
-
-def deadman_watch() -> None:
-    while True:
-        time.sleep(0.2)
-        with channels_lock:
-            expired = [c for c in channels.values() if c.name == "drive" and c.deadman_expired()]
-        for c in expired:
-            c.streaming_action = None  # claim it so the next tick does not stop it twice
-            print(f"[hive-backend] deadman: no keepalive from the page, stopping {c.peer} (domain {c.domain_id})")
-            threading.Thread(target=safe_stop, args=(c,), daemon=True).start()
-
-
-def safe_stop(c: Channel) -> None:
-    try:
-        c.stop()
-    except ApiError as error:
-        if not error.extra.get("superseded"):
-            print(f"[hive-backend] stop for {c.peer} failed: {error.message}")
-
-
-# ------------------------------------------------------------------ discovery
-
-
-def discover(peer: str, domain_id: int, *, with_topics: bool = True) -> dict[str, Any]:
-    """Look for the robot's nodes, topics and /cmd_vel listeners, without the ros2 daemon (a daemon
-    started earlier would remember an old peer list). The three queries run in parallel."""
-    spin = DISCOVERY_SPIN_SECONDS
-    parts = [f"ros2 node list --no-daemon --spin-time {spin}"]
-    if with_topics:
-        parts += [
-            f"ros2 topic list -t --no-daemon --spin-time {spin}",
-            f"ros2 topic info {CMD_VEL} --no-daemon --spin-time {spin}",
-        ]
-    runs = " ".join(f'( {p} > "$T/{i}" 2>/dev/null ) &' for i, p in enumerate(parts))
-    reads = f"; echo {SPLIT}; ".join(f'cat "$T/{i}"' for i in range(len(parts)))
-    # one subshell, so it stays inside ros_script's && chain: if sourcing ROS fails, nothing runs
-    script = f'( T="$(mktemp -d)"; {runs} wait; {reads}; rm -rf "$T" )'
-    proc = spawn(peer, domain_id, script)
-    try:
-        stdout, stderr = proc.communicate(timeout=spin * 2 + 10)
-    except subprocess.TimeoutExpired:
-        kill(proc)
-        raise ApiError(504, "Discovery timed out.") from None
-    if proc.returncode != 0:
-        raise ApiError(502, explain(stderr, CMD_VEL))
-
-    sections = stdout.split(SPLIT) + ["", "", ""]
-    nodes = [line.strip() for line in sections[0].splitlines() if line.strip().startswith("/")]
-    topics, cmd_vel_subscribers = [], 0
-    if with_topics:
-        for line in sections[1].splitlines():
-            m = re.match(r"^(/\S+)\s+\[(.+)\]$", line.strip())
-            if m:
-                topics.append({"name": m.group(1), "type": m.group(2)})
-        m = re.search(r"Subscription count:\s*(\d+)", sections[2])
-        cmd_vel_subscribers = int(m.group(1)) if m else 0
-    return {"nodes": nodes, "topics": topics, "cmd_vel_subscribers": cmd_vel_subscribers}
-
-
-# ------------------------------------------------------------------ http
+def stop_all_workers() -> None:
+    with ROBOT_WORKERS_LOCK:
+        workers = list(ROBOT_WORKERS.values())
+        ROBOT_WORKERS.clear()
+    for worker in workers:
+        worker.stop()
 
 
 class HiveRequestHandler(BaseHTTPRequestHandler):
-    server_version = "hive-backend"
-
-    def origin_allowed(self) -> bool:
-        origin = self.headers.get("Origin")
-        return origin is None or origin in ALLOWED_ORIGINS  # no Origin: curl, scripts, the same machine
-
     def end_headers(self) -> None:
-        origin = self.headers.get("Origin")
-        if origin in ALLOWED_ORIGINS:
-            self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
-            self.send_header("Access-Control-Max-Age", "600")
-        self.send_header("Vary", "Origin")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         super().end_headers()
 
     def do_OPTIONS(self) -> None:
-        self.send_response(204 if self.origin_allowed() else 403)
+        self.send_response(204)
         self.end_headers()
 
     def do_GET(self) -> None:
-        if not self.origin_allowed():
-            return self.write_json(403, {"ok": False, "error": "This origin may not use the Hive backend."})
         if self.path == "/api/health":
-            return self.write_json(200, {"ok": True, "service": "hive-backend", "ros": {"setup": ROS_SETUP, "found": ros_installed()}})
+            self.write_json(200, {"ok": True, "service": "hive-backend"})
+            return
         self.write_json(404, {"ok": False, "error": "Not found"})
 
     def do_POST(self) -> None:
-        routes = {
-            "/api/robots/connect": self.handle_connect,
-            "/api/robots/status": self.handle_status,
-            "/api/robots/control": self.handle_control,
-            "/api/robots/drive": self.handle_drive,
-            "/api/robots/drive/keepalive": self.handle_keepalive,
-            "/api/robots/command": self.handle_command,
-            "/api/robots/disconnect": self.handle_disconnect,
-        }
         try:
-            if not self.origin_allowed():
-                raise ApiError(403, "This origin may not use the Hive backend.")
-            handler = routes.get(self.path)
-            if handler is None:
-                raise ApiError(404, "Not found")
             body = self.read_json()
-            peer = validate_peer(body.get("ip"))
-            domain_id = validate_domain_id(body.get("domain_id"))
-            self.write_json(200, {"domain_id": domain_id, "peer": peer, **handler(body, peer, domain_id)})
-        except ApiError as error:
-            self.write_json(error.status, {"ok": False, "error": error.message, **error.extra})
-        except Exception as error:  # noqa: BLE001 - the API always answers in JSON
-            self.write_json(500, {"ok": False, "error": f"Unexpected backend error: {error}"})
+            if self.path == "/api/robots/connect":
+                self.handle_connect(body)
+            elif self.path == "/api/robots/control":
+                self.handle_control(body)
+            elif self.path == "/api/robots/disconnect":
+                self.handle_disconnect(body)
+            else:
+                self.write_json(404, {"ok": False, "error": "Not found"})
+        except ValueError as error:
+            self.write_json(400, {"ok": False, "error": str(error)})
+        except subprocess.TimeoutExpired:
+            self.write_json(504, {"ok": False, "error": "ROS command timed out."})
+        except Exception as error:  # noqa: BLE001 - API should return JSON failures.
+            self.write_json(500, {"ok": False, "error": str(error)})
 
-    # -------------------------------------------------------------- routes
+    def handle_connect(self, body: dict[str, Any]) -> None:
+        peer = validate_peer(str(body.get("ip", "")))
+        domain_id = validate_domain_id(body.get("domain_id"))
+        get_or_start_worker(peer, domain_id)
+        self.write_json(200, {"ok": True, "ip": peer, "domain_id": domain_id, "mode": "persistent_worker"})
 
-    def handle_connect(self, body: dict, peer: str, domain_id: int) -> dict:
-        require_ros()
-        found = discover(peer, domain_id)
-        if not found["nodes"] and not found["topics"]:
-            raise ApiError(
-                502,
-                f"No ROS 2 nodes answered at {peer} on domain {domain_id}. Check that the robot is on, on this "
-                f"network, and running with ROS_DOMAIN_ID={domain_id}.",
-                **found,
-            )
-        warnings = []
-        if found["cmd_vel_subscribers"] == 0:
-            warnings.append(f"Nothing on the robot is listening on {CMD_VEL}, so drive commands will not move it. Check its driver node.")
-        return {"ok": True, **found, "warnings": warnings}
-
-    def handle_status(self, body: dict, peer: str, domain_id: int) -> dict:
-        require_ros()
-        found = discover(peer, domain_id, with_topics=False)
-        if not found["nodes"]:
-            raise ApiError(502, f"Lost contact: no ROS 2 nodes answered at {peer} on domain {domain_id}.", nodes=[])
-        return {"ok": True, "nodes": found["nodes"]}
-
-    def handle_control(self, body: dict, peer: str, domain_id: int) -> dict:
-        """One-shot commands (the drive buttons' original behaviour, the gripper, stop)."""
-        require_ros()
+    def handle_control(self, body: dict[str, Any]) -> None:
+        peer = validate_peer(str(body.get("ip", "")))
+        domain_id = validate_domain_id(body.get("domain_id"))
         action = str(body.get("action", "")).strip()
         if action not in CONTROL_ACTIONS:
-            raise ApiError(400, f"Unsupported control action: {action}")
-        if action in GRIPPER:
-            result = channel(peer, domain_id, "gripper").publish_once(GRIPPER_TOPIC, "std_msgs/msg/Bool", f"{{data: {GRIPPER[action]}}}")
-        elif action == "stop":
-            result = channel(peer, domain_id, "drive").stop()
-        else:
-            result = channel(peer, domain_id, "drive").publish_once(CMD_VEL, "geometry_msgs/msg/Twist", twist(action))
-        return {**result, "action": action}
+            raise ValueError(f"Unsupported control action: {action}")
 
-    def handle_drive(self, body: dict, peer: str, domain_id: int) -> dict:
-        """Hold-to-drive: start (or switch) a /cmd_vel stream, or stop it."""
-        require_ros()
-        action = str(body.get("action", "")).strip()
-        if action not in TWISTS:
-            raise ApiError(400, f"Unsupported drive action: {action}")
-        drive = channel(peer, domain_id, "drive")
-        return drive.stop() if action == "stop" else drive.start_stream(action)
+        worker = get_or_start_worker(peer, domain_id)
+        worker.send_action(action)
+        self.write_json(200, {"ok": True, "ip": peer, "domain_id": domain_id, "action": action})
 
-    def handle_keepalive(self, body: dict, peer: str, domain_id: int) -> dict:
-        return channel(peer, domain_id, "drive").keepalive()
-
-    def handle_command(self, body: dict, peer: str, domain_id: int) -> dict:
-        require_ros()
-        text = str(body.get("text", "")).strip()
-        if not text:
-            raise ApiError(400, "The command is empty.")
-        if len(text) > MAX_COMMAND_LENGTH:
-            raise ApiError(400, f"Commands are limited to {MAX_COMMAND_LENGTH} characters.")
-        # a JSON string is a valid YAML double-quoted scalar, so any text survives intact
-        msg = f"{{data: {json.dumps(text)}}}"
-        return channel(peer, domain_id, "command").publish_once(COMMAND_TOPIC, "std_msgs/msg/String", msg)
-
-    def handle_disconnect(self, body: dict, peer: str, domain_id: int) -> dict:
-        """Stop the robot before letting it go. Best effort: an unreachable robot still disconnects."""
-        drive = channel(peer, domain_id, "drive")
-        if not ros_installed():
-            drive.shutdown()
-            return {"ok": True, "stopped": False}
-        try:
-            drive.stop()
-            return {"ok": True, "stopped": True}
-        except ApiError as error:
-            drive.shutdown()
-            return {"ok": True, "stopped": False, "warning": error.message}
-
-    # -------------------------------------------------------------- io
+    def handle_disconnect(self, body: dict[str, Any]) -> None:
+        peer = validate_peer(str(body.get("ip", "")))
+        domain_id = validate_domain_id(body.get("domain_id"))
+        stopped = stop_worker(peer, domain_id)
+        self.write_json(200, {"ok": True, "ip": peer, "domain_id": domain_id, "stopped": stopped})
 
     def read_json(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0") or 0)
-        if length > MAX_BODY_BYTES:
-            raise ApiError(413, "Request body is too large.")
-        raw = self.rfile.read(length) if length else b""
-        if not raw:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length == 0:
             return {}
-        try:
-            body = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            raise ApiError(400, "The request body is not valid JSON.") from None
-        if not isinstance(body, dict):
-            raise ApiError(400, "The request body must be a JSON object.")
-        return body
+        raw_body = self.rfile.read(content_length)
+        return json.loads(raw_body.decode("utf-8"))
 
     def write_json(self, status: int, payload: dict[str, Any]) -> None:
         response = json.dumps(payload).encode("utf-8")
@@ -474,35 +248,83 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(response)
 
     def log_message(self, format: str, *args: Any) -> None:
-        if "/keepalive" in (self.path or ""):
-            return  # four a second while driving; not worth a log line each
         print(f"[hive-backend] {self.address_string()} - {format % args}")
 
 
-def stop_everything(*_: Any) -> None:
-    """On shutdown, stop every robot that is still streaming, then exit."""
-    with channels_lock:
-        active = [c for c in channels.values() if c.name == "drive" and c.streaming_action]
-        everything = list(channels.values())
-    for c in active:
-        print(f"[hive-backend] shutting down: stopping {c.peer} (domain {c.domain_id})")
-        safe_stop(c)
-    for c in everything:
-        c.shutdown()
-    sys.exit(0)
-
-
 def main() -> None:
-    signal.signal(signal.SIGTERM, stop_everything)
-    signal.signal(signal.SIGINT, stop_everything)
-    threading.Thread(target=deadman_watch, daemon=True).start()
+    signal.signal(signal.SIGINT, lambda _signum, _frame: (stop_all_workers(), sys.exit(0)))
+    signal.signal(signal.SIGTERM, lambda _signum, _frame: (stop_all_workers(), sys.exit(0)))
     server = ThreadingHTTPServer((HOST, PORT), HiveRequestHandler)
-    server.daemon_threads = True
-    ros = "found" if ros_installed() else "NOT FOUND"
-    print(f"Hive backend listening on http://{HOST}:{PORT} (ROS 2 setup {ROS_SETUP}: {ros})")
-    print(f"Allowed origins: {', '.join(sorted(ALLOWED_ORIGINS))}")
-    server.serve_forever()
+    print(f"Hive backend listening on http://{HOST}:{PORT}")
+    try:
+        server.serve_forever()
+    finally:
+        stop_all_workers()
+
+
+def publish_twist(publisher: Any, twist_type: Any, action: str) -> None:
+    values = TWIST_VALUES[action]
+    message = twist_type()
+    message.linear.x = values["linear_x"]
+    message.angular.z = values["angular_z"]
+    publisher.publish(message)
+
+
+def publish_gripper(publisher: Any, string_type: Any, action: str) -> None:
+    message = string_type()
+    message.data = GRIPPER_VALUES[action]
+    publisher.publish(message)
+
+
+def run_robot_worker(peer: str, domain_id: int) -> None:
+    peer = validate_peer(peer)
+    domain_id = validate_domain_id(domain_id)
+
+    os.environ["ROS_DOMAIN_ID"] = str(domain_id)
+    os.environ.pop("ROS_LOCALHOST_ONLY", None)
+    os.environ["ROS_AUTOMATIC_DISCOVERY_RANGE"] = "LOCALHOST"
+    os.environ["ROS_STATIC_PEERS"] = peer
+
+    try:
+        import rclpy
+        from geometry_msgs.msg import Twist
+        from std_msgs.msg import String
+
+        rclpy.init(args=None)
+        node = rclpy.create_node(f"hive_controller_domain_{domain_id}")
+        cmd_vel_publisher = node.create_publisher(Twist, "/cmd_vel", 10)
+        gripper_publisher = node.create_publisher(String, "/gripper_command", 10)
+
+        print(json.dumps({"ok": True, "domain_id": domain_id, "ip": peer}), flush=True)
+
+        for line in sys.stdin:
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            action = str(payload.get("action", "")).strip()
+            if action in TWIST_VALUES:
+                publish_twist(cmd_vel_publisher, Twist, action)
+            elif action in GRIPPER_VALUES:
+                publish_gripper(gripper_publisher, String, action)
+            else:
+                print(json.dumps({"ok": False, "error": f"Unsupported action: {action}"}), flush=True)
+            rclpy.spin_once(node, timeout_sec=0.0)
+
+        node.destroy_node()
+        rclpy.shutdown()
+    except Exception as error:  # noqa: BLE001 - worker reports initialization failures as JSON.
+        print(json.dumps({"ok": False, "error": str(error)}), flush=True)
+        raise
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Hive backend")
+    parser.add_argument("--robot-worker", action="store_true", help="Run as a persistent per-robot ROS worker")
+    parser.add_argument("--peer", default="", help="Robot IP address or hostname")
+    parser.add_argument("--domain-id", type=int, default=42, help="ROS domain ID for this worker")
+    args = parser.parse_args()
+
+    if args.robot_worker:
+        run_robot_worker(args.peer, args.domain_id)
+    else:
+        main()

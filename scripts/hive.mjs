@@ -4,8 +4,13 @@ import { fileURLToPath } from "node:url";
 
 const viteBin = fileURLToPath(new URL("../node_modules/vite/bin/vite.js", import.meta.url));
 const backendScript = fileURLToPath(new URL("../backend/server.py", import.meta.url));
+const rosSetup = process.env.HIVE_ROS_SETUP || "/opt/ros/jazzy/setup.bash";
 
-const backend = spawn("python3", [backendScript], {
+function shellQuote(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+const backend = spawn("bash", ["-lc", `source ${shellQuote(rosSetup)} && python3 ${shellQuote(backendScript)}`], {
   stdio: "inherit",
   shell: false,
 });

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import RobotViewer from "./RobotViewer.jsx";
 import { PRESET_MODELS, snapshot } from "./robotModels.js";
 
@@ -214,7 +214,7 @@ const PRESET_ROBOTS = {
     ],
     topics: [
       { name: "/cmd_vel", type: "geometry_msgs/msg/Twist", viewer: "raw" },
-      { name: "/gripper_open", type: "std_msgs/msg/Bool", viewer: "raw" },
+      { name: "/gripper_command", type: "std_msgs/msg/String", viewer: "raw" },
     ],
     controls: [...DRIVE_CONTROLS, ...GRIPPER_CONTROLS],
   },
@@ -301,8 +301,7 @@ function loadFleet() {
         usedDomains.add(domainId);
       }
 
-      // a reload cannot know whether a robot is still reachable, and the backend's drive streams are
-      // gone with the old page: every robot starts disconnected and is connected again on purpose
+      // Reconnect explicitly after reloading the page.
       return {
         ...presetRobot,
         ...robot,
@@ -358,27 +357,6 @@ const describe = (robot) => robot.description || PRESET_ROBOTS[robot.preset].sum
 
 const DRIVE_LABEL = { forward: "forward", backward: "backward", left: "rotating left", right: "rotating right" };
 
-/* The backend's health route, polled so the sidebar can say whether commands will work and whether
-   ROS 2 is installed on this machine. */
-function useBackendHealth() {
-  const [health, setHealth] = useState({ state: "checking", ros: null });
-  useEffect(() => {
-    let alive = true;
-    const check = () =>
-      fetch(`${API_BASE_URL}/health`)
-        .then((r) => (r.ok ? r.json() : Promise.reject()))
-        .then((d) => alive && setHealth({ state: d.ok ? "online" : "offline", ros: d.ros || null }))
-        .catch(() => alive && setHealth({ state: "offline", ros: null }));
-    check();
-    const timer = window.setInterval(check, 15000);
-    return () => {
-      alive = false;
-      window.clearInterval(timer);
-    };
-  }, []);
-  return health;
-}
-
 /* ================================================================== app */
 
 export default function App() {
@@ -394,7 +372,6 @@ export default function App() {
   const driveRef = useRef({ robotId: null, action: null, timer: 0 });
   const robotsRef = useRef(robots);
   robotsRef.current = robots;
-  const backend = useBackendHealth();
 
   const selectedRobot = robots.find((robot) => robot.id === selectedRobotId) || robots[0];
 
@@ -428,8 +405,7 @@ export default function App() {
     setRobots((current) => current.map((robot) => (robot.id === id ? { ...robot, ...patch } : robot)));
   }
 
-  /* A robot that may be live is told to stop and disconnect as it leaves the fleet. If that request
-     fails, the backend's deadman still stops a robot whose keepalives have ended. */
+  /* Disconnect the persistent worker when removing a robot. */
   function removeRobot(robot) {
     setRemovingRobotId(null);
     if (driveRef.current.robotId === robot.id) endDriveLocally();
@@ -447,19 +423,8 @@ export default function App() {
     updateRobot(robot.id, { status: "connecting", mode: "Looking for the robot…", lastError: "", warnings: [] });
 
     try {
-      const found = await postApi("/robots/connect", target(robot));
-      updateRobot(robot.id, {
-        status: "connected",
-        mode: "Ready",
-        lastError: "",
-        warnings: found.warnings || [],
-        discovery: {
-          nodes: found.nodes || [],
-          topics: found.topics || [],
-          cmdVelSubscribers: found.cmd_vel_subscribers ?? 0,
-          at: Date.now(),
-        },
-      });
+      await postApi("/robots/connect", target(robot));
+      updateRobot(robot.id, { status: "connected", mode: "Ready", lastError: "", warnings: [], discovery: null });
       setSelectedTopic(robot.topics[0]);
     } catch (error) {
       updateRobot(robot.id, { status: "failed", mode: "Connection failed", lastError: error.message, warnings: [] });
@@ -478,11 +443,7 @@ export default function App() {
     }
   }
 
-  /* ---------------------------------------------------------------- driving
-   * Hold-to-drive. Pressing a direction starts a /cmd_vel stream on the backend; while it is held the
-   * page sends a keepalive every 250 ms; releasing (or Stop, or losing focus) stops the robot. If the
-   * page dies mid-drive, the backend's deadman stops the robot within a second. */
-
+  /* Manual controls use the persistent worker; releasing a direction sends stop. */
   function flash(action) {
     setPressed(action);
     window.clearTimeout(pressTimer.current);
@@ -495,28 +456,17 @@ export default function App() {
     setPressed(null);
   }
 
-  async function keepDriving(robot) {
-    if (driveRef.current.robotId !== robot.id) return;
-    try {
-      await postApi("/robots/drive/keepalive", target(robot));
-    } catch (error) {
-      if (driveRef.current.robotId !== robot.id) return;
-      endDriveLocally();
-      updateRobot(robot.id, { mode: "Drive stopped", lastError: error.message });
-    }
-  }
-
   async function pressDrive(robot, action) {
     if (!robot || robot.status !== "connected") return;
     if (action === "stop") return stopDrive(robot);
     const current = driveRef.current;
     if (current.robotId === robot.id && current.action === action) return;
     window.clearInterval(current.timer);
-    driveRef.current = { robotId: robot.id, action, timer: window.setInterval(() => keepDriving(robot), 250) };
+    driveRef.current = { robotId: robot.id, action, timer: 0 };
     setPressed(action);
     updateRobot(robot.id, { mode: `Driving ${DRIVE_LABEL[action]}`, lastError: "" });
     try {
-      await postApi("/robots/drive", { ...target(robot), action });
+      await postApi("/robots/control", { ...target(robot), action });
       if (driveRef.current.action === action) updateRobot(robot.id, { lastCommand: action });
     } catch (error) {
       if (driveRef.current.action !== action) return; // already released or switched
@@ -535,7 +485,7 @@ export default function App() {
     flash("stop");
     updateRobot(robot.id, { mode: "Stopping…" });
     try {
-      await postApi("/robots/drive", { ...target(robot), action: "stop" });
+      await postApi("/robots/control", { ...target(robot), action: "stop" });
       updateRobot(robot.id, { mode: "Stopped", lastCommand: "stop", lastError: "" });
     } catch (error) {
       if (error.data?.superseded) return; // a newer command took over
@@ -568,7 +518,7 @@ export default function App() {
       const robot = robotOf();
       if (!robot || !navigator.sendBeacon) return;
       navigator.sendBeacon(
-        `${API_BASE_URL}/robots/drive`,
+        `${API_BASE_URL}/robots/control`,
         new Blob([JSON.stringify({ ...target(robot), action: "stop" })], { type: "text/plain" }),
       );
     };
@@ -583,59 +533,16 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* Every 20 s, check that each connected robot still answers; a robot that went quiet is marked
-     "Lost contact" instead of showing Live forever. */
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      robotsRef.current
-        .filter((r) => r.status === "connected")
-        .forEach(async (robot) => {
-          try {
-            await postApi("/robots/status", target(robot));
-          } catch (error) {
-            const current = robotsRef.current.find((r) => r.id === robot.id);
-            if (current?.status !== "connected") return;
-            if (driveRef.current.robotId === robot.id) endDriveLocally();
-            updateRobot(robot.id, { status: "failed", mode: "Lost contact", lastError: error.message });
-          }
-        });
-    }, 20000);
-    return () => window.clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   /* ---------------------------------------------------------------- command log */
 
-  async function sendCommand(text) {
+  function sendCommand(text) {
     const command = text.trim();
     if (!command) return;
-
-    const connected = robots.filter((robot) => robot.status === "connected");
-    const id = `${Date.now()}-${Math.random()}`;
     setMessages((current) => [
       ...current,
       { role: "operator", text: command },
-      {
-        role: "agent",
-        id,
-        text: connected.length
-          ? `Sending to ${connected.map((r) => r.name).join(", ")}…`
-          : "No robots connected, so nothing was sent. The command is saved in this log.",
-      },
+      { role: "agent", text: "Command saved locally. Use the manual controls to send robot actions." },
     ]);
-    if (!connected.length) return;
-
-    const lines = await Promise.all(
-      connected.map(async (robot) => {
-        try {
-          const result = await postApi("/robots/command", { ...target(robot), text: command });
-          return `${robot.name}: delivered on ${result.topic}.`;
-        } catch (error) {
-          return `${robot.name}: not delivered. ${error.message}`;
-        }
-      }),
-    );
-    setMessages((current) => current.map((m) => (m.id === id ? { ...m, text: lines.join("\n") } : m)));
   }
 
   /* ---------------------------------------------------------------- keyboard
@@ -694,7 +601,6 @@ export default function App() {
       </a>
 
       <Sidebar
-        backend={backend}
         onAdd={() => setAddingPreset("cameraRcCar")}
         onOpen={openRobot}
         robots={robots}
@@ -877,7 +783,7 @@ function PageFooter() {
 
 /* ================================================================== sidebar (Claude) */
 
-function Sidebar({ robots, view, setView, selectedRobotId, onOpen, onAdd, backend }) {
+function Sidebar({ robots, view, setView, selectedRobotId, onOpen, onAdd }) {
   const items = [
     { id: "home", label: "Home", Icon: HomeIcon },
     { id: "command", label: "Command log", Icon: CommandIcon },
@@ -938,24 +844,16 @@ function Sidebar({ robots, view, setView, selectedRobotId, onOpen, onAdd, backen
         <LibraryList className="min-h-0 flex-1" onAdd={onAdd} onOpen={onOpen} robots={robots} selectedRobotId={selectedRobotId} />
       </div>
 
-      <BackendStatus backend={backend} />
+      <BackendStatus />
     </aside>
   );
 }
 
-/* The sidebar footer: whether the backend answers, and whether ROS 2 is installed where it runs. */
-function BackendStatus({ backend }) {
-  const noRos = backend.state === "online" && backend.ros && !backend.ros.found;
-  const dot = backend.state === "offline" ? "bg-danger" : noRos || backend.state === "checking" ? "bg-warn" : "bg-live";
-  const title =
-    backend.state === "offline"
-      ? "Backend offline"
-      : backend.state === "checking"
-        ? "Checking backend…"
-        : noRos
-          ? "ROS 2 not found"
-          : "Backend online · ROS 2 ready";
-  const detail = backend.state === "offline" ? "npm run backend" : noRos ? backend.ros.setup : BACKEND_ORIGIN.replace(/^https?:\/\//, "");
+/* Static connection information; no background connection probes. */
+function BackendStatus() {
+  const dot = "bg-faint";
+  const title = "ROS 2 remote control";
+  const detail = BACKEND_ORIGIN.replace(/^https?:\/\//, "");
   return (
     <div aria-live="polite" className="flex items-center gap-3 border-t border-line px-5 py-3.5">
       <span className={`size-2 flex-none rounded-full ${dot}`} />
@@ -1237,7 +1135,7 @@ function CommandCallout({ messages, onOpen }) {
           A command log for the whole fleet
         </h2>
         <p className="mt-3 max-w-[42ch] text-[17px] font-medium leading-relaxed">
-          Write an instruction once and Hive sends it to every connected robot.
+          Keep operator instructions in your local command log.
         </p>
         <button className="btn mt-6 bg-sidebar text-ink hover:bg-raised" onClick={onOpen} type="button">
           Send a command
@@ -1580,7 +1478,6 @@ function TopicList({ topics, selectedTopic, onSelectTopic }) {
 function CommandView({ robots, messages, onSend }) {
   const [draft, setDraft] = useState("");
   const endRef = useRef(null);
-  const connected = useMemo(() => robots.filter((r) => r.status === "connected"), [robots]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
@@ -1616,7 +1513,7 @@ function CommandView({ robots, messages, onSend }) {
           <p className="mt-3 font-display text-[clamp(30px,3.4vw,42px)] leading-tight tracking-display">
             Write an instruction once.
           </p>
-          <p className="mt-1 text-[16px] text-muted">Hive sends it to every connected robot on /hive/command.</p>
+          <p className="mt-1 text-[16px] text-muted">Instructions stay in this local log. Use the manual controls to send robot actions.</p>
         </div>
         {messages.map((m, i) => (
           <div className={m.role === "operator" ? "flex justify-end" : "flex gap-3"} key={`${i}-${m.role}`}>
@@ -1655,7 +1552,7 @@ function CommandView({ robots, messages, onSend }) {
           />
           <div className="mt-1 flex items-center justify-between gap-3 px-1">
             <p className="min-w-0 truncate text-[13px] text-faint">
-              {connected.length ? `Acting on ${connected.map((r) => r.name).join(", ")}` : "No robots connected. Commands are logged only."}
+              Commands are logged locally.
             </p>
             {/* Claude's send button: a coral rounded square */}
             <button
