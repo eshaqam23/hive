@@ -33,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from typing import Any
 
 HOST = os.environ.get("HIVE_BACKEND_HOST", "127.0.0.1")
@@ -126,6 +127,7 @@ def require_ros() -> None:
         raise ApiError(
             503,
             f"ROS 2 was not found at {ROS_SETUP}. Install ROS 2 Jazzy, or point HIVE_ROS_SETUP at your setup.bash.",
+            code="no_ros",
         )
 
 
@@ -193,6 +195,7 @@ class RobotWorker:
                 raise ApiError(
                     502,
                     f"The ROS 2 worker for {self.peer} exited (code {process.returncode}). See the backend terminal.",
+                    code="worker_failed",
                 )
             readable, _, _ = select.select([process.stdout], [], [], 0.1)
             if not readable:
@@ -206,14 +209,18 @@ class RobotWorker:
                 continue
             if payload.get("ready"):
                 return
-            raise ApiError(502, f"The ROS 2 worker for {self.peer} failed to start: {payload.get('error')}")
-        raise ApiError(504, f"The ROS 2 worker for {self.peer} took too long to start.")
+            raise ApiError(502, f"The ROS 2 worker for {self.peer} failed to start: {payload.get('error')}", code="worker_failed")
+        raise ApiError(504, f"The ROS 2 worker for {self.peer} took too long to start.", code="worker_failed")
 
     def _read_replies(self, process: subprocess.Popen[str]) -> None:
         for line in process.stdout:
             try:
                 reply = json.loads(line)
             except ValueError:
+                reply = None
+            if not isinstance(reply, dict) or "id" not in reply:
+                # DDS and ROS libraries can print to stdout too; show it rather than choke on it
+                print(f"[hive-worker {self.peer}] {line.rstrip()}", flush=True)
                 continue
             with self.replies_lock:
                 event = self.waiting.pop(reply.get("id"), None)
@@ -222,6 +229,12 @@ class RobotWorker:
             if event:
                 event.set()
         # the worker is gone: wake every request still waiting, so each reports it
+        if self.process is process:
+            try:
+                code = process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                code = "unknown"
+            print(f"[hive-backend] the ROS 2 worker for {self.peer} (domain {self.domain_id}) exited unexpectedly (code {code})", flush=True)
         with self.replies_lock:
             events = list(self.waiting.values())
             self.waiting.clear()
@@ -243,11 +256,11 @@ class RobotWorker:
         with self.write_lock:
             process = self.process
             if process is None or process.poll() is not None or process.stdin is None:
-                raise ApiError(502, "The ROS 2 worker for this robot is not running. Connect again.")
+                raise ApiError(502, "The ROS 2 worker for this robot is not running.", code="worker_gone")
             if channel and seq is not None:
                 last_session, last_seq = self.last_order.get(channel, (None, -1))
                 if session == last_session and seq <= last_seq:
-                    raise ApiError(409, "A newer command replaced this one.", superseded=True)
+                    raise ApiError(409, "A newer command replaced this one.", superseded=True, code="superseded")
                 self.last_order[channel] = (session, seq)
             self.next_id += 1
             request_id = self.next_id
@@ -260,16 +273,16 @@ class RobotWorker:
             except OSError:
                 with self.replies_lock:
                     self.waiting.pop(request_id, None)
-                raise ApiError(502, "Lost the ROS 2 worker for this robot. Connect again.") from None
+                raise ApiError(502, "Lost the ROS 2 worker for this robot.", code="worker_gone") from None
 
         if not event.wait(timeout):
             with self.replies_lock:
                 self.waiting.pop(request_id, None)
-            raise ApiError(504, f"The ROS 2 worker did not answer in time ({op}).")
+            raise ApiError(504, f"The ROS 2 worker did not answer in time ({op}).", code="timeout")
         with self.replies_lock:
             reply = self.replies.pop(request_id, None)
         if reply is None:
-            raise ApiError(502, "The ROS 2 worker for this robot exited. Connect again.")
+            raise ApiError(502, "The ROS 2 worker for this robot exited. See the backend terminal.", code="worker_gone")
         if not reply.get("ok"):
             raise ApiError(reply.get("status", 502), reply.get("error", "The ROS 2 worker failed."), **reply.get("extra", {}))
         return {k: v for k, v in reply.items() if k not in ("id", "ok")}
@@ -406,15 +419,16 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
     # -------------------------------------------------------------- routes
 
     def handle_connect(self, body: dict, peer: str, domain_id: int) -> dict:
+        """Find the robot. A failed attempt leaves the worker running, so DDS keeps looking for the robot
+        between the page's retries; Disconnect ends it."""
         worker = get_worker(peer, domain_id)
         found = worker.discover(with_topics=True)
         if not found["nodes"] and not found["topics"]:
-            if drop_worker(peer, domain_id):
-                worker.stop()
             raise ApiError(
                 502,
                 f"No ROS 2 nodes answered at {peer} on domain {domain_id}. Check that the robot is on, on this "
                 f"network, and running with ROS_DOMAIN_ID={domain_id}.",
+                code="not_found",
                 **found,
             )
         warnings = []
@@ -425,7 +439,7 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
     def handle_status(self, body: dict, peer: str, domain_id: int) -> dict:
         found = get_worker(peer, domain_id).discover(with_topics=False)
         if not found["nodes"]:
-            raise ApiError(502, f"Lost contact: no ROS 2 nodes answered at {peer} on domain {domain_id}.", nodes=[])
+            raise ApiError(502, f"Lost contact: no ROS 2 nodes answered at {peer} on domain {domain_id}.", nodes=[], code="lost_contact")
         return {"ok": True, "nodes": found["nodes"]}
 
     def handle_control(self, body: dict, peer: str, domain_id: int) -> dict:
@@ -468,7 +482,7 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
     def handle_keepalive(self, body: dict, peer: str, domain_id: int) -> dict:
         worker = existing_worker(peer, domain_id)
         if worker is None:
-            raise ApiError(502, "The backend is not driving this robot any more. Connect again.", streaming=False)
+            raise ApiError(502, "The backend is not driving this robot any more.", streaming=False, code="worker_gone")
         return worker.request("keepalive", timeout=3)
 
     def handle_command(self, body: dict, peer: str, domain_id: int) -> dict:
@@ -575,6 +589,7 @@ class RobotWorkerLoop:
         self.deadman_tripped = False
         self.next_publish_at = time.monotonic()
         self.pending: list[dict[str, Any]] = []  # requests waiting on discovery or a listener
+        self.last_logged: tuple[str, float] = ("", 0.0)
         self.requests: queue.Queue[dict[str, Any] | None] = queue.Queue()
 
     # -------------------------------------------------------------- replies
@@ -627,11 +642,15 @@ class RobotWorkerLoop:
 
     def start_driving(self, action: str) -> None:
         now = time.monotonic()
+        if action != self.action:
+            self.log(f"driving {action} ({self.listeners(CMD_VEL)} listening on {CMD_VEL})")
         self.action, self.last_keepalive, self.deadman_tripped = action, now, False
         self.publish_twist(action)
         self.next_publish_at = now + 1.0 / DRIVE_RATE_HZ
 
     def stop_driving(self) -> None:
+        if self.action != "stop":
+            self.log("stopped")
         self.action = "stop"
         self.publish_twist("stop")
 
@@ -647,7 +666,7 @@ class RobotWorkerLoop:
                 self.reply(request_id, action="stop", streaming=False)
             elif action in TWISTS:
                 if self.listeners(CMD_VEL) == 0:
-                    self.fail(request_id, 502, no_listener(CMD_VEL), streaming=False)
+                    self.fail(request_id, 502, no_listener(CMD_VEL), streaming=False, code="no_listener")
                     return
                 self.start_driving(action)
                 self.reply(request_id, action=action, streaming=True)
@@ -664,6 +683,7 @@ class RobotWorkerLoop:
                     502,
                     f"The robot was stopped because keepalives from the page stopped arriving for over {DEADMAN_SECONDS:g} s.",
                     streaming=False,
+                    code="deadman",
                 )
             else:
                 self.reply(request_id, streaming=False)
@@ -679,23 +699,55 @@ class RobotWorkerLoop:
             self.fail(request_id, 400, f"Unsupported worker request: {op}")
 
     def settle_pending(self) -> None:
-        now = time.monotonic()
         for request in list(self.pending):
-            done_waiting = now >= request["deadline"]
-            if request["op"] == "publish":
-                topic = request["topic"]
-                if self.listeners(topic) > 0:
-                    self.publish_value(topic, request["value"])
-                    self.reply(request["id"], topic=topic)
-                elif done_waiting:
-                    self.fail(request["id"], 502, no_listener(topic))
-                else:
-                    continue
-            elif done_waiting or self.listeners(CMD_VEL) > 0:
-                self.reply(request["id"], **self.discover(bool(request.get("topics"))))
-            else:
-                continue
-            self.pending.remove(request)
+            try:
+                done = self.settle(request)
+            except Exception as error:  # noqa: BLE001 - fail this request, keep the worker
+                self.log(f"{request['op']} failed:\n{traceback.format_exc()}")
+                self.fail(request["id"], 500, f"The ROS 2 worker hit an error: {type(error).__name__}: {error}", code="worker_error")
+                done = True
+            if done:
+                self.pending.remove(request)
+
+    def settle(self, request: dict[str, Any]) -> bool:
+        """Answer a waiting request if it can be answered now. Returns True once it has been."""
+        done_waiting = time.monotonic() >= request["deadline"]
+        if request["op"] == "publish":
+            topic = request["topic"]
+            if self.listeners(topic) > 0:
+                self.publish_value(topic, request["value"])
+                self.reply(request["id"], topic=topic)
+                return True
+            if done_waiting:
+                self.fail(request["id"], 502, no_listener(topic), code="no_listener")
+                return True
+            return False
+        if done_waiting or self.listeners(CMD_VEL) > 0:
+            self.reply(request["id"], **self.discover(bool(request.get("topics"))))
+            return True
+        return False
+
+    def tick(self) -> None:
+        """The deadman, the 20 Hz drive stream, and ROS housekeeping."""
+        now = time.monotonic()
+        if self.action != "stop" and now - self.last_keepalive > DEADMAN_SECONDS:
+            self.log("deadman: no keepalive from the page, stopping the robot")
+            self.deadman_tripped = True
+            self.stop_driving()
+        if now >= self.next_publish_at:
+            if self.action != "stop":
+                self.publish_twist(self.action)
+            self.next_publish_at += 1.0 / DRIVE_RATE_HZ
+            if self.next_publish_at < now:  # fell behind (e.g. a slow discovery): don't burst
+                self.next_publish_at = now + 1.0 / DRIVE_RATE_HZ
+        self.rclpy.spin_once(self.node, timeout_sec=0.0)
+
+    def log_throttled(self, text: str) -> None:
+        """Log a repeating error once, then at most every 5 s."""
+        now = time.monotonic()
+        if text != self.last_logged[0] or now - self.last_logged[1] > 5:
+            self.log(text)
+            self.last_logged = (text, now)
 
     def read_stdin(self) -> None:
         for line in sys.stdin:
@@ -722,22 +774,18 @@ class RobotWorkerLoop:
                     request = {}
                 if request is None:
                     break
+                # one failing ROS call must not end the worker: that would cut the robot's connection
                 if request:
-                    self.handle(request)
+                    try:
+                        self.handle(request)
+                    except Exception as error:  # noqa: BLE001
+                        self.log(f"{request.get('op')} failed:\n{traceback.format_exc()}")
+                        self.fail(request.get("id"), 500, f"The ROS 2 worker hit an error: {type(error).__name__}: {error}", code="worker_error")
                 self.settle_pending()
-
-                now = time.monotonic()
-                if self.action != "stop" and now - self.last_keepalive > DEADMAN_SECONDS:
-                    self.log("deadman: no keepalive from the page, stopping the robot")
-                    self.deadman_tripped = True
-                    self.stop_driving()
-                if now >= self.next_publish_at:
-                    if self.action != "stop":
-                        self.publish_twist(self.action)
-                    self.next_publish_at += 1.0 / DRIVE_RATE_HZ
-                    if self.next_publish_at < now:  # fell behind (e.g. a slow discovery): don't burst
-                        self.next_publish_at = now + 1.0 / DRIVE_RATE_HZ
-                self.rclpy.spin_once(self.node, timeout_sec=0.0)
+                try:
+                    self.tick()
+                except Exception:  # noqa: BLE001
+                    self.log_throttled(f"drive loop error (worker still running):\n{traceback.format_exc()}")
         finally:
             self.stop_driving()
             self.node.destroy_node()

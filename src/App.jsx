@@ -226,8 +226,12 @@ const STATUS = {
   connected: { label: "Live", dot: "bg-live", text: "text-live" },
   offline: { label: "Offline", dot: "bg-faint", text: "text-muted" },
   connecting: { label: "Connecting…", dot: "bg-warn", text: "text-warn" },
+  reconnecting: { label: "Reconnecting…", dot: "bg-warn", text: "text-warn" },
   failed: { label: "Connection failed", dot: "bg-danger", text: "text-danger" },
 };
+
+/* "connecting" covers both a first connect and winning back a lost connection; only the label differs */
+const displayStatus = (robot) => (robot.status === "connecting" && robot.reconnecting ? "reconnecting" : robot.status);
 
 /* ================================================================== fleet logic (unchanged behaviour) */
 
@@ -308,6 +312,7 @@ function loadFleet() {
         ...robot,
         domainId,
         status: "offline",
+        reconnecting: false,
         mode: "Idle",
         lastError: "",
         warnings: [],
@@ -351,6 +356,51 @@ async function postApi(path, payload) {
     throw error;
   }
   return data;
+}
+
+/* Failures that mean the link to the robot is gone, so Hive reconnects by itself, and failures that
+   retrying cannot fix (bad input, ROS 2 not installed). The backend names each failure in `code`. */
+const LINK_LOST_CODES = new Set(["worker_gone", "worker_failed", "worker_error", "lost_contact", "not_found", "timeout"]);
+const linkLost = (error) => Boolean(error.unreachable || LINK_LOST_CODES.has(error.data?.code) || error.status === 504);
+const retryable = (error) => ![400, 403, 404, 413].includes(error.status) && error.data?.code !== "no_ros";
+const RETRY_DELAYS_MS = [1000, 2000, 3000, 5000]; // then every 5 s, until it works or the operator disconnects
+const STATUS_CHECK_MS = 10000;
+const ACTIVITY_LIMIT = 200;
+let activityId = 0;
+
+const ACTION_TEXT = {
+  forward: "forward",
+  backward: "backward",
+  left: "rotate left",
+  right: "rotate right",
+  stop: "stop",
+  gripper_open: "open gripper",
+  gripper_close: "close gripper",
+};
+
+function requestLabel(path, payload) {
+  const action = payload?.action ? ` ${ACTION_TEXT[payload.action] || payload.action}` : "";
+  const seq = payload?.seq ? ` #${payload.seq}` : "";
+  return `${path.replace("/robots/", "")}${action}${seq}`;
+}
+
+function replySummary(path, data) {
+  switch (path) {
+    case "/robots/connect":
+      return `found ${data.nodes?.length ?? 0} nodes and ${data.topics?.length ?? 0} topics, ${data.cmd_vel_subscribers ?? 0} listening on /cmd_vel`;
+    case "/robots/status":
+      return `${data.nodes?.length ?? 0} nodes answering`;
+    case "/robots/drive":
+      return data.streaming ? `robot driving ${ACTION_TEXT[data.action]}, streaming /cmd_vel at 20 Hz` : "robot stopped (zero Twist sent)";
+    case "/robots/control":
+      return data.topic ? `published on ${data.topic}` : `robot ${data.streaming ? "driving" : "stopped"}`;
+    case "/robots/command":
+      return `delivered on ${data.topic}`;
+    case "/robots/disconnect":
+      return data.stopped ? "robot stopped, link closed" : data.warning || "link closed";
+    default:
+      return "ok";
+  }
 }
 
 function greeting(date = new Date()) {
@@ -398,6 +448,8 @@ export default function App() {
   const [messages, setMessages] = useState([{ role: "agent", text: "Hive is ready." }]);
   const pressTimer = useRef(0);
   const driveRef = useRef({ robotId: null, action: null, timer: 0 });
+  const retryRef = useRef({}); // robot id -> the connect loop that is still trying
+  const [activity, setActivity] = useState({}); // robot id -> newest-first log entries
   const robotsRef = useRef(robots);
   robotsRef.current = robots;
   const backend = useBackendHealth();
@@ -438,6 +490,7 @@ export default function App() {
      fails, the backend's deadman still stops a robot whose keepalives have ended. */
   function removeRobot(robot) {
     setRemovingRobotId(null);
+    stopRetrying(robot.id);
     if (driveRef.current.robotId === robot.id) endDriveLocally();
     if (robot.status === "connected" || robot.status === "connecting") {
       postApi("/robots/disconnect", target(robot)).catch(() => {});
@@ -446,38 +499,120 @@ export default function App() {
     if (view === "robot" && selectedRobot?.id === robot.id) setView("home");
   }
 
-  /* ---------------------------------------------------------------- connection */
+  /* ---------------------------------------------------------------- activity log */
 
-  async function connectRobot(robot) {
-    setSelectedRobotId(robot.id);
-    updateRobot(robot.id, { status: "connecting", mode: "Looking for the robot…", lastError: "", warnings: [] });
+  function logActivity(robotId, level, text) {
+    const entry = { id: ++activityId, at: Date.now(), level, text };
+    setActivity((all) => ({ ...all, [robotId]: [entry, ...(all[robotId] || [])].slice(0, ACTIVITY_LIMIT) }));
+  }
 
+  /* Every robot request goes through here, so the robot's activity log shows what was sent, how long
+     it took and exactly what came back. Keepalives (four a second) are logged only when they fail. */
+  async function robotApi(robot, path, payload, { quiet = false } = {}) {
+    const label = requestLabel(path, payload);
+    const started = performance.now();
+    const took = () => `${Math.round(performance.now() - started)} ms`;
     try {
-      const found = await postApi("/robots/connect", target(robot));
-      updateRobot(robot.id, {
-        status: "connected",
-        mode: "Ready",
-        lastError: "",
-        warnings: found.warnings || [],
-        discovery: {
-          nodes: found.nodes || [],
-          topics: found.topics || [],
-          cmdVelSubscribers: found.cmd_vel_subscribers ?? 0,
-          at: Date.now(),
-        },
-      });
-      setSelectedTopic(robot.topics[0]);
+      const data = await postApi(path, payload);
+      if (!quiet) logActivity(robot.id, "ok", `${label}: ${replySummary(path, data)} · ${took()}`);
+      return data;
     } catch (error) {
-      updateRobot(robot.id, { status: "failed", mode: "Connection failed", lastError: error.message, warnings: [] });
+      const status = error.unreachable ? "no response" : `HTTP ${error.status}${error.data?.code ? ` ${error.data.code}` : ""}`;
+      logActivity(robot.id, error.data?.superseded ? "info" : "error", `${label}: ${status} · ${error.message} · ${took()}`);
+      throw error;
     }
   }
 
-  /* Disconnecting stops the robot first; an unreachable robot still disconnects. */
-  async function disconnectRobot(robot) {
+  /* ---------------------------------------------------------------- connection
+   * Connecting never gives up on its own: a failed attempt is retried (1, 2, 3, then every 5 s) until
+   * the robot answers or the operator presses Disconnect. A connection that is lost later (status
+   * check, keepalive or drive failure) goes back into the same loop. Only failures that retrying
+   * cannot fix (bad address, ROS 2 not installed) stop it. */
+
+  function connectRobot(robot) {
+    setSelectedRobotId(robot.id);
+    setSelectedTopic(robot.topics[0]);
+    logActivity(robot.id, "info", `Connect: looking for ${robot.host} on ROS domain ${robot.domainId}.`);
+    keepConnecting(robot);
+  }
+
+  function keepConnecting(robot, lostReason = "") {
+    stopRetrying(robot.id);
+    const run = { attempt: 0, timer: 0 };
+    retryRef.current[robot.id] = run;
     if (driveRef.current.robotId === robot.id) endDriveLocally();
-    updateRobot(robot.id, { status: "offline", mode: "Stopping…", warnings: [] });
+    if (lostReason) logActivity(robot.id, "warn", `Connection lost: ${lostReason} Reconnecting until it works; press Disconnect to stop.`);
+    updateRobot(robot.id, {
+      status: "connecting",
+      reconnecting: Boolean(lostReason),
+      mode: lostReason ? "Reconnecting…" : "Looking for the robot…",
+      lastError: lostReason,
+      warnings: [],
+    });
+
+    const attempt = async () => {
+      const current = robotsRef.current.find((r) => r.id === robot.id);
+      if (retryRef.current[robot.id] !== run || !current) return;
+      run.attempt += 1;
+      if (run.attempt > 1) updateRobot(robot.id, { mode: `${lostReason ? "Reconnecting" : "Connecting"} · attempt ${run.attempt}` });
+      try {
+        const found = await robotApi(current, "/robots/connect", target(current));
+        if (retryRef.current[robot.id] !== run) {
+          // the operator disconnected while this attempt was in flight: let the robot go again
+          const now = robotsRef.current.find((r) => r.id === robot.id);
+          if (now?.status === "offline" && !retryRef.current[robot.id]) postApi("/robots/disconnect", target(current)).catch(() => {});
+          return;
+        }
+        delete retryRef.current[robot.id];
+        updateRobot(robot.id, {
+          status: "connected",
+          reconnecting: false,
+          mode: lostReason ? "Reconnected" : "Ready",
+          lastError: "",
+          warnings: found.warnings || [],
+          discovery: {
+            nodes: found.nodes || [],
+            topics: found.topics || [],
+            cmdVelSubscribers: found.cmd_vel_subscribers ?? 0,
+            at: Date.now(),
+          },
+        });
+        logActivity(robot.id, "ok", run.attempt > 1 ? `Connected after ${run.attempt} attempts.` : "Connected.");
+        (found.warnings || []).forEach((w) => logActivity(robot.id, "warn", w));
+      } catch (error) {
+        if (retryRef.current[robot.id] !== run) return;
+        if (!retryable(error)) {
+          delete retryRef.current[robot.id];
+          updateRobot(robot.id, { status: "failed", reconnecting: false, mode: "Connection failed", lastError: error.message });
+          logActivity(robot.id, "error", "Stopped trying: retrying cannot fix this. Fix it, then press Connect.");
+          return;
+        }
+        const delay = RETRY_DELAYS_MS[Math.min(run.attempt - 1, RETRY_DELAYS_MS.length - 1)];
+        updateRobot(robot.id, { mode: `Attempt ${run.attempt} failed · retrying in ${delay / 1000} s`, lastError: error.message });
+        logActivity(robot.id, "info", `Attempt ${run.attempt} failed. Retrying in ${delay / 1000} s.`);
+        run.timer = window.setTimeout(attempt, delay);
+      }
+    };
+    attempt();
+  }
+
+  function stopRetrying(robotId) {
+    const run = retryRef.current[robotId];
+    if (!run) return false;
+    window.clearTimeout(run.timer);
+    delete retryRef.current[robotId];
+    return true;
+  }
+
+  /* Disconnecting stops the robot first; an unreachable robot still disconnects. While Hive is still
+     trying to connect, Disconnect is how the operator tells it to stop trying. */
+  async function disconnectRobot(robot) {
+    const wasTrying = stopRetrying(robot.id);
+    if (driveRef.current.robotId === robot.id) endDriveLocally();
+    updateRobot(robot.id, { status: "offline", reconnecting: false, mode: "Stopping…", warnings: [] });
+    logActivity(robot.id, "info", wasTrying ? "Disconnect: stopped trying to connect." : "Disconnect: stopping the robot and closing the link.");
     try {
-      const result = await postApi("/robots/disconnect", target(robot));
+      const result = await robotApi(robot, "/robots/disconnect", target(robot));
       updateRobot(robot.id, { mode: result.stopped ? "Stopped and disconnected" : "Disconnected", lastError: result.warning || "" });
     } catch (error) {
       updateRobot(robot.id, { mode: "Disconnected", lastError: error.message });
@@ -501,14 +636,21 @@ export default function App() {
     setPressed(null);
   }
 
+  /* a failed drive request either lost the link (reconnect) or was refused (say why, stay connected) */
+  function driveFailed(robot, error, mode) {
+    if (linkLost(error)) return keepConnecting(robot, error.message);
+    updateRobot(robot.id, { mode, lastError: error.message });
+  }
+
   async function keepDriving(robot) {
     if (driveRef.current.robotId !== robot.id) return;
     try {
-      await postApi("/robots/drive/keepalive", target(robot));
+      await robotApi(robot, "/robots/drive/keepalive", target(robot), { quiet: true });
+      if (driveRef.current.robotId === robot.id) driveRef.current.keepalives += 1;
     } catch (error) {
       if (driveRef.current.robotId !== robot.id) return;
       endDriveLocally();
-      updateRobot(robot.id, { mode: "Drive stopped", lastError: error.message });
+      driveFailed(robot, error, "Drive stopped");
     }
   }
 
@@ -518,16 +660,22 @@ export default function App() {
     const current = driveRef.current;
     if (current.robotId === robot.id && current.action === action) return;
     window.clearInterval(current.timer);
-    driveRef.current = { robotId: robot.id, action, timer: window.setInterval(() => keepDriving(robot), 250) };
+    driveRef.current = {
+      robotId: robot.id,
+      action,
+      startedAt: performance.now(),
+      keepalives: 0,
+      timer: window.setInterval(() => keepDriving(robot), 250),
+    };
     setPressed(action);
     updateRobot(robot.id, { mode: `Driving ${DRIVE_LABEL[action]}`, lastError: "" });
     try {
-      await postApi("/robots/drive", ordered(robot, action));
+      await robotApi(robot, "/robots/drive", ordered(robot, action));
       if (driveRef.current.action === action) updateRobot(robot.id, { lastCommand: action });
     } catch (error) {
       if (driveRef.current.action !== action) return; // already released or switched
       endDriveLocally();
-      updateRobot(robot.id, { mode: "Drive failed", lastError: error.message });
+      driveFailed(robot, error, "Drive failed");
     }
   }
 
@@ -537,15 +685,20 @@ export default function App() {
 
   async function stopDrive(robot) {
     if (!robot) return;
+    const held = driveRef.current;
+    if (held.robotId === robot.id && held.action) {
+      const seconds = ((performance.now() - held.startedAt) / 1000).toFixed(1);
+      logActivity(robot.id, "info", `Released ${ACTION_TEXT[held.action]} after ${seconds} s (${held.keepalives} keepalives answered).`);
+    }
     endDriveLocally();
     flash("stop");
     updateRobot(robot.id, { mode: "Stopping…" });
     try {
-      await postApi("/robots/drive", ordered(robot, "stop"));
+      await robotApi(robot, "/robots/drive", ordered(robot, "stop"));
       updateRobot(robot.id, { mode: "Stopped", lastCommand: "stop", lastError: "" });
     } catch (error) {
       if (error.data?.superseded) return; // a newer command took over
-      updateRobot(robot.id, { mode: "Stop failed", lastError: error.message });
+      driveFailed(robot, error, "Stop failed");
     }
   }
 
@@ -554,11 +707,11 @@ export default function App() {
     flash(action);
     updateRobot(robot.id, { mode: action === "gripper_open" ? "Opening gripper…" : "Closing gripper…", lastError: "" });
     try {
-      await postApi("/robots/control", ordered(robot, action));
+      await robotApi(robot, "/robots/control", ordered(robot, action));
       updateRobot(robot.id, { mode: action === "gripper_open" ? "Gripper open" : "Gripper closed", lastCommand: action });
     } catch (error) {
       if (error.data?.superseded) return;
-      updateRobot(robot.id, { mode: "Gripper command failed", lastError: error.message });
+      driveFailed(robot, error, "Gripper command failed");
     }
   }
 
@@ -589,23 +742,22 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* Every 20 s, check that each connected robot still answers; a robot that went quiet is marked
-     "Lost contact" instead of showing Live forever. */
+  /* Every 10 s, check that each connected robot still answers. A robot that went quiet is not left
+     showing Live, and not dropped either: Hive starts reconnecting to it. */
   useEffect(() => {
     const timer = window.setInterval(() => {
       robotsRef.current
         .filter((r) => r.status === "connected")
         .forEach(async (robot) => {
           try {
-            await postApi("/robots/status", target(robot));
+            await robotApi(robot, "/robots/status", target(robot));
           } catch (error) {
             const current = robotsRef.current.find((r) => r.id === robot.id);
             if (current?.status !== "connected") return;
-            if (driveRef.current.robotId === robot.id) endDriveLocally();
-            updateRobot(robot.id, { status: "failed", mode: "Lost contact", lastError: error.message });
+            keepConnecting(current, error.message);
           }
         });
-    }, 20000);
+    }, STATUS_CHECK_MS);
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -634,7 +786,7 @@ export default function App() {
     const lines = await Promise.all(
       connected.map(async (robot) => {
         try {
-          const result = await postApi("/robots/command", { ...target(robot), text: command });
+          const result = await robotApi(robot, "/robots/command", { ...target(robot), text: command });
           return `${robot.name}: delivered on ${result.topic}.`;
         } catch (error) {
           return `${robot.name}: not delivered. ${error.message}`;
@@ -727,7 +879,9 @@ export default function App() {
           )}
           {view === "robot" && selectedRobot && (
             <RobotView
+              activity={activity[selectedRobot.id] || []}
               onBack={() => setView("home")}
+              onClearActivity={() => setActivity((all) => ({ ...all, [selectedRobot.id]: [] }))}
               onSelectTopic={setSelectedTopic}
               pressed={pressed}
               robot={selectedRobot}
@@ -832,20 +986,24 @@ function StatusBadge({ status, compact = false }) {
   );
 }
 
-/* Spotify's play/pause, meaning connect/disconnect. */
+/* Spotify's play/pause, meaning connect/disconnect. While Hive keeps trying to connect, pressing it
+   stops trying. */
 function PlayButton({ robot, onConnect, onDisconnect, size = 48, className = "" }) {
   const connecting = robot.status === "connecting";
   const connected = robot.status === "connected";
   const iconSize = Math.round(size * 0.42);
-  const label = connecting ? `Connecting ${robot.name}…` : connected ? `Disconnect ${robot.name}` : `Connect ${robot.name}`;
+  const label = connecting
+    ? `Stop ${robot.reconnecting ? "reconnecting" : "connecting"} to ${robot.name}`
+    : connected
+      ? `Disconnect ${robot.name}`
+      : `Connect ${robot.name}`;
   return (
     <button
       aria-label={label}
       className={`play ${className}`}
-      disabled={connecting}
       onClick={(event) => {
         event.stopPropagation();
-        connected ? onDisconnect(robot) : onConnect(robot);
+        connected || connecting ? onDisconnect(robot) : onConnect(robot);
       }}
       style={{ height: size, width: size }}
       title={label}
@@ -1039,7 +1197,7 @@ function LibraryList({ robots, selectedRobotId, onOpen, onAdd, className = "" })
                   {live && <SignalBars className="mr-1" />}
                   {robot.status === "failed" && <span className="mr-1.5 size-2 rounded-full bg-danger" />}
                   {robot.status === "connecting" && <Spinner className="mr-1 animate-spin-slow text-warn" size={16} />}
-                  <span className="sr-only">{STATUS[robot.status]?.label}</span>
+                  <span className="sr-only">{STATUS[displayStatus(robot)]?.label}</span>
                 </button>
               </li>
             );
@@ -1154,7 +1312,7 @@ function RobotCard({ robot, onOpen, onConnect, onDisconnect, onRemove }) {
       <div className="model pointer-events-none relative aspect-[16/10]" style={{ background: stageBg(0.16) }}>
         <ModelImage alt={modelAlt(robot.preset)} className="absolute inset-[4%] h-[92%] w-[92%]" preset={robot.preset} />
         <span className="absolute left-3 top-3 rounded-full bg-panel/80 px-2.5 py-1 backdrop-blur">
-          <StatusBadge compact status={robot.status} />
+          <StatusBadge compact status={displayStatus(robot)} />
         </span>
         <button
           aria-label={`Remove ${robot.name}`}
@@ -1302,6 +1460,8 @@ function RobotView({
   onGripper,
   pressed,
   onBack,
+  activity,
+  onClearActivity,
 }) {
   const preset = PRESET_ROBOTS[robot.preset];
   return (
@@ -1340,7 +1500,7 @@ function RobotView({
           </h1>
           <p className="mt-3 max-w-[52ch] text-[16px] leading-relaxed text-muted">{describe(robot)}</p>
           <div className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-[14px] text-ink/80">
-            <StatusBadge status={robot.status} />
+            <StatusBadge status={displayStatus(robot)} />
             <span aria-hidden="true">·</span>
             <span className="font-mono" translate="no">
               {robot.host || "no address"}
@@ -1353,7 +1513,13 @@ function RobotView({
             <PlayButton onConnect={onConnect} onDisconnect={onDisconnect} robot={robot} size={56} />
             <div aria-live="polite" className="min-w-0">
               <p className="text-[15px] font-semibold">
-                {robot.status === "connected" ? "Connected" : robot.status === "connecting" ? "Connecting…" : "Not connected"}
+                {robot.status === "connected"
+                  ? "Connected"
+                  : robot.status === "connecting"
+                    ? robot.reconnecting
+                      ? "Reconnecting…"
+                      : "Connecting…"
+                    : "Not connected"}
                 <span className="font-normal text-muted"> · {robot.mode}</span>
               </p>
               {robot.status === "connected" && robot.discovery && (
@@ -1410,8 +1576,61 @@ function RobotView({
         </section>
       </div>
 
+      <ActivityLog entries={activity} onClear={onClearActivity} />
+
       <PageFooter />
     </div>
+  );
+}
+
+const ACTIVITY_STYLE = {
+  ok: { mark: "✓", text: "text-live" },
+  info: { mark: "·", text: "text-muted" },
+  warn: { mark: "!", text: "text-warn" },
+  error: { mark: "✕", text: "text-danger" },
+};
+
+const clock = (ms) =>
+  new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) +
+  `.${String(ms % 1000).padStart(3, "0")}`;
+
+/* What Hive did with this robot, newest first: every request, how long it took, what came back, and
+   each reconnect attempt. Kept for this page session only. */
+function ActivityLog({ entries, onClear }) {
+  return (
+    <section aria-labelledby="activity-title" className="mx-8 mt-6 rounded-xl bg-card p-5 sm:p-6">
+      <div className="flex items-baseline justify-between gap-4">
+        <h2 className="font-display text-[26px] tracking-title" id="activity-title">
+          Activity
+        </h2>
+        <button
+          className="min-h-11 rounded-lg px-3 text-[13px] font-medium text-muted transition-colors hover:text-ink disabled:opacity-40"
+          disabled={!entries.length}
+          onClick={onClear}
+          type="button"
+        >
+          Clear
+        </button>
+      </div>
+      {entries.length ? (
+        <ol aria-live="polite" className="mt-3 max-h-80 overflow-y-auto font-mono text-[13px] leading-relaxed">
+          {entries.map((e) => {
+            const s = ACTIVITY_STYLE[e.level] || ACTIVITY_STYLE.info;
+            return (
+              <li className="flex gap-3 border-t border-line/60 py-1.5 first:border-t-0" key={e.id}>
+                <span className="flex-none text-faint">{clock(e.at)}</span>
+                <span aria-hidden="true" className={`w-3 flex-none text-center ${s.text}`}>
+                  {s.mark}
+                </span>
+                <span className={`min-w-0 break-words ${e.level === "info" ? "text-ink/80" : s.text}`}>{e.text}</span>
+              </li>
+            );
+          })}
+        </ol>
+      ) : (
+        <p className="mt-3 text-[14px] text-muted">Connect to see each request Hive sends to this robot and what comes back.</p>
+      )}
+    </section>
   );
 }
 
@@ -1609,7 +1828,7 @@ function CommandView({ robots, messages, onSend }) {
               <li className="inline-flex min-h-8 items-center gap-2 rounded-full border border-line px-3 text-[14px] font-medium text-muted" key={r.id}>
                 <span className={`size-2 rounded-full ${r.status === "connected" ? "bg-live" : "bg-faint"}`} />
                 {r.name}
-                <span className="sr-only">{STATUS[r.status]?.label}</span>
+                <span className="sr-only">{STATUS[displayStatus(r)]?.label}</span>
               </li>
             ))}
           </ul>
