@@ -7,6 +7,7 @@ export default defineConfig({
   // the backend only accepts requests from these origins (HIVE_ALLOWED_ORIGINS), so fail loudly
   // instead of silently moving to another port
   server: { port: 5173, strictPort: true },
+  test: { environment: "node", include: ["src/**/*.test.js"], coverage: { include: ["src/live/**", "src/viewers/**"], exclude: ["**/*.test.js"] } },
   preview: { port: 4173, strictPort: true },
   build: {
     rollupOptions: {

@@ -15,7 +15,9 @@
     "frontend": "vite --host 127.0.0.1",
     "hive": "node scripts/hive.mjs",
     "build": "vite build",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "vitest run",
+    "test:cov": "vitest run --coverage"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.4",
@@ -26,6 +28,8 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.5",
-    "tailwindcss": "^4.3.5"
+    "@vitest/coverage-v8": "^3.2.4",
+    "tailwindcss": "^4.3.5",
+    "vitest": "^3.2.4"
   }
 }
