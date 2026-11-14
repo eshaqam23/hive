@@ -31,8 +31,12 @@ class MotorLine(NamedTuple):
 
 
 def _ints(parts):
-    # strict ASCII match, so int() below cannot raise
-    return [int(p) for p in parts] if all(_INT_RE.fullmatch(p) for p in parts) else None
+    if not all(_INT_RE.fullmatch(p) for p in parts):
+        return None
+    try:
+        return [int(p) for p in parts]
+    except ValueError:  # e.g. over the int string-conversion digit limit
+        return None
 
 
 def _floats(parts):
