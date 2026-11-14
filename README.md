@@ -62,7 +62,7 @@ npm run hive
 This starts both the Python backend and the Vite frontend, then opens Hive in the browser.
 
 - **Ubuntu:** run it in a terminal. The backend is `python3 backend/server.py` (set `HIVE_PYTHON` to use another Python).
-- **Windows:** run it from PowerShell. `rclpy` only exists in WSL, so the launcher starts the backend inside WSL (`wsl.exe --cd <repo> --exec python3 backend/server.py`) and Vite on Windows. With mirrored networking the Windows browser reaches the backend on `127.0.0.1:8787`. Set `HIVE_WSL_DISTRO` to pick a distro other than the WSL default.
+- **Windows:** run it from PowerShell. `rclpy` only exists in WSL, so the launcher starts the backend inside WSL (`wsl.exe --cd <repo> --exec python3 backend/server.py`) and Vite on Windows. With mirrored networking the Windows browser reaches the backend on `127.0.0.1:8787`. Set `HIVE_WSL_DISTRO` to pick a distro other than the WSL default. Ctrl+C in PowerShell makes the launcher send the backend SIGINT inside WSL, so it stops every robot before exiting, as on Ubuntu.
 
 You can also run the pieces separately (`npm run backend` is the same launcher with `--backend-only`, so it also uses WSL on Windows):
 

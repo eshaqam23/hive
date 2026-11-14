@@ -34,4 +34,14 @@ describe("backendCommand", () => {
     const r = backendCommand({ platform: "win32", repoDir: "C:\\hive", env: { HIVE_WSL_DISTRO: "Ubuntu-24.04" } });
     expect(r.args).toEqual(["-d", "Ubuntu-24.04", "--cd", "/mnt/c/hive", "--exec", "python3", "backend/server.py"]);
   });
+  it("records the backend pid in a pidfile when asked (win32)", () => {
+    const r = backendCommand({ platform: "win32", repoDir: "C:\\hive", env: {}, pidfile: "/tmp/hive-1.pid" });
+    expect(r.args.slice(0, 5)).toEqual(["--cd", "/mnt/c/hive", "--exec", "bash", "-c"]);
+    const script = r.args[5];
+    expect(script).toContain("trap '' HUP");
+    expect(script).toContain("python3 backend/server.py > /tmp/hive-1.pid.log 2>&1 &");
+    expect(script).toContain("echo $PY > /tmp/hive-1.pid");
+    expect(script).toContain("tail -n +1 -f --pid=$PY /tmp/hive-1.pid.log");
+    expect(script).toContain("exit $C");
+  });
 });

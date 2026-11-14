@@ -98,6 +98,7 @@ Notes:
   longer matters for Hive: the worker sets the RMW and each robot's own domain itself.
 - In WSL mirrored mode the `ros2` CLI can hang until you run `ros2 daemon start`. This only
   affects the `ros2` commands you type for troubleshooting; Hive does not use the daemon.
+- Ctrl+C: the launcher (not the console) tells the backend inside WSL to stop with SIGINT, so it stops every robot it is driving before exiting, the same as on Ubuntu. If the backend has not exited after 3 s the launcher asks again, and only after another 3 s kills it. The backend inside WSL ignores the hang-up from the console closing, and logs to a file under `/tmp` that the launcher shows, so closing the console window also goes through that stop.
 - Vite must stay on port 5173 (the backend only accepts that origin). If another process holds
   5173, Vite exits instead of moving.
 
