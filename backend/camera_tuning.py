@@ -89,10 +89,11 @@ class CameraJob:
         self._answer: Any = None
 
     # ------------------------------------------------------------ the script (a coroutine of service calls)
-    def _run(self):
+    def _run(self, rediscover: bool = True):
         from rcl_interfaces.srv import ListParameters
 
         tuner = self.tuner
+        was_cached = tuner.camera_node is not None
         if tuner.camera_node is None:
             for candidate in tuner.candidates():
                 request = ListParameters.Request()
@@ -106,15 +107,26 @@ class CameraJob:
             return None
         outcome = {"node": node, "applied": False, "quality": self.quality, "depth": self.depth, "profile": None, "reason": None}
         (depth_name, depth_value), (profile_name, profile) = self.params
-        ok, reason, _ = yield from self._set(node, depth_name, depth_value)
+        ok, reason, unreachable = yield from self._set(node, depth_name, depth_value)
         if not ok:
-            return {**outcome, "reason": reason}
+            if unreachable and was_cached and rediscover:  # the cached node went away: look again, once
+                tuner.camera_node = None
+                return (yield from self._run(rediscover=False))
+            return self._failed(outcome, reason, unreachable)
         for variant in robot_link.profile_variants(profile):
             ok, reason, unreachable = yield from self._set(node, profile_name, variant)
             if ok:
                 return {**outcome, "applied": True, "profile": variant}
             if unreachable:  # no answer: another spelling will not help
                 break
+        return self._failed(outcome, reason, unreachable)
+
+    def _failed(self, outcome: dict, reason: Optional[str], unreachable: bool) -> dict:
+        """A refusal keeps the node. A node that did not answer is forgotten (it may have restarted or
+        gone), and reported with node None so the caller knows to look for it again."""
+        if unreachable:
+            self.tuner.camera_node = None
+            outcome = {**outcome, "node": None}
         return {**outcome, "reason": reason}
 
     def _set(self, node: str, name: str, value: Any):

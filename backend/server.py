@@ -91,6 +91,7 @@ GRIPPER_POSITION_TOPIC = "/gripper/position"
 GRIPPER_SERVICES = {"open": "/gripper/release", "close": "/gripper/grab"}
 DEFAULT_CAMERA = ("medium", False)   # colour quality and depth, applied at connect unless the user chose otherwise
 CAMERA_WANT: dict[tuple, tuple] = {}  # robot key -> the last (quality, depth) requested; survives disconnects
+CAMERA_RETRY_SECONDS = 5.0          # least time between lazy re-tries of tuning for one robot
 CAMERA_REQUEST_SECONDS = 30          # a whole tuning run: discovery plus both parameter calls, 5 s per call at most
 
 
@@ -179,6 +180,7 @@ class RobotWorker:
         self.link: dict[str, Any] | None = None  # newest link state the worker reported
         self.topic_kinds: dict[str, str] = {}  # topic -> payload kind, from the last discover reply
         self.camera: dict[str, Any] | None = None  # newest camera tuning result; None when no RealSense node
+        self.camera_tried_at = 0.0  # monotonic time of the last tuning attempt
 
     def on_link(self, link: dict[str, Any]) -> None:
         self.link = link
@@ -195,6 +197,7 @@ class RobotWorker:
             if self.is_running():
                 return
             self.link = None  # a new worker must not show the old one's state
+            self.camera, self.camera_tried_at = None, 0.0  # nor the old camera result: it would gate or ungate MJPEG wrongly
             require_ros()
             self.discovered.clear()
             # Non-login bash, so the operator's own profile cannot change the ROS environment. Its own
@@ -354,6 +357,7 @@ class RobotWorker:
         with self.start_lock:
             process, self.process = self.process, None
             self.link = None
+            self.camera, self.camera_tried_at = None, 0.0
             if process:
                 self._end(process)
 
@@ -382,12 +386,23 @@ def apply_camera(worker: RobotWorker, quality: str, depth: bool) -> dict[str, An
     """Tune the robot's RealSense and remember the choice. A tuning failure never raises: it is the
     result (applied false, with the reason), so connecting still works and the MJPEG gate can act on it."""
     CAMERA_WANT[(worker.peer, worker.domain_id)] = (quality, depth)
+    worker.camera_tried_at = time.monotonic()
     try:
         camera = worker.request("camera", timeout=CAMERA_REQUEST_SECONDS, quality=quality, depth=depth)["camera"]
     except ApiError as error:
         camera = {"node": None, "applied": False, "quality": quality, "depth": depth, "profile": None, "reason": error.message}
     worker.camera = camera
     return camera
+
+
+def retry_camera(worker: RobotWorker) -> None:
+    """A RealSense node that joined the graph after connect (or a tuning attempt that got no answer) is
+    tuned on first use, at most once per CAMERA_RETRY_SECONDS, with the remembered choice."""
+    camera = worker.camera
+    unresolved = camera is None or (camera.get("applied") is False and camera.get("node") is None)
+    if unresolved and time.monotonic() - worker.camera_tried_at >= CAMERA_RETRY_SECONDS:
+        quality, depth = CAMERA_WANT.get((worker.peer, worker.domain_id), DEFAULT_CAMERA)
+        apply_camera(worker, quality, depth)
 
 
 def get_worker(peer: str, domain_id: int) -> RobotWorker:
@@ -640,6 +655,8 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
                 if not mjpeg and kind == "image":
                     raise ApiError(400, f"{name} is an image topic; use camera.mjpg.", code="use_mjpeg")
             key = (peer, domain_id)
+            if mjpeg:
+                retry_camera(worker)
             camera = worker.camera
             if mjpeg and camera and camera.get("applied") is False and query.get("force_full") != "1":
                 raise ApiError(

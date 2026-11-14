@@ -700,6 +700,52 @@ def t_camera_refused_blocks_stream():
     call("/robots/connect", CAR)  # back to a tunable camera for the checks that follow
 
 
+def t_camera_appearing_after_connect_is_tuned_on_stream():
+    q = f"ip={CAR['ip']}&domain_id={CAR['domain_id']}&topic={IMAGE_TOPIC}"
+    restore = set_mock_robot("192.168.1.20:42", params={})
+    try:
+        s, d, _, _ = call("/robots/connect", CAR)
+    finally:
+        restore()
+    none_at_connect = s == 200 and d.get("camera") is None
+    reset()
+    restore = set_mock_robot("192.168.1.20:42", param_runtime=False)  # the camera node shows up, but refuses
+    try:
+        time.sleep(5.3)  # the lazy re-try is limited to once per 5 s
+        blocked = Stream(f"/robots/camera.mjpg?{q}")
+        status, err = blocked.status, blocked.error or {}
+        blocked.close()
+    finally:
+        restore()
+    time.sleep(5.3)
+    reset()
+    ok_stream = Stream(f"/robots/camera.mjpg?{q}")  # still gated: the last attempt was a refusal, not a miss
+    gated_again = ok_stream.status
+    ok_stream.close()
+    check("a camera node that appears after connect is tuned on the first MJPEG request, and the gate applies if refused",
+          none_at_connect and status == 409 and err.get("code") == "camera_untuned" and gated_again == 409,
+          f"camera at connect={d.get('camera')!r} first mjpeg={status} {err.get('code')} later={gated_again}")
+    call("/robots/disconnect", CAR)  # a stale refusal must not outlive the worker
+    reset()
+    time.sleep(5.3)
+    restore = set_mock_robot("192.168.1.20:42", params={})
+    try:
+        call("/robots/connect", CAR)
+    finally:
+        restore()
+    time.sleep(5.3)
+    reset()
+    ok = Stream(f"/robots/camera.mjpg?{q}")
+    time.sleep(1.0)
+    frames = len(ok.parts)
+    ok.close()
+    got = [(p["name"], p["value"]) for p in param_log(CAR) if p["successful"]]
+    check("a camera node that appears after connect and accepts tuning is tuned and then streams",
+          ok.status == 200 and frames >= 3 and ("rgb_camera.color_profile", "424x240x15") in got,
+          f"mjpeg={ok.status} frames={frames} logged={got}")
+    call("/robots/connect", CAR)
+
+
 if __name__ == "__main__":
     only = set(sys.argv[3:])
     for fn in [t_health, t_connect_real, t_connect_off, t_connect_nodriver, t_no_subscriber_fast, t_order_stop_wins,
@@ -709,7 +755,8 @@ if __name__ == "__main__":
                t_stop_ignores_bad_power, t_bool_gripper_has_no_position, t_position_gripper_first_command, t_tap_not_falsely_confirmed,
                t_sse_scan, t_mjpeg_frames, t_unwatch_on_disconnect, t_unwatch_on_instant_disconnect, t_stale_on_drop, t_no_cross_talk_streams,
                t_drive_tick_under_load, t_sse_rejects_image, t_stream_route_errors,
-               t_camera_tuned_on_connect, t_camera_quality_change, t_camera_reapplied_on_reconnect, t_camera_refused_blocks_stream]:
+               t_camera_tuned_on_connect, t_camera_quality_change, t_camera_reapplied_on_reconnect, t_camera_refused_blocks_stream,
+               t_camera_appearing_after_connect_is_tuned_on_stream]:
         if only and fn.__name__ not in only:
             continue
         try:

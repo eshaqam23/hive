@@ -154,13 +154,13 @@ def test_unready_list_service_means_no_camera():
     assert result is None
 
 
-def test_set_service_that_vanishes_after_discovery_reports_not_available():
+def test_set_service_that_vanishes_after_discovery_is_rediscovered_then_none():
     world = FakeWorld(dict(CAM))
     tuner = CameraTuner(world, clock=world.clock, timeout=5.0)
     tuner.camera_node = "/camera/camera"
     world.services.discard("/camera/camera/set_parameters")
     result, _ = run(world, tuner=tuner)
-    assert result["applied"] is False and "not available" in result["reason"]
+    assert result is None and tuner.camera_node is None
 
 
 def test_unknown_quality_raises():
@@ -178,3 +178,19 @@ def test_finished_job_stays_finished():
     while not job.step():
         world.now += 0.1
     assert job.step() is True and job.result["applied"] is True
+
+
+def test_cached_node_that_went_away_is_rediscovered_once():
+    world = FakeWorld(dict(CAM))
+    tuner = CameraTuner(world, clock=world.clock, timeout=5.0)
+    tuner.camera_node = "/camera/other"  # stale: no such node any more
+    result, _ = run(world, tuner=tuner)
+    assert result["applied"] is True and result["node"] == "/camera/camera" and tuner.camera_node == "/camera/camera"
+
+
+def test_cached_node_gone_and_nothing_else_gives_none():
+    world = FakeWorld({"/base": {"speed": 1}})
+    tuner = CameraTuner(world, clock=world.clock, timeout=5.0)
+    tuner.camera_node = "/camera/camera"
+    result, _ = run(world, tuner=tuner)
+    assert result is None and tuner.camera_node is None
