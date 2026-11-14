@@ -17,6 +17,7 @@ CAR = {"ip": "192.168.1.20", "domain_id": 42}       # online, driver running
 OFF = {"ip": "192.168.1.31", "domain_id": 43}       # powered off
 NODRV = {"ip": "192.168.1.44", "domain_id": 44}     # online, but nothing subscribes to /cmd_vel
 LIDAR = {"ip": "192.168.1.50", "domain_id": 45}     # /cmd_vel listener, /scan, /ros_data echo
+POS = {"ip": "192.168.1.61", "domain_id": 47}       # /gripper/position subscriber only
 GRIP = {"ip": "192.168.1.60", "domain_id": 46}      # Trigger gripper services, prefixed /ros_data echo
 
 
@@ -331,12 +332,60 @@ def t_rmw_pinned():
     check("the worker's RMW implementation is pinned", env.get("RMW_IMPLEMENTATION") == "rmw_fastrtps_cpp", f"env={env}")
 
 
+def t_stop_ignores_bad_power():
+    call("/robots/connect", CAR)
+    reset()
+    s, d, _, _ = call("/robots/drive", {**CAR, "action": "stop", "power": "fast"})
+    s2, _, _, _ = call("/robots/control", {**CAR, "action": "stop", "power": {"x": 1}})
+    time.sleep(0.3)
+    check("a stop with an invalid power is still accepted and published", s == 200 and s2 == 200 and len(zero_twists(CAR)) >= 5,
+          f"drive HTTP {s}, control HTTP {s2}, zero twists={len(zero_twists(CAR))}")
+
+
+def t_bool_gripper_has_no_position():
+    call("/robots/connect", CAR)
+    reset()
+    s, d, _, _ = call("/robots/control", {**CAR, "action": "gripper_position", "value": 0.8})
+    got = [m for m in received(CAR) if m["topic"] == "/gripper_open"]
+    check("a bool gripper refuses position with 409 no_position and publishes nothing", s == 409 and d.get("code") == "no_position" and not got,
+          f"HTTP {s} {d.get('code')} published={got}")
+
+
+def t_position_gripper_first_command():
+    call("/robots/disconnect", POS)
+    reset()
+    s, d, _, _ = call("/robots/connect", POS)
+    path = f"{MOCK}/robots/worker_pubs.jsonl"
+    pubs = [json.loads(l)["topic"] for l in open(path) if l.strip()] if os.path.exists(path) else []
+    s2, d2, _, _ = call("/robots/control", {**POS, "action": "gripper_position", "value": 0.3})
+    got = [m["msg"] for m in received(POS) if m["topic"] == "/gripper/position"]
+    check("the position publisher exists before the first command, which arrives",
+          d.get("gripper_interface") == "position" and "/gripper/position" in pubs and s2 == 200 and any("0.3" in g for g in got),
+          f"interface={d.get('gripper_interface')} publishers={pubs} HTTP {s2} got={got}")
+
+
+def t_tap_not_falsely_confirmed():
+    """Tap forward and stop at once, with no keepalive in between: confirmation must come from a zero line
+    that follows the car's motion, never from the earlier idle stop's line."""
+    call("/robots/connect", LIDAR)
+    call("/robots/drive", {**LIDAR, "action": "stop"})
+    time.sleep(0.3)
+    call("/robots/drive", {**LIDAR, "action": "forward"})
+    s, d, _, _ = call("/robots/drive", {**LIDAR, "action": "stop"})
+    early = (d.get("link") or {}).get("stop")
+    final = link_after_stop(LIDAR, "confirmed")
+    check("a quick tap is not confirmed from a stale zero line, and then confirms for real",
+          early in ("pending", "unconfirmed") and final.get("stop") == "confirmed",
+          f"link in the stop reply={early} final={final.get('stop')} last_line={final.get('last_line')}")
+
+
 if __name__ == "__main__":
     only = set(sys.argv[3:])
     for fn in [t_health, t_connect_real, t_connect_off, t_connect_nodriver, t_no_subscriber_fast, t_order_stop_wins,
                t_hold_and_deadman, t_stream_rate_and_latency, t_stale_command_dropped, t_channels_independent, t_release_stops, t_gripper, t_command_text, t_cors, t_bad_input,
                t_power_scales_twist, t_keep_last_one, t_stop_burst, t_stop_confirmed, t_stop_unreported,
-               t_gripper_trigger, t_no_gripper, t_other_publishers, t_rmw_pinned]:
+               t_gripper_trigger, t_no_gripper, t_other_publishers, t_rmw_pinned,
+               t_stop_ignores_bad_power, t_bool_gripper_has_no_position, t_position_gripper_first_command, t_tap_not_falsely_confirmed]:
         if only and fn.__name__ not in only:
             continue
         try:

@@ -100,5 +100,22 @@
     "line_prefix": "D",
     "echo_ros_data": true,
     "extra_cmd_vel_publishers": 0
+  },
+  "192.168.1.61:47": {
+    "online": true,
+    "nodes": [
+      "/base_driver",
+      "/gripper_node"
+    ],
+    "topics": {
+      "/cmd_vel": "geometry_msgs/msg/Twist",
+      "/gripper/position": "std_msgs/msg/Float32"
+    },
+    "subscribers": {
+      "/cmd_vel": 1,
+      "/gripper/position": 1
+    },
+    "echo_ros_data": true,
+    "extra_cmd_vel_publishers": 0
   }
 }

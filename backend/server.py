@@ -172,6 +172,7 @@ class RobotWorker:
         with self.start_lock:
             if self.is_running():
                 return
+            self.link = None  # a new worker must not show the old one's state
             require_ros()
             self.discovered.clear()
             # Non-login bash, so the operator's own profile cannot change the ROS environment. Its own
@@ -325,6 +326,7 @@ class RobotWorker:
         """End the worker. Closing its stdin makes it publish a zero Twist before it exits."""
         with self.start_lock:
             process, self.process = self.process, None
+            self.link = None
             if process:
                 self._end(process)
 
@@ -482,7 +484,7 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
                 raise ApiError(400, "The gripper position must be a number from 0 to 1.", code="bad_value")
             value = float(value)
-        power = validate_power(body) if action in TWISTS else None
+        power = validate_power(body) if action in TWISTS and action != "stop" else None  # a stop is never refused
         worker = get_worker(peer, domain_id)
         if action in GRIPPER:
             worker.wait_for_discovery()
@@ -506,7 +508,7 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
         if action not in TWISTS:
             raise ApiError(400, f"Unsupported drive action: {action}")
         session, seq = validate_order(body)
-        power = validate_power(body)
+        power = None if action == "stop" else validate_power(body)
         return self.drive(get_worker(peer, domain_id), action, session, seq, power)
 
     @staticmethod
@@ -627,6 +629,7 @@ class RobotWorkerLoop:
                 QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST),
             ),
             GRIPPER_TOPIC: self.node.create_publisher(Bool, GRIPPER_TOPIC, 10),
+            GRIPPER_POSITION_TOPIC: self.node.create_publisher(Float32, GRIPPER_POSITION_TOPIC, 10),
             COMMAND_TOPIC: self.node.create_publisher(String, COMMAND_TOPIC, 10),
         }
         self.node.create_subscription(
@@ -641,6 +644,7 @@ class RobotWorkerLoop:
         self.power = robot_link.DEFAULT_POWER
         self.last_line: tuple[str, float] | None = None  # newest /ros_data line and when it came
         self.received = 0
+        self.drove, self.saw_motion = False, False  # a zero line confirms a stop only after motion was seen
         self.reporting, self.other_publishers = False, 0
         self.link_sent: tuple[tuple, float] = ((), 0.0)
         self.action = "stop"
@@ -663,7 +667,10 @@ class RobotWorkerLoop:
 
     @staticmethod
     def log(text: str) -> None:
-        print(f"[hive-worker {os.environ.get('ROS_STATIC_PEERS')}] {text}", file=sys.stderr, flush=True)
+        try:
+            print(f"[hive-worker {os.environ.get('ROS_STATIC_PEERS')}] {text}", file=sys.stderr, flush=True)
+        except (OSError, ValueError):  # the terminal or pipe is gone: a log line must never stop a stop
+            pass
 
     # -------------------------------------------------------------- ROS
 
@@ -673,8 +680,6 @@ class RobotWorkerLoop:
         self.publishers[CMD_VEL].publish(message)
 
     def publish_value(self, topic: str, value: Any) -> None:
-        if topic == GRIPPER_POSITION_TOPIC and topic not in self.publishers:
-            self.publishers[topic] = self.node.create_publisher(self.Float32, topic, 10)
         message = {GRIPPER_TOPIC: self.Bool, GRIPPER_POSITION_TOPIC: self.Float32}.get(topic, self.String)()
         message.data = value
         self.publishers[topic].publish(message)
@@ -684,7 +689,20 @@ class RobotWorkerLoop:
         self.received += 1
         text = str(message.data).strip()
         self.last_line = (text, now)
-        self.confirmer.observe(robot_link.parse_motor_line(text), now)
+        line = robot_link.parse_motor_line(text)
+        if line is not None and line.kind == "drive" and not robot_link.is_zero_drive(line):
+            self.saw_motion = True
+        elif robot_link.is_zero_drive(line) and self.drove and not self.saw_motion:
+            return  # a zero line from before the car acted on this drive (stale or in flight)
+        self.confirmer.observe(line, now)
+
+    def drain(self) -> None:
+        """Handle every ready callback (the /ros_data echoes), at most 50 per call."""
+        for _ in range(50):
+            before = self.received
+            self.rclpy.spin_once(self.node, timeout_sec=0.0)
+            if self.received == before:
+                break
 
     def refresh_graph(self) -> None:
         self.reporting = self.node.count_publishers(ROS_DATA) > 0
@@ -757,6 +775,7 @@ class RobotWorkerLoop:
         if action != self.action:
             self.log(f"driving {action} ({self.listeners(CMD_VEL)} listening on {CMD_VEL})")
         self.power = power
+        self.drove, self.saw_motion = True, False
         self.burst = []  # a stop burst in flight must not cut into the new drive
         self.confirmer = robot_link.StopConfirmer()
         self.confirmer.set_reporting(self.reporting)
@@ -766,14 +785,19 @@ class RobotWorkerLoop:
 
     def stop_driving(self) -> None:
         """Every stop path ends here: one zero Twist at once, the rest of the burst on the next ticks,
-        and a stop confirmation to wait for."""
-        if self.action != "stop":
-            self.log("stopped")
+        and a stop confirmation to wait for. Publish first, log last: a log failure cannot lose a stop."""
+        was_moving = self.action != "stop"
+        try:
+            self.drain()  # lines already queued must not count as confirming this stop
+        except Exception:  # noqa: BLE001
+            pass
         now = time.monotonic()
         self.action = "stop"
         self.confirmer.stop_requested(now)
         self.publish_twist("stop")
         self.burst = [now + STOP_BURST_SPACING * i for i in range(1, STOP_BURST_COUNT)]
+        if was_moving:
+            self.log("stopped")
 
     def send_burst(self, now: float) -> None:
         while self.burst and self.burst[0] <= now and self.action == "stop":
@@ -906,10 +930,13 @@ class RobotWorkerLoop:
             request["service"], request["call_deadline"] = service, time.monotonic() + GRIPPER_CALL_TIMEOUT
             request["future"] = client.call_async(Trigger.Request())
             return False
+        if interface == "bool" and action == "position":
+            self.fail(rid, 409, "This gripper opens and closes only; it has no position control.", code="no_position")
+            return True
         if interface == "position":
             topic, value = GRIPPER_POSITION_TOPIC, {"open": 0.0, "close": 1.0}.get(action, request.get("value"))
         else:
-            topic, value = GRIPPER_TOPIC, (request.get("value", 0.0) >= 0.5) if action == "position" else action == "open"
+            topic, value = GRIPPER_TOPIC, action == "open"
         self.publish_value(topic, value)
         self.reply(rid, interface=interface, topic=topic)
         return True
@@ -918,9 +945,9 @@ class RobotWorkerLoop:
         """The deadman, the 10 Hz drive stream, stop bursts and confirmation, and ROS housekeeping."""
         now = time.monotonic()
         if self.action != "stop" and now - self.last_keepalive > DEADMAN_SECONDS:
-            self.log("deadman: no keepalive from the page, stopping the robot")
             self.deadman_tripped = True
             self.stop_driving()
+            self.log("deadman: no keepalive from the page, stopping the robot")
         if now >= self.next_publish_at:
             if self.action != "stop":
                 self.publish_twist(self.action)
@@ -928,11 +955,7 @@ class RobotWorkerLoop:
             if self.next_publish_at < now:  # fell behind (e.g. a slow discovery): don't burst
                 self.next_publish_at = now + 1.0 / DRIVE_RATE_HZ
         self.send_burst(now)
-        for _ in range(50):  # drain what is ready (the /ros_data echoes) so none queue up behind a tick
-            before = self.received
-            self.rclpy.spin_once(self.node, timeout_sec=0.0)
-            if self.received == before:
-                break
+        self.drain()  # so no /ros_data echo queues up behind a tick
         now = time.monotonic()
         self.refresh_graph()
         self.send_burst(now)
@@ -969,6 +992,13 @@ class RobotWorkerLoop:
                 except queue.Empty:
                     pass
                 self.send_burst(time.monotonic())
+            flush_end = time.monotonic() + 0.15  # let the last messages leave before the node goes
+            while time.monotonic() < flush_end:
+                self.rclpy.spin_once(self.node, timeout_sec=0.0)
+                try:
+                    self.requests.get(timeout=0.02)
+                except queue.Empty:
+                    pass
         except Exception:  # noqa: BLE001
             self.log(f"final stop failed:\n{traceback.format_exc()}")
 
