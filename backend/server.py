@@ -1164,6 +1164,7 @@ def run_robot_worker() -> None:
         loop = RobotWorkerLoop()
     except Exception as error:  # noqa: BLE001 - reported to the backend, which shows it to the operator
         write_line({"ready": False, "error": f"{type(error).__name__}: {error}"})
+        output().flush(0.5)  # the operator's startup error must leave before the process does
         raise
     loop.run()
 

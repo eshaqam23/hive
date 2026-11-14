@@ -82,3 +82,23 @@ def test_deadman_still_stops_the_car_while_stdout_is_blocked(loop):
     assert zeros, "no zero Twist was published"
     assert len(written) == 1  # the writer really was stuck on its first line the whole time
     assert server.OUT.dropped > 0 or len(server.OUT._control) > 0
+
+
+def test_startup_failure_reaches_stdout_before_exit(tmp_path):
+    """run_robot_worker must flush the ready:false line before the exception ends the process."""
+    import subprocess
+    root = tmp_path / "mock"
+    (root / "robots").mkdir(parents=True)
+    (root / "robots.json").write_text("{}")
+    env = dict(os.environ, HIVE_MOCK_ROOT=str(root), ROS_DOMAIN_ID="7", ROS_STATIC_PEERS="10.0.0.1",
+               PYTHONPATH=os.pathsep.join([MOCK_PY, BACKEND]))
+    # rclpy.init fails inside RobotWorkerLoop.__init__
+    code = ("import rclpy, server\n"
+            "def boom(*a, **k): raise RuntimeError('no DDS here')\n"
+            "rclpy.init = boom\n"
+            "server.run_robot_worker()\n")
+    for _ in range(5):
+        proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=20)
+        lines = [json.loads(l) for l in proc.stdout.splitlines() if l.strip()]
+        assert proc.returncode != 0
+        assert lines == [{"ready": False, "error": "RuntimeError: no DDS here"}], (lines, proc.stderr[-300:])

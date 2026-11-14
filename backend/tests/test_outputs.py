@@ -97,3 +97,12 @@ def test_throttled_log_survives_a_broken_writer():
         raise BrokenPipeError()
 
     outputs.ThrottledLog(broken).log("k", OSError("x"))
+
+
+def test_dropped_control_line_is_logged():
+    stuck, logged = threading.Event(), []
+    w = outputs.LineWriter(sink=lambda line: stuck.wait(), control_max=2, log=lambda k, m: logged.append(m))
+    for i in range(6):
+        w.send({"id": i})
+    stuck.set()
+    assert logged and "dropping" in logged[0]

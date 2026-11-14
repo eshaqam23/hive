@@ -12,8 +12,10 @@ from typing import Any, Callable
 
 
 class LineWriter:
-    def __init__(self, sink: Callable[[str], Any] | None = None, control_max: int = 1000, stream_max: int = 8) -> None:
+    def __init__(self, sink: Callable[[str], Any] | None = None, control_max: int = 1000, stream_max: int = 8,
+                 log: Callable[[Any, Any], Any] | None = None) -> None:
         self.sink = sink or self._stdout
+        self.log = log or ThrottledLog(lambda text: print(f"[hive-worker] {text}", file=sys.stderr, flush=True)).log
         self._control: collections.deque[str] = collections.deque(maxlen=control_max)  # replies, link: sent first
         self._stream: collections.deque[str] = collections.deque(maxlen=stream_max)    # sensor payloads: oldest dropped
         self._cond = threading.Condition()
@@ -36,11 +38,15 @@ class LineWriter:
 
     def _put(self, queue: collections.deque, obj: dict) -> None:
         line = json.dumps(obj) + "\n"
+        lost_control = False
         with self._cond:
             if len(queue) == queue.maxlen:
                 self.dropped += 1
+                lost_control = queue is self._control
             queue.append(line)
             self._cond.notify()
+        if lost_control:  # a reply or link line was lost: the pipe has been stuck for a long time
+            self.log("stdout", "control queue full, dropping the oldest reply or link line")
 
     def _run(self) -> None:
         while True:
