@@ -18,7 +18,7 @@ below. The API, its request and response shapes, and the safety behaviour the fr
 unchanged; only how the backend reaches the robot changed.
 
 - **Backend:** one worker process per robot with a long-lived `rclpy` node, instead of a `ros2` CLI
-  call per command. A press reaches the robot in milliseconds; `/cmd_vel` streams at 20 Hz (was 10).
+  call per command. A press reaches the robot in milliseconds; `/cmd_vel` streamed at 20 Hz here (the live-data update below changed it to 10 Hz).
   Connect reads the worker's ROS graph (nodes, topics, `/cmd_vel` subscribers); the deadman and stop
   now run in the worker, which also stops the robot if the backend dies.
 - **Ordering:** "newest command wins" is now enforced with command numbers: the page sends `session` and
@@ -28,13 +28,33 @@ unchanged; only how the backend reaches the robot changed.
   4173 (`strictPort`), because the backend only accepts those origins.
 - **Tests:** the mock is now a mock of `rclpy` (`backend/test/mock_ros/python/`) instead of the `ros2`
   CLI, with the same three robots and message log. The suite has 20 checks (added: press latency and
-  20 Hz rate, an out-of-order command rejected, drive and gripper ordered independently); 20 of 20 pass.
+  stream rate, an out-of-order command rejected, drive and gripper ordered independently); 20 of 20 pass.
   Also checked in a browser: connect, hold Forward, hold W, window blur and tab close stop, gripper,
   command log, disconnect, and a `kill -9` of the backend mid-drive (the worker stopped the robot).
 - **Requirements:** Node 20.19+ (Vite 7, Tailwind v4); Ubuntu 24.04's `apt` Node 18 is too old.
 
 Sections below describe the original redesign; where they mention `ros2 topic pub`, the worker now
 does the equivalent with `rclpy`.
+
+---
+
+## Update: branch `feature/live-data` (live data, reliable multi-car control, Windows launcher)
+
+Design: `docs/superpowers/specs/2026-11-13-hive-live-data-design.md`. Setting up the cars:
+`docs/robot-setup.md`.
+
+- **Control:** the drive stream is 10 Hz (not 20), the `/cmd_vel` publisher is reliable with
+  `KeepLast(1)`, and a stop is a burst of 5 zero messages over about 200 ms. Stops are confirmed
+  against the car's `ros_data` echo, and resent with a red banner if unconfirmed. A power slider
+  (20 to 100%, default 50%) scales drive and turn.
+- **Live data:** camera, LiDAR and a live topic list in a Live view on each car page, with camera
+  quality (Low, Medium, High) and measured MB/s.
+- **Isolation:** one ROS domain per car (camera 42, LiDAR 43, gripper 44). The backend pins
+  `RMW_IMPLEMENTATION=rmw_fastrtps_cpp` (override with `HIVE_RMW`).
+- **Windows:** `npm run hive` from PowerShell starts the backend in WSL and Vite on Windows.
+  `npm run backend` starts only the backend (`--backend-only`). `HIVE_WSL_DISTRO` picks the distro.
+- **Tests:** Vitest also picks up `scripts/*.test.js`.
+- **Real-hardware results:** to be added after the checklist in `docs/robot-setup.md` is run.
 
 ---
 

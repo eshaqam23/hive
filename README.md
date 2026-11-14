@@ -18,6 +18,10 @@ The current version has a React front end and a small Python backend. The first 
 - Gripper open/close buttons for the Gripper RC Car preset
 - Command log that sends text to each connected robot on `/hive/command`
 - Hold-to-drive with keyboard (W A S D / arrows, Space to stop) and a backend deadman
+- Live data from each car, in a Live view next to the 3D model: camera image, LiDAR scan plot, and a live topic list (rate and latest value per topic, click a row to open it)
+- Power slider (20 to 100%, default 50%) that scales driving and turning together
+- Stop confirmation: after a stop Hive checks the car's own `ros_data` echo and shows a red banner if the car may still be moving
+- Camera quality picker (Low, Medium, High) and the measured MB/s coming from the car, so three cars can share campus Wi-Fi
 - RViz-style 3D viewer of each robot's CAD model (orbit, pan, zoom, grid, axes)
 - Local persistence with `localStorage`
 
@@ -32,10 +36,10 @@ The current version has a React front end and a small Python backend. The first 
 
 ## Requirements
 
-- Ubuntu 24.04
-- ROS 2 Jazzy installed at `/opt/ros/jazzy`
-- Node.js 20.19 or newer, and npm
-- Python 3
+- Ubuntu 24.04, or Windows 11 with WSL2 (Ubuntu 24.04, mirrored networking)
+- ROS 2 Jazzy installed at `/opt/ros/jazzy` (inside WSL on Windows)
+- Node.js 20.19 or newer, and npm (on Windows, install Node on Windows, not in WSL)
+- Python 3 (in WSL on Windows)
 
 Vite 7 and Tailwind CSS v4 need Node 20 or newer, so the Node 18 that Ubuntu 24.04's `apt` installs
 is too old. Install Node 22 from [NodeSource](https://github.com/nodesource/distributions) or with
@@ -57,12 +61,18 @@ npm run hive
 
 This starts both the Python backend and the Vite frontend, then opens Hive in the browser.
 
-You can also run the pieces separately:
+- **Ubuntu:** run it in a terminal. The backend is `python3 backend/server.py` (set `HIVE_PYTHON` to use another Python).
+- **Windows:** run it from PowerShell. `rclpy` only exists in WSL, so the launcher starts the backend inside WSL (`wsl.exe --cd <repo> --exec python3 backend/server.py`) and Vite on Windows. With mirrored networking the Windows browser reaches the backend on `127.0.0.1:8787`. Set `HIVE_WSL_DISTRO` to pick a distro other than the WSL default.
+
+You can also run the pieces separately (`npm run backend` is the same launcher with `--backend-only`, so it also uses WSL on Windows):
 
 ```bash
 npm run backend
 npm run frontend
 ```
+
+To reach real cars you also need each Pi's domain and firewall set up, and on Windows a Hyper-V
+firewall rule for WSL. See [docs/robot-setup.md](docs/robot-setup.md).
 
 If you want to launch the app by typing `hive`, link the local package once:
 
@@ -104,17 +114,17 @@ unique per robot), so several robots can all use `/cmd_vel` without hearing each
 | Action | What the worker does |
 | --- | --- |
 | Connect | Starts the worker and gives DDS up to 2.5 s to find the robot (less once something listens on `/cmd_vel`), then reports its nodes, topics and `/cmd_vel` subscriber count. Fails if no node answers; warns if nothing subscribes to `/cmd_vel`. |
-| Drive (hold) | Publishes the `Twist` at once, then 20 times a second for as long as the control is held. Refused with a clear error if nothing listens on `/cmd_vel`. |
+| Drive (hold) | Publishes the `Twist` at once, then 10 times a second for as long as the control is held. Refused with a clear error if nothing listens on `/cmd_vel`. |
 | Stop / release | Publishes a zero `Twist` at once and ends the stream |
 | Gripper | Publishes `std_msgs/msg/Bool` on `/gripper_open` (`true` opens), waiting up to 4 s for a listener |
 | Command log | Publishes `std_msgs/msg/String` on `/hive/command`, waiting up to 4 s for a listener |
 | Status (every 20 s) | Reads the worker's live ROS graph; a robot with no nodes is marked Lost contact |
 
-Velocities: forward and backward `linear.x = ±0.5`, rotation `angular.z = ±1.0`.
+Velocities scale with the power slider (20 to 100%, default 50%): at 50% forward and backward are `linear.x = ±0.25` and rotation is `angular.z = ±2.5`; 100% is wheel speed 0.5 m/s (the car's full throttle). The power is sent with each drive command and clamped server-side.
 
 ### Safety
 
-- **Hold to drive.** `/cmd_vel` streams at 20 Hz only while a control (button, or W A S D / arrows) is held. Releasing it, pressing Stop or Space, the window losing focus, or the tab closing all stop the robot.
+- **Hold to drive.** `/cmd_vel` streams at 10 Hz (reliable, KeepLast(1), so a Wi-Fi stall never replays old commands) only while a control (button, or W A S D / arrows) is held. Releasing it, pressing Stop or Space, the window losing focus, or the tab closing all stop the robot. A stop is sent as a burst of 5 zero messages over about 200 ms, and Hive then watches the car's `ros_data` echo and keeps resending until a zero line comes back.
 - **Deadman.** While driving, the page sends a keepalive every 250 ms. If keepalives stop for 1 s (browser crash, closed laptop, dropped Wi-Fi), the worker stops the robot itself.
 - **Commands stay in order.** The page numbers its drive and gripper commands; one that arrives after a newer one (a slow request on a busy network) is rejected with `409` instead of being applied, so a late drive command can never undo a stop. Driving and the gripper are ordered separately.
 - **Hive does not give up on a connection.** If Connect fails, or a connected robot stops answering (checked every 10 s, and on every drive and keepalive), Hive keeps retrying (after 1, 2, 3, then every 5 s) until the robot answers again or you press Disconnect. Driving stops while it reconnects; press the control again once it is back. Only problems retrying cannot fix (a bad address, ROS 2 not installed) stop the retries. A worker that crashes is restarted by the backend on the next command.
@@ -129,7 +139,7 @@ Velocities: forward and backward `linear.x = ±0.5`, rotation `angular.z = ±1.0
 3. A driver node subscribed to `/cmd_vel` (`geometry_msgs/msg/Twist`). Hive's drive commands do nothing without one, and Connect will warn you.
 4. Optional: a subscriber on `/gripper_open` (`std_msgs/msg/Bool`) for the Gripper RC Car, and on `/hive/command` (`std_msgs/msg/String`) to receive the command log's text. Hive only delivers the text; a node on the robot has to act on it.
 5. Discovery that reaches the laptop: either the robot's default discovery (`ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET`) or `ROS_STATIC_PEERS=<laptop IP>`.
-6. A `/cmd_vel` timeout on the robot side is still a good idea (stop if no `Twist` arrives for, say, 0.5 s). Hive streams at 20 Hz while driving, so a timeout like that only trips if the laptop or the network fails.
+6. A `/cmd_vel` timeout on the robot side is still a good idea (stop if no `Twist` arrives for, say, 0.5 s). Hive streams at 10 Hz while driving, so a timeout like that only trips if the laptop or the network fails.
 
 ## Configuration
 
@@ -167,7 +177,7 @@ refused, `409` replaced by a newer command, `502` the robot did not answer or no
 
 ## Testing without robots
 
-`backend/test/` has a mock of `rclpy` with three simulated robots and an end-to-end suite (20 checks)
+`backend/test/` has a mock of `rclpy` with three simulated robots and an end-to-end suite (see below)
 that verifies what each simulated robot actually received. See `backend/test/README.md`.
 
 ## First run with the real robots
@@ -185,5 +195,6 @@ that verifies what each simulated robot actually received. See `backend/test/REA
 - `backend/`: Python backend and per-robot ROS 2 workers
 - `backend/test/`: mock `rclpy` and end-to-end tests
 - `public/models/`: the robots' CAD models (GLB) and their credits
-- `scripts/hive.mjs`: combined launcher for backend and frontend
+- `scripts/hive.mjs`: combined launcher for backend and frontend (starts the backend in WSL on Windows)
+- `docs/robot-setup.md`: per-car domains, Pi and Windows firewall setup, hardware checklist
 

@@ -54,3 +54,9 @@ Mock API for the worker: `create_subscription(msg_type, topic, cb, qos, raw=Fals
 `mock_ros/robots/`: `<ip>_<domain>.subs.jsonl` (subscription create/destroy), `.params.jsonl`
 (parameter sets), `worker_pubs.jsonl` (publisher topic, depth, reliability) and `worker_env.json`
 (the worker's environment). Unit tests for the mock: `python3 -m pytest backend/tests/test_mock_ros.py`.
+
+## On Windows
+
+The backend (and the mock) run inside WSL, not Windows Python. From PowerShell, `npm run backend`
+starts the backend in WSL. To run the mock-backed suite, open a WSL shell in the repo and use the
+commands above; the repo is under `/mnt/c/...` in WSL.
