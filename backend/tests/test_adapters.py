@@ -1,3 +1,4 @@
+import array
 import struct
 from types import SimpleNamespace
 
@@ -174,3 +175,15 @@ def test_value_types_cover_scalars():
     for t in ("Bool", "String", "Int8", "UInt64", "Float32", "Float64"):
         assert f"std_msgs/msg/{t}" in adapters.VALUE_TYPES
     assert adapters.IMAGE_TYPES == {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}
+
+
+def test_generic_array_array_fields():
+    msg = fake_msg({
+        "floats": array.array("f", [float(i) for i in range(100)]),
+        "few": array.array("i", [1, 2, 3]),
+        "raw": array.array("B", b"abcdef"),
+    })
+    data = adapters.adapt("x/msg/Y", msg)["data"]
+    assert data["floats"] == {"items": [float(i) for i in range(32)], "total": 100}
+    assert data["few"] == [1, 2, 3]
+    assert data["raw"] == {"bytes": 6}

@@ -3,6 +3,7 @@
 Messages are read only through attributes and get_fields_and_field_types(), so
 nothing here imports ROS and tests can use fake objects.
 """
+import array
 import math
 from typing import Any
 
@@ -117,13 +118,14 @@ def _generic(msg: Any) -> dict:
 def _convert(value: Any) -> Any:
     if hasattr(value, "get_fields_and_field_types"):
         return _generic(value)
-    if isinstance(value, (bytes, bytearray)):
+    if isinstance(value, (bytes, bytearray)) or (
+            isinstance(value, array.array) and value.typecode == "B"):
         return {"bytes": len(value)}
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, np.ndarray):
         value = value.tolist()
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, (list, tuple, array.array)):
         items = [_convert(v) for v in value[:MAX_ITEMS]]
         return {"items": items, "total": len(value)} if len(value) > MAX_ITEMS else items
     if isinstance(value, (str, bool, int)) or value is None:
