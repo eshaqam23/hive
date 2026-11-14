@@ -36,6 +36,9 @@ import time
 import traceback
 from typing import Any
 
+import adapters
+import robot_link
+
 HOST = os.environ.get("HIVE_BACKEND_HOST", "127.0.0.1")
 PORT = int(os.environ.get("HIVE_BACKEND_PORT", "8787"))
 ROS_SETUP = os.environ.get("HIVE_ROS_SETUP", "/opt/ros/jazzy/setup.bash")
@@ -49,9 +52,16 @@ ALLOWED_ORIGINS = {
 }
 
 CMD_VEL = "/cmd_vel"
+ROS_DATA = "/ros_data"
 GRIPPER_TOPIC = "/gripper_open"
 COMMAND_TOPIC = os.environ.get("HIVE_COMMAND_TOPIC", "/hive/command")
-DRIVE_RATE_HZ = 20
+DRIVE_RATE_HZ = 10
+STOP_BURST_COUNT = 5            # a stop is sent once at once, then repeated this many times in all
+STOP_BURST_SPACING = 0.05       # seconds between the burst messages
+LINK_EMIT_SECONDS = 0.5
+GRIPPER_CALL_TIMEOUT = 5.0
+GRIPPER_WAIT_SECONDS = 2.0      # how long a gripper press waits for the robot's interface to appear
+RMW_DEFAULT = "rmw_fastrtps_cpp"
 DEADMAN_SECONDS = 1.0
 SUBSCRIBER_WAIT_SECONDS = 4      # how long a gripper or command-log publish waits for a listener
 DISCOVERY_SPIN_SECONDS = 2.5     # how long a new worker listens for the robot before giving up
@@ -61,17 +71,11 @@ MAX_BODY_BYTES = 64 * 1024
 
 IP_OR_HOST_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 
-LINEAR_SPEED = 0.5
-ANGULAR_SPEED = 1.0
-TWISTS = {
-    "forward": (LINEAR_SPEED, 0.0),
-    "backward": (-LINEAR_SPEED, 0.0),
-    "left": (0.0, ANGULAR_SPEED),
-    "right": (0.0, -ANGULAR_SPEED),
-    "stop": (0.0, 0.0),
-}
-GRIPPER = {"gripper_open": True, "gripper_close": False}
-CONTROL_ACTIONS = set(TWISTS) | set(GRIPPER)
+TWISTS = {"forward", "backward", "left", "right", "stop"}
+GRIPPER = {"gripper_open": "open", "gripper_close": "close", "gripper_position": "position"}
+CONTROL_ACTIONS = TWISTS | set(GRIPPER)
+GRIPPER_POSITION_TOPIC = "/gripper/position"
+GRIPPER_SERVICES = {"open": "/gripper/release", "close": "/gripper/grab"}
 
 
 class ApiError(Exception):
@@ -104,6 +108,13 @@ def validate_domain_id(domain_id: Any) -> int:
     if parsed < 0 or parsed > 232:
         raise ApiError(400, "ROS domain ID must be between 0 and 232.")
     return parsed
+
+
+def validate_power(body: dict) -> float:
+    try:
+        return robot_link.clamp_power(body.get("power"))
+    except ValueError:
+        raise ApiError(400, "power must be a number between 0.2 and 1.0.", code="bad_power") from None
 
 
 def validate_order(body: dict) -> tuple[str | None, int | None]:
@@ -149,6 +160,10 @@ class RobotWorker:
         self.next_id = 0
         self.last_order: dict[str, tuple[str | None, int]] = {}  # channel -> newest (session, seq) applied
         self.discovered = threading.Event()  # set once DDS has had time to find the robot
+        self.link: dict[str, Any] | None = None  # newest link state the worker reported
+
+    def on_link(self, link: dict[str, Any]) -> None:
+        self.link = link
 
     def is_running(self) -> bool:
         return self.process is not None and self.process.poll() is None
@@ -165,6 +180,7 @@ class RobotWorker:
                 [
                     f"source {shlex.quote(ROS_SETUP)}",
                     f"export ROS_DOMAIN_ID={self.domain_id}",
+                    f"export RMW_IMPLEMENTATION=${{HIVE_RMW:-{RMW_DEFAULT}}}",
                     "unset ROS_LOCALHOST_ONLY",
                     "export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST",
                     f"export ROS_STATIC_PEERS={shlex.quote(self.peer)}",
@@ -218,6 +234,9 @@ class RobotWorker:
                 reply = json.loads(line)
             except ValueError:
                 reply = None
+            if isinstance(reply, dict) and "id" not in reply and isinstance(reply.get("link"), dict):
+                self.on_link(reply["link"])
+                continue
             if not isinstance(reply, dict) or "id" not in reply:
                 # DDS and ROS libraries can print to stdout too; show it rather than choke on it
                 print(f"[hive-worker {self.peer}] {line.rstrip()}", flush=True)
@@ -285,7 +304,10 @@ class RobotWorker:
             raise ApiError(502, "The ROS 2 worker for this robot exited. See the backend terminal.", code="worker_gone")
         if not reply.get("ok"):
             raise ApiError(reply.get("status", 502), reply.get("error", "The ROS 2 worker failed."), **reply.get("extra", {}))
-        return {k: v for k, v in reply.items() if k not in ("id", "ok")}
+        result = {k: v for k, v in reply.items() if k not in ("id", "ok")}
+        if isinstance(result.get("link"), dict):
+            self.on_link(result["link"])
+        return result
 
     def discover(self, *, with_topics: bool) -> dict[str, Any]:
         """The robot's nodes, topics and /cmd_vel listeners. A new worker first gives DDS up to
@@ -434,6 +456,11 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
         warnings = []
         if found["cmd_vel_subscribers"] == 0:
             warnings.append(f"Nothing on the robot is listening on {CMD_VEL}, so drive commands will not move it. Check its driver node.")
+        if found.get("other_publishers", 0) > 0:
+            warnings.append(
+                f"{found['other_publishers']} other publisher(s) are also sending on {CMD_VEL}. Their commands will mix with Hive's; "
+                "stop the other controller before driving."
+            )
         return {"ok": True, **found, "warnings": warnings}
 
     def handle_status(self, body: dict, peer: str, domain_id: int) -> dict:
@@ -449,20 +476,28 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
         if action not in CONTROL_ACTIONS:
             raise ApiError(400, f"Unsupported control action: {action}")
         session, seq = validate_order(body)
+        value = None
+        if action == "gripper_position":
+            value = body.get("value")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
+                raise ApiError(400, "The gripper position must be a number from 0 to 1.", code="bad_value")
+            value = float(value)
+        power = validate_power(body) if action in TWISTS else None
         worker = get_worker(peer, domain_id)
         if action in GRIPPER:
+            worker.wait_for_discovery()
             result = worker.request(
-                "publish",
-                timeout=SUBSCRIBER_WAIT_SECONDS + 5,
+                "gripper",
+                timeout=GRIPPER_WAIT_SECONDS + GRIPPER_CALL_TIMEOUT + 3,
                 channel="gripper",
                 session=session,
                 seq=seq,
-                topic=GRIPPER_TOPIC,
-                value=GRIPPER[action],
-                wait=SUBSCRIBER_WAIT_SECONDS,
+                action=GRIPPER[action],
+                value=value,
+                wait=GRIPPER_WAIT_SECONDS,
             )
         else:
-            result = self.drive(worker, action, session, seq)
+            result = self.drive(worker, action, session, seq, power)
         return {**result, "action": action}
 
     def handle_drive(self, body: dict, peer: str, domain_id: int) -> dict:
@@ -471,19 +506,24 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
         if action not in TWISTS:
             raise ApiError(400, f"Unsupported drive action: {action}")
         session, seq = validate_order(body)
-        return self.drive(get_worker(peer, domain_id), action, session, seq)
+        power = validate_power(body)
+        return self.drive(get_worker(peer, domain_id), action, session, seq, power)
 
     @staticmethod
-    def drive(worker: RobotWorker, action: str, session: str | None, seq: int | None) -> dict:
+    def drive(worker: RobotWorker, action: str, session: str | None, seq: int | None, power: float) -> dict:
         if action != "stop":
             worker.wait_for_discovery()
-        return worker.request("drive", timeout=5, channel="drive", session=session, seq=seq, action=action)
+        result = worker.request("drive", timeout=5, channel="drive", session=session, seq=seq, action=action, power=power)
+        result.setdefault("link", worker.link)
+        return result
 
     def handle_keepalive(self, body: dict, peer: str, domain_id: int) -> dict:
         worker = existing_worker(peer, domain_id)
         if worker is None:
             raise ApiError(502, "The backend is not driving this robot any more.", streaming=False, code="worker_gone")
-        return worker.request("keepalive", timeout=3)
+        result = worker.request("keepalive", timeout=3)
+        result.setdefault("link", worker.link)
+        return result
 
     def handle_command(self, body: dict, peer: str, domain_id: int) -> dict:
         text = str(body.get("text", "")).strip()
@@ -568,7 +608,8 @@ class RobotWorkerLoop:
     def __init__(self) -> None:
         import rclpy
         from geometry_msgs.msg import Twist
-        from std_msgs.msg import Bool, String
+        from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+        from std_msgs.msg import Bool, Float32, String
 
         try:
             from rclpy.signals import SignalHandlerOptions
@@ -576,14 +617,32 @@ class RobotWorkerLoop:
             rclpy.init(args=None, signal_handler_options=SignalHandlerOptions.NO)
         except ImportError:
             rclpy.init(args=None)
-        self.rclpy, self.Twist, self.Bool, self.String = rclpy, Twist, Bool, String
+        self.rclpy, self.Twist, self.Bool, self.Float32, self.String = rclpy, Twist, Bool, Float32, String
         domain_id = os.environ.get("ROS_DOMAIN_ID", "0")
         self.node = rclpy.create_node(f"hive_operator_domain_{domain_id}")
         self.publishers = {
-            CMD_VEL: self.node.create_publisher(Twist, CMD_VEL, 10),
+            CMD_VEL: self.node.create_publisher(
+                Twist,
+                CMD_VEL,
+                QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST),
+            ),
             GRIPPER_TOPIC: self.node.create_publisher(Bool, GRIPPER_TOPIC, 10),
             COMMAND_TOPIC: self.node.create_publisher(String, COMMAND_TOPIC, 10),
         }
+        self.node.create_subscription(
+            String,
+            ROS_DATA,
+            self.on_ros_data,
+            QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST),
+        )
+        self.clients: dict[str, Any] = {}
+        self.confirmer = robot_link.StopConfirmer()
+        self.burst: list[float] = []           # times of the stop repeats still to send
+        self.power = robot_link.DEFAULT_POWER
+        self.last_line: tuple[str, float] | None = None  # newest /ros_data line and when it came
+        self.received = 0
+        self.reporting, self.other_publishers = False, 0
+        self.link_sent: tuple[tuple, float] = ((), 0.0)
         self.action = "stop"
         self.last_keepalive = 0.0
         self.deadman_tripped = False
@@ -610,13 +669,60 @@ class RobotWorkerLoop:
 
     def publish_twist(self, action: str) -> None:
         message = self.Twist()
-        message.linear.x, message.angular.z = TWISTS[action]
+        message.linear.x, message.angular.z = robot_link.twist_for(action, self.power)
         self.publishers[CMD_VEL].publish(message)
 
     def publish_value(self, topic: str, value: Any) -> None:
-        message = self.Bool() if topic == GRIPPER_TOPIC else self.String()
+        if topic == GRIPPER_POSITION_TOPIC and topic not in self.publishers:
+            self.publishers[topic] = self.node.create_publisher(self.Float32, topic, 10)
+        message = {GRIPPER_TOPIC: self.Bool, GRIPPER_POSITION_TOPIC: self.Float32}.get(topic, self.String)()
         message.data = value
         self.publishers[topic].publish(message)
+
+    def on_ros_data(self, message: Any) -> None:
+        now = time.monotonic()
+        self.received += 1
+        text = str(message.data).strip()
+        self.last_line = (text, now)
+        self.confirmer.observe(robot_link.parse_motor_line(text), now)
+
+    def refresh_graph(self) -> None:
+        self.reporting = self.node.count_publishers(ROS_DATA) > 0
+        self.other_publishers = max(0, self.node.count_publishers(CMD_VEL) - 1)
+        self.confirmer.set_reporting(self.reporting)
+
+    def stop_state(self, now: float) -> str:
+        """The stop confirmation state. A due resend is one more zero Twist."""
+        state, resend = self.confirmer.poll(now)
+        if resend and self.action == "stop":
+            self.publish_twist("stop")
+        return state
+
+    def link_state(self, now: float) -> dict[str, Any]:
+        last = self.last_line
+        return {
+            "last_line": last[0] if last else None,
+            "last_line_age_ms": int((now - last[1]) * 1000) if last else None,
+            "stop": self.stop_state(now),
+            "reporting": self.reporting,
+            "other_publishers": self.other_publishers,
+        }
+
+    def emit_link(self, now: float) -> None:
+        """Tell the backend the link state: at once when it changes, otherwise every LINK_EMIT_SECONDS."""
+        link = self.link_state(now)
+        key = (link["stop"], link["reporting"], link["other_publishers"])
+        if key != self.link_sent[0] or now - self.link_sent[1] >= LINK_EMIT_SECONDS:
+            self.link_sent = (key, now)
+            print(json.dumps({"link": link}), flush=True)
+
+    def detect_gripper(self) -> str | None:
+        subscribed = {
+            t for t in (GRIPPER_TOPIC, GRIPPER_POSITION_TOPIC)
+            if any(not self.is_own(e.node_name, e.node_namespace) for e in self.node.get_subscriptions_info_by_topic(t))
+        }
+        services = {name for name, _ in self.node.get_service_names_and_types()}
+        return robot_link.detect_gripper(subscribed, services)
 
     def listeners(self, topic: str) -> int:
         return self.node.count_subscribers(topic)
@@ -630,31 +736,49 @@ class RobotWorkerLoop:
             for name, namespace in self.node.get_node_names_and_namespaces()
             if not self.is_own(name, namespace) and not name.startswith("_")
         )
-        topics = []
+        topics, extra = [], {}
+        self.refresh_graph()
         if with_topics:
             for name, types in sorted(self.node.get_topic_names_and_types()):
                 endpoints = self.node.get_publishers_info_by_topic(name) + self.node.get_subscriptions_info_by_topic(name)
                 if any(not self.is_own(e.node_name, e.node_namespace) for e in endpoints):
-                    topics.append({"name": name, "type": ", ".join(types)})
-        return {"nodes": nodes, "topics": topics, "cmd_vel_subscribers": self.listeners(CMD_VEL)}
+                    topics.append({"name": name, "type": ", ".join(types), "kind": adapters.kind_for_type(types[0] if types else "")})
+            extra = {
+                "services": [{"name": n, "type": ", ".join(t)} for n, t in sorted(self.node.get_service_names_and_types())],
+                "gripper_interface": self.detect_gripper(),
+                "other_publishers": self.other_publishers,
+            }
+        return {"nodes": nodes, "topics": topics, "cmd_vel_subscribers": self.listeners(CMD_VEL), **extra}
 
     # -------------------------------------------------------------- drive state
 
-    def start_driving(self, action: str) -> None:
+    def start_driving(self, action: str, power: float) -> None:
         now = time.monotonic()
         if action != self.action:
             self.log(f"driving {action} ({self.listeners(CMD_VEL)} listening on {CMD_VEL})")
+        self.power = power
+        self.burst = []  # a stop burst in flight must not cut into the new drive
+        self.confirmer = robot_link.StopConfirmer()
+        self.confirmer.set_reporting(self.reporting)
         self.action, self.last_keepalive, self.deadman_tripped = action, now, False
         self.publish_twist(action)
         self.next_publish_at = now + 1.0 / DRIVE_RATE_HZ
 
     def stop_driving(self) -> None:
+        """Every stop path ends here: one zero Twist at once, the rest of the burst on the next ticks,
+        and a stop confirmation to wait for."""
         if self.action != "stop":
             self.log("stopped")
+        now = time.monotonic()
         self.action = "stop"
+        self.confirmer.stop_requested(now)
         self.publish_twist("stop")
+        self.burst = [now + STOP_BURST_SPACING * i for i in range(1, STOP_BURST_COUNT)]
 
-    # -------------------------------------------------------------- requests
+    def send_burst(self, now: float) -> None:
+        while self.burst and self.burst[0] <= now and self.action == "stop":
+            self.burst.pop(0)
+            self.publish_twist("stop")
 
     def handle(self, request: dict[str, Any]) -> None:
         request_id, op = request.get("id"), request.get("op")
@@ -663,19 +787,28 @@ class RobotWorkerLoop:
             action = request.get("action")
             if action == "stop":
                 self.stop_driving()
-                self.reply(request_id, action="stop", streaming=False)
+                self.refresh_graph()
+                self.reply(request_id, action="stop", streaming=False, link=self.link_state(now))
             elif action in TWISTS:
                 if self.listeners(CMD_VEL) == 0:
                     self.fail(request_id, 502, no_listener(CMD_VEL), streaming=False, code="no_listener")
                     return
-                self.start_driving(action)
-                self.reply(request_id, action=action, streaming=True)
+                try:
+                    power = robot_link.clamp_power(request.get("power"))
+                except ValueError:
+                    self.fail(request_id, 400, "power must be a number.", code="bad_power")
+                    return
+                self.start_driving(action, power)
+                self.refresh_graph()
+                self.reply(request_id, action=action, streaming=True, link=self.link_state(now))
             else:
                 self.fail(request_id, 400, f"Unsupported drive action: {action}")
         elif op == "keepalive":
+            self.refresh_graph()
+            link = self.link_state(now)
             if self.action != "stop":
                 self.last_keepalive = now
-                self.reply(request_id, streaming=True, action=self.action)
+                self.reply(request_id, streaming=True, action=self.action, link=link)
             elif self.deadman_tripped:
                 self.deadman_tripped = False
                 self.fail(
@@ -686,11 +819,16 @@ class RobotWorkerLoop:
                     code="deadman",
                 )
             else:
-                self.reply(request_id, streaming=False)
+                self.reply(request_id, streaming=False, link=link)
         elif op == "publish":
             topic = request.get("topic")
             if topic not in (GRIPPER_TOPIC, COMMAND_TOPIC):
                 self.fail(request_id, 400, f"Unsupported topic: {topic}")
+                return
+            self.pending.append({**request, "deadline": now + float(request.get("wait", 0))})
+        elif op == "gripper":
+            if request.get("action") not in ("open", "close", "position"):
+                self.fail(request_id, 400, f"Unsupported gripper action: {request.get('action')}")
                 return
             self.pending.append({**request, "deadline": now + float(request.get("wait", 0))})
         elif op == "discover":
@@ -712,6 +850,8 @@ class RobotWorkerLoop:
     def settle(self, request: dict[str, Any]) -> bool:
         """Answer a waiting request if it can be answered now. Returns True once it has been."""
         done_waiting = time.monotonic() >= request["deadline"]
+        if request["op"] == "gripper":
+            return self.settle_gripper(request, done_waiting)
         if request["op"] == "publish":
             topic = request["topic"]
             if self.listeners(topic) > 0:
@@ -727,8 +867,55 @@ class RobotWorkerLoop:
             return True
         return False
 
+    def settle_gripper(self, request: dict[str, Any], done_waiting: bool) -> bool:
+        """Drive the gripper through whichever interface the robot has. A Trigger service call is async:
+        it is polled on later ticks and given up on after GRIPPER_CALL_TIMEOUT."""
+        rid, action = request["id"], request["action"]
+        future = request.get("future")
+        if future is not None:
+            if future.done():
+                result = future.result()
+                if getattr(result, "success", True):
+                    self.reply(rid, interface="trigger", service=request["service"], message=getattr(result, "message", ""))
+                else:
+                    self.fail(rid, 502, f"The gripper service refused: {getattr(result, 'message', '')}", code="gripper_failed")
+                return True
+            if time.monotonic() >= request["call_deadline"]:
+                self.fail(rid, 504, f"{request['service']} did not answer in {GRIPPER_CALL_TIMEOUT:g} s.", code="gripper_timeout")
+                return True
+            return False
+        interface = self.detect_gripper()
+        if interface is None:
+            if done_waiting:
+                self.fail(rid, 409, "No gripper interface was found on this robot.", code="no_gripper")
+                return True
+            return False
+        if interface == "trigger":
+            if action == "position":
+                self.fail(rid, 409, "This gripper opens and closes only; it has no position control.", code="no_position")
+                return True
+            service = GRIPPER_SERVICES[action]
+            from std_srvs.srv import Trigger
+
+            client = self.clients.get(service) or self.clients.setdefault(service, self.node.create_client(Trigger, service))
+            if not client.service_is_ready():
+                if done_waiting:
+                    self.fail(rid, 502, f"{service} is not available.", code="no_service")
+                    return True
+                return False
+            request["service"], request["call_deadline"] = service, time.monotonic() + GRIPPER_CALL_TIMEOUT
+            request["future"] = client.call_async(Trigger.Request())
+            return False
+        if interface == "position":
+            topic, value = GRIPPER_POSITION_TOPIC, {"open": 0.0, "close": 1.0}.get(action, request.get("value"))
+        else:
+            topic, value = GRIPPER_TOPIC, (request.get("value", 0.0) >= 0.5) if action == "position" else action == "open"
+        self.publish_value(topic, value)
+        self.reply(rid, interface=interface, topic=topic)
+        return True
+
     def tick(self) -> None:
-        """The deadman, the 20 Hz drive stream, and ROS housekeeping."""
+        """The deadman, the 10 Hz drive stream, stop bursts and confirmation, and ROS housekeeping."""
         now = time.monotonic()
         if self.action != "stop" and now - self.last_keepalive > DEADMAN_SECONDS:
             self.log("deadman: no keepalive from the page, stopping the robot")
@@ -740,7 +927,16 @@ class RobotWorkerLoop:
             self.next_publish_at += 1.0 / DRIVE_RATE_HZ
             if self.next_publish_at < now:  # fell behind (e.g. a slow discovery): don't burst
                 self.next_publish_at = now + 1.0 / DRIVE_RATE_HZ
-        self.rclpy.spin_once(self.node, timeout_sec=0.0)
+        self.send_burst(now)
+        for _ in range(50):  # drain what is ready (the /ros_data echoes) so none queue up behind a tick
+            before = self.received
+            self.rclpy.spin_once(self.node, timeout_sec=0.0)
+            if self.received == before:
+                break
+        now = time.monotonic()
+        self.refresh_graph()
+        self.send_burst(now)
+        self.emit_link(now)
 
     def log_throttled(self, text: str) -> None:
         """Log a repeating error once, then at most every 5 s."""
@@ -762,12 +958,27 @@ class RobotWorkerLoop:
                 self.requests.put(request)
         self.requests.put(None)  # the backend closed the pipe, or died
 
+    def shutdown_stop(self) -> None:
+        """Stop the robot on the way out: the whole burst, on ticks, for at most half a second."""
+        try:
+            self.stop_driving()
+            end = time.monotonic() + 0.5
+            while self.burst and time.monotonic() < end:
+                try:
+                    self.requests.get(timeout=max(0.0, min(self.burst[0] - time.monotonic(), 0.05)))
+                except queue.Empty:
+                    pass
+                self.send_burst(time.monotonic())
+        except Exception:  # noqa: BLE001
+            self.log(f"final stop failed:\n{traceback.format_exc()}")
+
     def run(self) -> None:
         threading.Thread(target=self.read_stdin, daemon=True).start()
         print(json.dumps({"ready": True}), flush=True)
         try:
             while True:
-                timeout = max(0.0, min(self.next_publish_at - time.monotonic(), 0.05))
+                due = min([self.next_publish_at, *self.burst[:1]])
+                timeout = max(0.0, min(due - time.monotonic(), 0.05))
                 try:
                     request = self.requests.get(timeout=timeout)
                 except queue.Empty:
@@ -787,7 +998,7 @@ class RobotWorkerLoop:
                 except Exception:  # noqa: BLE001
                     self.log_throttled(f"drive loop error (worker still running):\n{traceback.format_exc()}")
         finally:
-            self.stop_driving()
+            self.shutdown_stop()
             self.node.destroy_node()
             self.rclpy.shutdown()
 

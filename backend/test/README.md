@@ -26,7 +26,7 @@ python3 backend/test/test_e2e.py backend/test/mock_ros
 ```
 
 The suite covers connect (including a powered-off robot and a robot with no driver), hold-to-drive
-and its 20 Hz rate, press latency, the deadman stop, release, stop-after-forward ordering, rejecting
+and its 10 Hz rate, press latency, the deadman stop, release, stop-after-forward ordering, rejecting
 an out-of-order command, the gripper, the command log, CORS and input validation. It does not prove
 DDS behaviour on a real network: run the checklist in the main README with the real robots before
 relying on it.

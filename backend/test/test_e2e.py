@@ -16,6 +16,8 @@ results = []
 CAR = {"ip": "192.168.1.20", "domain_id": 42}       # online, driver running
 OFF = {"ip": "192.168.1.31", "domain_id": 43}       # powered off
 NODRV = {"ip": "192.168.1.44", "domain_id": 44}     # online, but nothing subscribes to /cmd_vel
+LIDAR = {"ip": "192.168.1.50", "domain_id": 45}     # /cmd_vel listener, /scan, /ros_data echo
+GRIP = {"ip": "192.168.1.60", "domain_id": 46}      # Trigger gripper services, prefixed /ros_data echo
 
 
 def call(path, body=None, method=None, origin=ORIGIN, timeout=25):
@@ -129,7 +131,7 @@ def t_hold_and_deadman():
 
 def t_stream_rate_and_latency():
     """A connected robot's worker is already running: a press reaches the robot at once, and the
-    stream runs at the worker's 20 Hz."""
+    stream runs at the worker's 10 Hz."""
     reset()
     t_press = time.time()
     s, _, dt, _ = call("/robots/drive", {**CAR, "action": "forward"})
@@ -143,7 +145,7 @@ def t_stream_rate_and_latency():
     rate = (len(msgs) - 1) / span if span else 0
     check("a press reaches the robot within 0.3 s", s == 200 and first is not None and first < 0.3,
           f"HTTP {s} in {dt:.3f}s, first move message after {first if first is None else round(first, 3)}s")
-    check("holding drive streams /cmd_vel at about 20 Hz", 16 <= rate <= 24, f"{len(msgs)} messages at {rate:.1f} Hz")
+    check("holding drive streams /cmd_vel at about 10 Hz", 8 <= rate <= 12, f"{len(msgs)} messages at {rate:.1f} Hz")
 
 
 def t_stale_command_dropped():
@@ -216,10 +218,125 @@ def t_bad_input():
     check("a non-object JSON body is a 400, not a 500", s == 400, f"HTTP {s} {d.get('error')!r}")
 
 
+def zero_twists(robot):
+    return [m for m in received(robot) if m["topic"] == "/cmd_vel" and not moving(m["msg"])]
+
+
+def link_after_stop(robot, want, limit=1.0):
+    """Stop, then poll keepalive until link.stop == want (or the limit passes). Returns the last link."""
+    call("/robots/drive", {**robot, "action": "stop"})
+    t0, link = time.time(), {}
+    while time.time() - t0 < limit:
+        s, d, _, _ = call("/robots/drive/keepalive", robot)
+        link = d.get("link") or {}
+        if link.get("stop") == want:
+            break
+        time.sleep(0.05)
+    return link
+
+
+def t_power_scales_twist():
+    call("/robots/connect", CAR)
+    reset()
+    s, d, _, _ = call("/robots/drive", {**CAR, "action": "forward", "power": 0.5})
+    time.sleep(0.3)
+    call("/robots/drive", {**CAR, "action": "stop"})
+    xs = [m["msg"] for m in received(CAR) if m["topic"] == "/cmd_vel" and moving(m["msg"])]
+    check("drive power 0.5 publishes linear.x 0.25", s == 200 and bool(xs) and all("x: 0.25" in x for x in xs), f"HTTP {s} msgs={xs[:2]}")
+    s, d, _, _ = call("/robots/drive", {**CAR, "action": "forward", "power": "fast"})
+    check("a non-numeric power is 400 bad_power", s == 400 and d.get("code") == "bad_power", f"HTTP {s} {d}")
+    call("/robots/drive", {**CAR, "action": "stop"})
+
+
+def t_keep_last_one():
+    call("/robots/disconnect", CAR)
+    reset()
+    call("/robots/connect", CAR)
+    path = f"{MOCK}/robots/worker_pubs.jsonl"
+    pubs = [json.loads(l) for l in open(path) if l.strip()] if os.path.exists(path) else []
+    cmd = [p for p in pubs if p["topic"] == "/cmd_vel"]
+    check("the worker creates /cmd_vel with KeepLast(1)", bool(cmd) and all(p["depth"] == 1 for p in cmd), f"publishers={cmd}")
+
+
+def t_stop_burst():
+    call("/robots/connect", CAR)
+    call("/robots/drive", {**CAR, "action": "forward"})
+    time.sleep(0.4)
+    reset()
+    call("/robots/drive", {**CAR, "action": "stop"})
+    time.sleep(0.6)
+    zs = zero_twists(CAR)
+    within = [m for m in zs if zs and m["t"] <= zs[0]["t"] + 0.3]
+    check("a stop yields at least 5 zero Twists within 300 ms", len(within) >= 5, f"{len(within)} within 300 ms of {len(zs)} zero twists")
+
+
+def t_stop_confirmed():
+    call("/robots/connect", LIDAR)
+    call("/robots/drive", {**LIDAR, "action": "forward"})
+    for _ in range(4):
+        time.sleep(0.25)
+        call("/robots/drive/keepalive", LIDAR)
+    link = link_after_stop(LIDAR, "confirmed")
+    check("a stop is confirmed from the car's own /ros_data echo", link.get("stop") == "confirmed" and "0,1,0,1" in str(link.get("last_line")), f"link={link}")
+
+
+def t_stop_unreported():
+    call("/robots/connect", NODRV)
+    link = link_after_stop(NODRV, "unreported")
+    check("a car with no /ros_data reports the stop as unreported", link.get("stop") == "unreported" and link.get("reporting") is False, f"link={link}")
+
+
+def t_gripper_trigger():
+    s, d, _, _ = call("/robots/connect", GRIP)
+    reset()
+    s2, d2, _, _ = call("/robots/control", {**GRIP, "action": "gripper_close"})
+    hits = [m["topic"] for m in received(GRIP)]
+    check("trigger gripper: close calls /gripper/grab, connect reports the interface",
+          d.get("gripper_interface") == "trigger" and s2 == 200 and "/gripper/grab" in hits,
+          f"interface={d.get('gripper_interface')} HTTP {s2} robot got={hits}")
+    check("connect lists services and topic kinds", any(x.get("name") == "/gripper/grab" for x in d.get("services", [])) and all("kind" in t for t in d.get("topics", [])),
+          f"services={d.get('services')} topics={d.get('topics')}")
+    reset()
+    call("/robots/control", {**GRIP, "action": "gripper_open"})
+    check("trigger gripper: open calls /gripper/release", "/gripper/release" in [m["topic"] for m in received(GRIP)], f"robot got={[m['topic'] for m in received(GRIP)]}")
+
+
+def t_no_gripper():
+    call("/robots/connect", NODRV)
+    s, d, _, _ = call("/robots/control", {**NODRV, "action": "gripper_close"})
+    check("no gripper interface is a 409 no_gripper", s == 409 and d.get("code") == "no_gripper", f"HTTP {s} {d}")
+
+
+def t_other_publishers():
+    path = f"{MOCK}/robots.json"
+    original = open(path).read()
+    robots = json.loads(original)
+    robots["192.168.1.20:42"]["extra_cmd_vel_publishers"] = 1
+    def write_atomic(text):  # workers re-read robots.json constantly: never leave it half-written
+        open(path + ".tmp", "w").write(text)
+        os.replace(path + ".tmp", path)
+
+    try:
+        write_atomic(json.dumps(robots))
+        s, d, _, _ = call("/robots/connect", CAR)
+    finally:
+        write_atomic(original)
+    check("connect reports another publisher on /cmd_vel", s == 200 and d.get("other_publishers") == 1 and any("publish" in w for w in d.get("warnings", [])),
+          f"HTTP {s} other_publishers={d.get('other_publishers')} warnings={d.get('warnings')}")
+
+
+def t_rmw_pinned():
+    call("/robots/connect", CAR)
+    env = json.load(open(f"{MOCK}/robots/worker_env.json"))
+    check("the worker's RMW implementation is pinned", env.get("RMW_IMPLEMENTATION") == "rmw_fastrtps_cpp", f"env={env}")
+
+
 if __name__ == "__main__":
     only = set(sys.argv[3:])
     for fn in [t_health, t_connect_real, t_connect_off, t_connect_nodriver, t_no_subscriber_fast, t_order_stop_wins,
-               t_hold_and_deadman, t_stream_rate_and_latency, t_stale_command_dropped, t_channels_independent, t_release_stops, t_gripper, t_command_text, t_cors, t_bad_input]:
+               t_hold_and_deadman, t_stream_rate_and_latency, t_stale_command_dropped, t_channels_independent, t_release_stops, t_gripper, t_command_text, t_cors, t_bad_input,
+               t_power_scales_twist, t_keep_last_one, t_stop_burst, t_stop_confirmed, t_stop_unreported,
+               t_gripper_trigger, t_no_gripper, t_other_publishers, t_rmw_pinned]:
         if only and fn.__name__ not in only:
             continue
         try:
