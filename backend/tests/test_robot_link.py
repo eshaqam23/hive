@@ -30,7 +30,8 @@ def test_parse_gripper_one_and_two_angles():
 
 
 @pytest.mark.parametrize(
-    "bad", ["OK", "", "1,2,3", "a,1,0,1", "D,1,2,3", "G", "G,x", "G,1,2,3", "1.5,1,0,1", "G,nan", None, 5]
+    "bad", ["OK", "", "1,2,3", "a,1,0,1", "D,1,2,3", "G", "G,x", "G,1,2,3", "1.5,1,0,1", "G,nan",
+     "--5,1,0,1", "²,1,0,1", "D,--1,1,0,1", "٣,1,0,1", None, 5]
 )
 def test_parse_malformed(bad):
     assert parse_motor_line(bad) is None

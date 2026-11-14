@@ -1,6 +1,7 @@
 """Pure robot-link logic: motor-line parsing, stop confirmation, power/twist math,
 gripper interface detection and camera profile constants. No ROS imports."""
 import math
+import re
 from typing import Any, NamedTuple, Optional
 
 LINEAR_SCALE = 0.5   # m/s at power 1.0
@@ -17,6 +18,9 @@ _EPS = 1e-9
 CAMERA_PROFILES = {"low": "424x240x6", "medium": "424x240x15", "high": "640x480x15"}
 
 
+_INT_RE = re.compile(r"-?[0-9]+")
+
+
 class MotorLine(NamedTuple):
     kind: str
     left_pwm: int
@@ -27,9 +31,8 @@ class MotorLine(NamedTuple):
 
 
 def _ints(parts):
-    if all(p.lstrip("-").isdigit() for p in parts):
-        return [int(p) for p in parts]
-    return None
+    # strict ASCII match, so int() below cannot raise
+    return [int(p) for p in parts] if all(_INT_RE.fullmatch(p) for p in parts) else None
 
 
 def _floats(parts):
