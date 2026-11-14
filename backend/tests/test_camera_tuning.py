@@ -194,3 +194,12 @@ def test_cached_node_gone_and_nothing_else_gives_none():
     tuner.camera_node = "/camera/camera"
     result, _ = run(world, tuner=tuner)
     assert result is None and tuner.camera_node is None
+
+
+def test_call_timeout_override_bounds_each_call():
+    world = FakeWorld(dict(CAM), silent={"/camera/camera/list_parameters"})
+    tuner = CameraTuner(world, clock=world.clock, timeout=5.0)
+    job = tuner.start("medium", False, call_timeout=1.0)
+    while not job.step():
+        world.now += 0.1
+    assert job.result is None and world.now < 1.5

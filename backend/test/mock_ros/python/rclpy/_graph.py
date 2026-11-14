@@ -271,6 +271,6 @@ class Client:
 
     def call_async(self, req):
         key, robot = self._find()
-        if key is None:
-            return Future()  # like a real client with no server: never completes
+        if key is None or (robot.get("param_silent") and self.name.rsplit("/", 1)[-1].endswith("_parameters")):
+            return Future()  # like a real client with no server (or a hung camera node): never completes
         return Future(_handle(self.srv_type, key, robot, self.name, req), done=True)

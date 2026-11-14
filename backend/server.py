@@ -92,6 +92,8 @@ GRIPPER_SERVICES = {"open": "/gripper/release", "close": "/gripper/grab"}
 DEFAULT_CAMERA = ("medium", False)   # colour quality and depth, applied at connect unless the user chose otherwise
 CAMERA_WANT: dict[tuple, tuple] = {}  # robot key -> the last (quality, depth) requested; survives disconnects
 CAMERA_RETRY_SECONDS = 5.0          # least time between lazy re-tries of tuning for one robot
+CAMERA_LAZY_SECONDS = 3.0            # the whole lazy re-try, so a stream request never waits longer
+CAMERA_LAZY_CALL_SECONDS = 1.0       # per service call on the lazy path
 CAMERA_REQUEST_SECONDS = 30          # a whole tuning run: discovery plus both parameter calls, 5 s per call at most
 
 
@@ -181,6 +183,7 @@ class RobotWorker:
         self.topic_kinds: dict[str, str] = {}  # topic -> payload kind, from the last discover reply
         self.camera: dict[str, Any] | None = None  # newest camera tuning result; None when no RealSense node
         self.camera_tried_at = 0.0  # monotonic time of the last tuning attempt
+        self.camera_lock = threading.Lock()  # one lazy re-try at a time per robot
 
     def on_link(self, link: dict[str, Any]) -> None:
         self.link = link
@@ -382,13 +385,16 @@ WORKERS: dict[tuple[str, int], RobotWorker] = {}
 WORKERS_LOCK = threading.Lock()
 
 
-def apply_camera(worker: RobotWorker, quality: str, depth: bool) -> dict[str, Any] | None:
+def apply_camera(worker: RobotWorker, quality: str, depth: bool, *, lazy: bool = False) -> dict[str, Any] | None:
     """Tune the robot's RealSense and remember the choice. A tuning failure never raises: it is the
     result (applied false, with the reason), so connecting still works and the MJPEG gate can act on it."""
     CAMERA_WANT[(worker.peer, worker.domain_id)] = (quality, depth)
     worker.camera_tried_at = time.monotonic()
     try:
-        camera = worker.request("camera", timeout=CAMERA_REQUEST_SECONDS, quality=quality, depth=depth)["camera"]
+        if lazy:
+            camera = worker.request("camera", timeout=CAMERA_LAZY_SECONDS, quality=quality, depth=depth, call_timeout=CAMERA_LAZY_CALL_SECONDS)["camera"]
+        else:
+            camera = worker.request("camera", timeout=CAMERA_REQUEST_SECONDS, quality=quality, depth=depth)["camera"]
     except ApiError as error:
         camera = {"node": None, "applied": False, "quality": quality, "depth": depth, "profile": None, "reason": error.message}
     worker.camera = camera
@@ -398,11 +404,22 @@ def apply_camera(worker: RobotWorker, quality: str, depth: bool) -> dict[str, An
 def retry_camera(worker: RobotWorker) -> None:
     """A RealSense node that joined the graph after connect (or a tuning attempt that got no answer) is
     tuned on first use, at most once per CAMERA_RETRY_SECONDS, with the remembered choice."""
-    camera = worker.camera
-    unresolved = camera is None or (camera.get("applied") is False and camera.get("node") is None)
-    if unresolved and time.monotonic() - worker.camera_tried_at >= CAMERA_RETRY_SECONDS:
+    def unresolved() -> bool:
+        camera = worker.camera
+        return camera is None or (camera.get("applied") is False and camera.get("node") is None)
+
+    def due() -> bool:
+        return unresolved() and time.monotonic() - worker.camera_tried_at >= CAMERA_RETRY_SECONDS
+
+    if not due():
+        return
+    with worker.camera_lock:  # a concurrent request waits here, then finds the window already used
+        if not due():
+            return
         quality, depth = CAMERA_WANT.get((worker.peer, worker.domain_id), DEFAULT_CAMERA)
-        apply_camera(worker, quality, depth)
+        apply_camera(worker, quality, depth, lazy=True)
+        if unresolved():  # still no answer: treat the camera as unknown, so nothing gates the stream
+            worker.camera = None
 
 
 def get_worker(peer: str, domain_id: int) -> RobotWorker:
@@ -1030,7 +1047,7 @@ class RobotWorkerLoop:
             self.pending.append({**request, "deadline": now + float(request.get("wait", 0))})
         elif op == "camera":
             try:
-                job = self.tuner.start(request.get("quality"), request.get("depth"))
+                job = self.tuner.start(request.get("quality"), request.get("depth"), request.get("call_timeout"))
             except ValueError as error:
                 self.fail(request_id, 400, str(error), code="bad_quality")
                 return

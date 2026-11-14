@@ -632,6 +632,7 @@ def set_mock_robot(robot_key, **fields):
         os.replace(path + ".tmp", path)
 
     write_atomic(json.dumps(robots))
+    time.sleep(0.3)  # the worker's mock re-reads robots.json at most every 30 ms, and a drive mount can lag
     return lambda: write_atomic(original)
 
 
@@ -746,6 +747,39 @@ def t_camera_appearing_after_connect_is_tuned_on_stream():
     call("/robots/connect", CAR)
 
 
+def t_camera_lazy_retry_is_bounded():
+    q = f"ip={CAR['ip']}&domain_id={CAR['domain_id']}&topic={IMAGE_TOPIC}"
+    restore = set_mock_robot("192.168.1.20:42", param_silent=True)  # a camera node that never answers
+    try:
+        s, d, dt_connect, _ = call("/robots/connect", CAR)
+        time.sleep(5.3)  # the lazy re-try is limited to once per 5 s
+        t0 = time.time()
+        first = Stream(f"/robots/camera.mjpg?{q}")
+        took = time.time() - t0
+        status = first.status
+        first.close()
+        results_ = []
+
+        def concurrent():
+            time.sleep(5.3)
+            t = time.time()
+            st = Stream(f"/robots/camera.mjpg?{q}")
+            results_.append((st.status, time.time() - t))
+            st.close()
+
+        threads = [threading.Thread(target=concurrent) for _ in range(3)]
+        [th.start() for th in threads]
+        [th.join() for th in threads]
+    finally:
+        restore()
+    tuned_logged = [p for p in param_log(CAR)]
+    check("a camera node that never answers delays an MJPEG request by at most ~3 s, concurrent requests share one retry",
+          s == 200 and d.get("camera") is None and status == 200 and took < 3.5
+          and all(st == 200 and t < 3.5 for st, t in results_) and len(results_) == 3,
+          f"connect HTTP {s} in {dt_connect:.1f}s camera={d.get('camera')!r}; first mjpeg {status} in {took:.2f}s; concurrent={results_}")
+    call("/robots/connect", CAR)
+
+
 if __name__ == "__main__":
     only = set(sys.argv[3:])
     for fn in [t_health, t_connect_real, t_connect_off, t_connect_nodriver, t_no_subscriber_fast, t_order_stop_wins,
@@ -756,7 +790,7 @@ if __name__ == "__main__":
                t_sse_scan, t_mjpeg_frames, t_unwatch_on_disconnect, t_unwatch_on_instant_disconnect, t_stale_on_drop, t_no_cross_talk_streams,
                t_drive_tick_under_load, t_sse_rejects_image, t_stream_route_errors,
                t_camera_tuned_on_connect, t_camera_quality_change, t_camera_reapplied_on_reconnect, t_camera_refused_blocks_stream,
-               t_camera_appearing_after_connect_is_tuned_on_stream]:
+               t_camera_appearing_after_connect_is_tuned_on_stream, t_camera_lazy_retry_is_bounded]:
         if only and fn.__name__ not in only:
             continue
         try:

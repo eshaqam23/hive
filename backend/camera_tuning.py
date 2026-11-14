@@ -47,9 +47,9 @@ class CameraTuner:
         }
         return sorted(found - {own})
 
-    def start(self, quality: str, depth: bool) -> "CameraJob":
+    def start(self, quality: str, depth: bool, call_timeout: Optional[float] = None) -> "CameraJob":
         params = robot_link.camera_params(quality, depth)  # ValueError for an unknown quality
-        return CameraJob(self, quality, depth, params)
+        return CameraJob(self, quality, depth, params, call_timeout or self.timeout)
 
 
 class _Call:
@@ -79,8 +79,9 @@ class CameraJob:
     """One tuning request. `step()` returns False while waiting, True once `result` is set. `result` is the
     camera dict, or None when the robot has no RealSense node."""
 
-    def __init__(self, tuner: CameraTuner, quality: str, depth: bool, params: list):
+    def __init__(self, tuner: CameraTuner, quality: str, depth: bool, params: list, call_timeout: float = CALL_TIMEOUT):
         self.tuner, self.quality, self.depth, self.params = tuner, quality, depth, params
+        self.call_timeout = call_timeout
         self.result: Optional[dict] = None
         self.done = False
         self._script = self._run()
@@ -161,8 +162,8 @@ class CameraJob:
                     self.result, self.done = finished.value, True
                     return True
                 self._started = True
-                self._call = _Call(tuner.client(srv_type, name), name, request, tuner.clock() + tuner.timeout)
-            answer = self._call.poll(tuner.clock(), tuner.timeout)
+                self._call = _Call(tuner.client(srv_type, name), name, request, tuner.clock() + self.call_timeout)
+            answer = self._call.poll(tuner.clock(), self.call_timeout)
             if answer is None:
                 return False
             self._answer, self._call = answer, None
