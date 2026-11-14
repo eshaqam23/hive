@@ -39,6 +39,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import adapters
+import camera_tuning
 import robot_link
 import outputs
 import streams
@@ -88,6 +89,9 @@ GRIPPER = {"gripper_open": "open", "gripper_close": "close", "gripper_position":
 CONTROL_ACTIONS = TWISTS | set(GRIPPER)
 GRIPPER_POSITION_TOPIC = "/gripper/position"
 GRIPPER_SERVICES = {"open": "/gripper/release", "close": "/gripper/grab"}
+DEFAULT_CAMERA = ("medium", False)   # colour quality and depth, applied at connect unless the user chose otherwise
+CAMERA_WANT: dict[tuple, tuple] = {}  # robot key -> the last (quality, depth) requested; survives disconnects
+CAMERA_REQUEST_SECONDS = 30          # a whole tuning run: discovery plus both parameter calls, 5 s per call at most
 
 
 class ApiError(Exception):
@@ -174,6 +178,7 @@ class RobotWorker:
         self.discovered = threading.Event()  # set once DDS has had time to find the robot
         self.link: dict[str, Any] | None = None  # newest link state the worker reported
         self.topic_kinds: dict[str, str] = {}  # topic -> payload kind, from the last discover reply
+        self.camera: dict[str, Any] | None = None  # newest camera tuning result; None when no RealSense node
 
     def on_link(self, link: dict[str, Any]) -> None:
         self.link = link
@@ -373,6 +378,18 @@ WORKERS: dict[tuple[str, int], RobotWorker] = {}
 WORKERS_LOCK = threading.Lock()
 
 
+def apply_camera(worker: RobotWorker, quality: str, depth: bool) -> dict[str, Any] | None:
+    """Tune the robot's RealSense and remember the choice. A tuning failure never raises: it is the
+    result (applied false, with the reason), so connecting still works and the MJPEG gate can act on it."""
+    CAMERA_WANT[(worker.peer, worker.domain_id)] = (quality, depth)
+    try:
+        camera = worker.request("camera", timeout=CAMERA_REQUEST_SECONDS, quality=quality, depth=depth)["camera"]
+    except ApiError as error:
+        camera = {"node": None, "applied": False, "quality": quality, "depth": depth, "profile": None, "reason": error.message}
+    worker.camera = camera
+    return camera
+
+
 def get_worker(peer: str, domain_id: int) -> RobotWorker:
     with WORKERS_LOCK:
         worker = WORKERS.get((peer, domain_id))
@@ -457,6 +474,7 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
             "/api/robots/drive/keepalive": self.handle_keepalive,
             "/api/robots/command": self.handle_command,
             "/api/robots/disconnect": self.handle_disconnect,
+            "/api/robots/camera": self.handle_camera,
         }
         try:
             if not self.origin_allowed():
@@ -496,7 +514,22 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
                 f"{found['other_publishers']} other publisher(s) are also sending on {CMD_VEL}. Their commands will mix with Hive's; "
                 "stop the other controller before driving."
             )
-        return {"ok": True, **found, "warnings": warnings}
+        quality, depth = CAMERA_WANT.get((peer, domain_id), DEFAULT_CAMERA)
+        return {"ok": True, **found, "warnings": warnings, "camera": apply_camera(worker, quality, depth)}
+
+    def handle_camera(self, body: dict, peer: str, domain_id: int) -> dict:
+        """Pick the colour quality (and depth) of the robot's RealSense; the choice is re-applied on reconnect."""
+        quality, depth = body.get("quality"), body.get("depth", False)
+        if quality not in robot_link.CAMERA_PROFILES:
+            raise ApiError(400, f"quality must be one of {', '.join(robot_link.CAMERA_PROFILES)}.", code="bad_quality")
+        if not isinstance(depth, bool):
+            raise ApiError(400, "depth must be true or false.", code="bad_depth")
+        worker = get_worker(peer, domain_id)
+        worker.wait_for_discovery()
+        camera = apply_camera(worker, quality, depth)
+        if camera is None:
+            raise ApiError(409, "This robot has no RealSense camera node to tune.", code="no_camera")
+        return {"ok": True, "camera": camera}
 
     def handle_status(self, body: dict, peer: str, domain_id: int) -> dict:
         found = get_worker(peer, domain_id).discover(with_topics=False)
@@ -607,6 +640,14 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
                 if not mjpeg and kind == "image":
                     raise ApiError(400, f"{name} is an image topic; use camera.mjpg.", code="use_mjpeg")
             key = (peer, domain_id)
+            camera = worker.camera
+            if mjpeg and camera and camera.get("applied") is False and query.get("force_full") != "1":
+                raise ApiError(
+                    409,
+                    f"The camera could not be set to a low-bandwidth mode ({camera.get('reason')}), so the stream would flood the Wi-Fi.",
+                    code="camera_untuned",
+                    reason=camera.get("reason"),
+                )
             try:
                 viewer = HUB.subscribe(key, names)
             except ApiError:
@@ -752,6 +793,7 @@ class RobotWorkerLoop:
             QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST),
         )
         self.clients: dict[str, Any] = {}
+        self.tuner = camera_tuning.CameraTuner(self.node)
         self.watcher = sensor_watch.SensorWatcher(self.node, write_stream, RATE_CAPS, outputs.ThrottledLog(self.log).log)
         self.confirmer = robot_link.StopConfirmer()
         self.burst: list[float] = []           # times of the stop repeats still to send
@@ -969,6 +1011,13 @@ class RobotWorkerLoop:
                 self.fail(request_id, 400, f"Unsupported gripper action: {request.get('action')}")
                 return
             self.pending.append({**request, "deadline": now + float(request.get("wait", 0))})
+        elif op == "camera":
+            try:
+                job = self.tuner.start(request.get("quality"), request.get("depth"))
+            except ValueError as error:
+                self.fail(request_id, 400, str(error), code="bad_quality")
+                return
+            self.pending.append({**request, "job": job, "deadline": now})
         elif op == "watch":
             try:
                 self.reply(request_id, **self.watcher.watch(request.get("topic")))
@@ -998,6 +1047,12 @@ class RobotWorkerLoop:
         done_waiting = time.monotonic() >= request["deadline"]
         if request["op"] == "gripper":
             return self.settle_gripper(request, done_waiting)
+        if request["op"] == "camera":
+            job = request["job"]
+            if not job.step():
+                return False
+            self.reply(request["id"], camera=job.result)
+            return True
         if request["op"] == "publish":
             topic = request["topic"]
             if self.listeners(topic) > 0:

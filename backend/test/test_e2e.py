@@ -615,6 +615,91 @@ def t_stream_route_errors():
     check("stream routes validate topic, kind, worker, input and origin", not bad, "; ".join(bad) or f"{len(cases) + 1} cases")
 
 
+def param_log(robot):
+    path = f"{MOCK}/robots/{robot['ip']}_{robot['domain_id']}.params.jsonl"
+    return [json.loads(l) for l in open(path) if l.strip()] if os.path.exists(path) else []
+
+
+def set_mock_robot(robot_key, **fields):
+    """Change one robot's mock config; returns a function that restores the original file."""
+    path = f"{MOCK}/robots.json"
+    original = open(path).read()
+    robots = json.loads(original)
+    robots[robot_key].update(fields)
+
+    def write_atomic(text):
+        open(path + ".tmp", "w").write(text)
+        os.replace(path + ".tmp", path)
+
+    write_atomic(json.dumps(robots))
+    return lambda: write_atomic(original)
+
+
+def t_camera_tuned_on_connect():
+    reset()
+    s, d, _, _ = call("/robots/connect", CAR)
+    log = param_log(CAR)
+    got = [(p["name"], p["value"]) for p in log if p["successful"]]
+    cam = d.get("camera") or {}
+    check("connect tunes the RealSense: depth off, colour 424x240x15",
+          ("enable_depth", False) in got and ("rgb_camera.color_profile", "424x240x15") in got
+          and cam.get("applied") is True and cam.get("node") == "/camera/camera" and cam.get("quality") == "medium",
+          f"HTTP {s} camera={cam} logged={got}")
+    s2, d2, _, _ = call("/robots/connect", LIDAR)
+    check("connect to a robot without a RealSense reports camera null", s2 == 200 and "camera" in d2 and d2["camera"] is None, f"HTTP {s2} camera={d2.get('camera')!r}")
+
+
+def t_camera_quality_change():
+    reset()
+    call("/robots/connect", CAR)
+    s, d, _, _ = call("/robots/camera", {**CAR, "quality": "low", "depth": False})
+    cam = d.get("camera", d)
+    last = [p["value"] for p in param_log(CAR) if p["name"] == "rgb_camera.color_profile" and p["successful"]]
+    s2, d2, _, _ = call("/robots/camera", {**CAR, "quality": "ultra", "depth": False})
+    s3, d3, _, _ = call("/robots/camera", {**CAR, "quality": "low", "depth": "yes"})
+    check("POST /robots/camera low sets 424x240x6; bad quality and bad depth are 400",
+          s == 200 and cam.get("profile") == "424x240x6" and cam.get("applied") is True and last[-1:] == ["424x240x6"]
+          and s2 == 400 and d2.get("code") == "bad_quality" and s3 == 400 and d3.get("code") == "bad_depth",
+          f"HTTP {s} {cam} last={last} bad_quality={s2}/{d2.get('code')} bad_depth={s3}/{d3.get('code')}")
+    call("/robots/camera", {**CAR, "quality": "medium", "depth": False})
+
+
+def t_camera_reapplied_on_reconnect():
+    call("/robots/connect", CAR)
+    call("/robots/camera", {**CAR, "quality": "high", "depth": False})
+    call("/robots/disconnect", CAR)
+    reset()
+    s, d, _, _ = call("/robots/connect", CAR)
+    got = [(p["name"], p["value"]) for p in param_log(CAR) if p["successful"]]
+    check("reconnect re-applies the last chosen camera quality",
+          s == 200 and ("enable_depth", False) in got and ("rgb_camera.color_profile", "640x480x15") in got
+          and (d.get("camera") or {}).get("quality") == "high",
+          f"HTTP {s} camera={d.get('camera')} logged={got}")
+    call("/robots/camera", {**CAR, "quality": "medium", "depth": False})
+
+
+def t_camera_refused_blocks_stream():
+    q = f"ip={CAR['ip']}&domain_id={CAR['domain_id']}&topic={IMAGE_TOPIC}"
+    restore = set_mock_robot("192.168.1.20:42", param_runtime=False)
+    try:
+        s, d, _, _ = call("/robots/connect", CAR)
+        cam = d.get("camera") or {}
+        blocked = Stream(f"/robots/camera.mjpg?{q}")
+        status, err = blocked.status, blocked.error or {}
+        blocked.close()
+        forced = Stream(f"/robots/camera.mjpg?{q}&force_full=1")
+        time.sleep(1.0)
+        frames = len(forced.parts)
+        forced.close()
+    finally:
+        restore()
+    check("a camera that refuses tuning is reported, blocks MJPEG with 409, and force_full=1 streams",
+          s == 200 and cam.get("applied") is False and bool(cam.get("reason")) and status == 409
+          and err.get("code") == "camera_untuned" and frames >= 3,
+          f"connect HTTP {s} camera={cam} mjpeg={status} {err} forced frames={frames}")
+    call("/robots/connect", CAR)  # back to a tunable camera for the checks that follow
+
+
 if __name__ == "__main__":
     only = set(sys.argv[3:])
     for fn in [t_health, t_connect_real, t_connect_off, t_connect_nodriver, t_no_subscriber_fast, t_order_stop_wins,
@@ -623,7 +708,8 @@ if __name__ == "__main__":
                t_gripper_trigger, t_no_gripper, t_other_publishers, t_rmw_pinned,
                t_stop_ignores_bad_power, t_bool_gripper_has_no_position, t_position_gripper_first_command, t_tap_not_falsely_confirmed,
                t_sse_scan, t_mjpeg_frames, t_unwatch_on_disconnect, t_unwatch_on_instant_disconnect, t_stale_on_drop, t_no_cross_talk_streams,
-               t_drive_tick_under_load, t_sse_rejects_image, t_stream_route_errors]:
+               t_drive_tick_under_load, t_sse_rejects_image, t_stream_route_errors,
+               t_camera_tuned_on_connect, t_camera_quality_change, t_camera_reapplied_on_reconnect, t_camera_refused_blocks_stream]:
         if only and fn.__name__ not in only:
             continue
         try:
