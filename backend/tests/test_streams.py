@@ -239,3 +239,14 @@ def test_mjpeg_sends_new_frames_only_and_stops():
     assert sink.chunks == [streams.mjpeg_part(b"F1"), streams.mjpeg_part(b"F2")]
     assert streams.serve_mjpeg(Sink(), hub, KEY, "/cam", alive=lambda: False, client_gone=lambda: False, wait=0.01) == "worker_gone"
     assert streams.serve_mjpeg(Sink(fail_after=0), hub, KEY, "/cam", alive=lambda: True, client_gone=lambda: False, wait=0.01) == "client_gone"
+
+
+def test_on_last_failure_is_logged_not_silent(capsys):
+    def boom(key, topic):
+        raise RuntimeError("timed out")
+
+    hub = streams.StreamHub(on_first=lambda k, t: None, on_last=boom)
+    for _ in range(3):
+        hub.unsubscribe(hub.subscribe(KEY, "/a"))
+    out = capsys.readouterr().out
+    assert out.count("RuntimeError: timed out") == 1 and "/a" in out  # logged once, then throttled

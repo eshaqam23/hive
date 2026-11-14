@@ -501,6 +501,26 @@ def t_unwatch_on_disconnect():
           f"created={len(made)} destroyed={len(destroyed)} after {time.time() - t0:.2f}s")
 
 
+def t_unwatch_on_instant_disconnect():
+    """A client that resets the connection straight after sending its request must not leave the worker watching."""
+    reset()
+    call("/robots/connect", LIDAR)
+    host, port = BASE.split("//")[1].split("/")[0].split(":")
+    for _ in range(5):
+        raw = socket.create_connection((host, int(port)))
+        raw.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, __import__("struct").pack("ii", 1, 0))  # close sends RST
+        raw.sendall(f"GET /api/robots/stream?ip={LIDAR['ip']}&domain_id={LIDAR['domain_id']}&topics=/scan HTTP/1.0\r\nOrigin: {ORIGIN}\r\n\r\n".encode())
+        raw.close()
+    t0, ev = time.time(), []
+    while time.time() - t0 < 3:
+        time.sleep(0.1)
+        ev = [e["event"] for e in subs_events(LIDAR) if e["topic"] == "/scan"]
+        if ev and ev.count("create") == ev.count("destroy"):
+            break
+    check("clients that reset at once leave no worker subscription behind", bool(ev) and ev.count("create") == ev.count("destroy"),
+          f"subscription events={ev}")
+
+
 def t_stale_on_drop():
     path = f"{MOCK}/robots.json"
     original = open(path).read()
@@ -602,7 +622,7 @@ if __name__ == "__main__":
                t_power_scales_twist, t_keep_last_one, t_stop_burst, t_stop_confirmed, t_stop_unreported,
                t_gripper_trigger, t_no_gripper, t_other_publishers, t_rmw_pinned,
                t_stop_ignores_bad_power, t_bool_gripper_has_no_position, t_position_gripper_first_command, t_tap_not_falsely_confirmed,
-               t_sse_scan, t_mjpeg_frames, t_unwatch_on_disconnect, t_stale_on_drop, t_no_cross_talk_streams,
+               t_sse_scan, t_mjpeg_frames, t_unwatch_on_disconnect, t_unwatch_on_instant_disconnect, t_stale_on_drop, t_no_cross_talk_streams,
                t_drive_tick_under_load, t_sse_rejects_image, t_stream_route_errors]:
         if only and fn.__name__ not in only:
             continue

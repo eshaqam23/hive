@@ -5,14 +5,16 @@ two rate averages. Deserialising, adapting and JPEG encoding happen on a convert
 rate per kind, and the result goes out through `emit` (one JSON line on the worker's stdout)."""
 import base64
 import importlib
+import sys
 import threading
 import time
 from typing import Any, Callable
 
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.serialization import deserialize_message as deserialize
 
 import adapters
+from outputs import ThrottledLog
 
 RELIABLE_TOPICS = {"/ros_data", "/esp_data"}  # the robot publishes these reliably: match it
 EMA = 0.2
@@ -32,8 +34,10 @@ class _Entry:
 
 
 class SensorWatcher:
-    def __init__(self, node: Any, emit: Callable[[dict], None], caps: dict[str, float]) -> None:
+    def __init__(self, node: Any, emit: Callable[[dict], None], caps: dict[str, float],
+                 log: Callable[[Any, BaseException | str], None] | None = None) -> None:
         self.node, self.emit, self.caps = node, emit, caps
+        self.log = log or ThrottledLog(lambda text: print(f"[sensor_watch] {text}", file=sys.stderr, flush=True)).log
         self.callbacks = 0  # raw messages received; the worker's drain loop watches it
         self._entries: dict[str, _Entry] = {}
         self._lock = threading.Lock()
@@ -57,7 +61,8 @@ class SensorWatcher:
                 raise KeyError(topic) from None
             entry = _Entry(topic, type_name, adapters.kind_for_type(type_name), cls)
             qos = (QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST)
-                   if topic in RELIABLE_TOPICS else qos_profile_sensor_data)
+                   if topic in RELIABLE_TOPICS
+                   else QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST))
             entry.sub = self.node.create_subscription(cls, topic, lambda data, e=entry: self._on_raw(e, data), qos, raw=True)
             with self._lock:
                 self._entries[topic] = entry
@@ -105,8 +110,8 @@ class SensorWatcher:
                 entry.last_emit = now
                 try:
                     self.emit({"stream": self._payload(entry, raw[0], raw[1])})
-                except Exception:  # noqa: BLE001 - a failed write or conversion must not end the thread
-                    pass
+                except Exception as error:  # noqa: BLE001 - a failed write or conversion must not end the thread
+                    self.log(f"stream {entry.topic}", error)
 
     def _payload(self, entry: _Entry, data: bytes, stamp: float) -> dict:
         try:

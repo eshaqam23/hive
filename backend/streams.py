@@ -8,6 +8,8 @@ import threading
 import time
 from typing import Any, Callable, Iterable
 
+from outputs import ThrottledLog
+
 BOUNDARY = "hiveframe"
 QUEUE_MAX = 30
 STALE_SECONDS = 2.0
@@ -46,6 +48,7 @@ class StreamHub:
     def __init__(self, on_first: Callable[[tuple, str], Any] | None = None,
                  on_last: Callable[[tuple, str], Any] | None = None) -> None:
         self.on_first, self.on_last = on_first, on_last
+        self.log = ThrottledLog(lambda text: print(f"[hive-backend] stream: {text}", flush=True))
         self._ops = threading.Lock()       # serialises subscribe/unsubscribe, which call the worker
         self._cond = threading.Condition()  # guards the data below, and wakes MJPEG waiters
         self._viewers: dict[tuple, list[Viewer]] = {}  # (key, topic) -> viewers
@@ -92,8 +95,8 @@ class StreamHub:
         if last and self.on_last:
             try:
                 self.on_last(key, topic)
-            except Exception:  # noqa: BLE001 - the worker may already be gone
-                pass
+            except Exception as error:  # noqa: BLE001 - the worker may already be gone; leave a trace anyway
+                self.log.log(f"unwatch {key[0]}:{key[1]} {topic}", error)
 
     def viewer_count(self, key: tuple, topic: str) -> int:
         with self._cond:

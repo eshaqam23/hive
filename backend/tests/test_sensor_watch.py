@@ -222,3 +222,34 @@ def test_deserialize_failure_emits_note(env):
     finally:
         sw.deserialize = real
     assert "bad bytes" in emitted[0]["note"]
+
+
+def test_sensor_subscription_is_best_effort_keep_last_one(env):
+    rclpy, node, watcher, emitted, _, sw = env
+    seen = {}
+    real = node.create_subscription
+
+    def spy(msg_type, topic, cb, qos, raw=False):
+        seen[topic] = (qos.reliability.name, qos.history.name, qos.depth)
+        return real(msg_type, topic, cb, qos, raw=raw)
+
+    node.create_subscription = spy
+    watcher.watch("/scan")
+    watcher.watch("/cam")
+    assert seen["/scan"] == ("BEST_EFFORT", "KEEP_LAST", 1)
+    assert seen["/cam"] == ("BEST_EFFORT", "KEEP_LAST", 1)
+
+
+def test_persistent_emit_failure_leaves_a_trace(env):
+    rclpy, node, watcher, emitted, _, sw = env
+    logged = []
+
+    def broken(line):
+        raise TypeError("not serializable")
+
+    watcher.stop()
+    w = sw.SensorWatcher(node, broken, CAPS, lambda key, err: logged.append((key, type(err).__name__)))
+    w.watch("/scan")
+    assert spin_until(rclpy, node, lambda: logged)
+    w.stop()
+    assert logged[0] == ("stream /scan", "TypeError")

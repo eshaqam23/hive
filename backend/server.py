@@ -40,6 +40,7 @@ from urllib.parse import parse_qs, urlparse
 
 import adapters
 import robot_link
+import outputs
 import streams
 
 HOST = os.environ.get("HIVE_BACKEND_HOST", "127.0.0.1")
@@ -78,7 +79,7 @@ HUB = streams.StreamHub(
     on_first=lambda key, topic: watch_request(key, "watch", topic),
     on_last=lambda key, topic: watch_request(key, "unwatch", topic),
 )
-STDOUT_LOCK = threading.Lock()  # the worker's stdout is written from two threads
+OUT: outputs.LineWriter | None = None  # the worker's one stdout writer thread, made on first use
 
 IP_OR_HOST_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 
@@ -614,11 +615,6 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
                 raise ApiError(502, f"Could not start watching: {error}", code="watch_failed") from None
         except ApiError as error:
             return self.write_json(error.status, {"ok": False, "error": error.message, **error.extra})
-        self.close_connection = True
-        self.send_response(200)
-        self.send_header("Content-Type", f"multipart/x-mixed-replace; boundary={streams.BOUNDARY}" if mjpeg else "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
 
         def write(data: bytes) -> None:
             self.wfile.write(data)
@@ -632,10 +628,18 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
                 return True
 
         try:
+            # the headers are inside the try: a client that is already gone must still release its viewer
+            self.close_connection = True
+            self.send_response(200)
+            self.send_header("Content-Type", f"multipart/x-mixed-replace; boundary={streams.BOUNDARY}" if mjpeg else "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
             if mjpeg:
                 streams.serve_mjpeg(write, HUB, key, names[0], alive=worker.is_running, client_gone=client_gone)
             else:
                 streams.serve_sse(write, HUB, viewer, alive=worker.is_running, client_gone=client_gone, link=worker.link)
+        except OSError:  # the browser left (BrokenPipe, ConnectionReset), even before the first byte
+            pass
         finally:
             HUB.unsubscribe(viewer)
 
@@ -692,12 +696,21 @@ def main() -> None:
 # ------------------------------------------------------------------ the worker process (robot side)
 
 
+def output() -> outputs.LineWriter:
+    global OUT
+    if OUT is None:
+        OUT = outputs.LineWriter()
+    return OUT
+
+
 def write_line(obj: dict[str, Any]) -> None:
-    """One JSON line on the worker's stdout. The main and converter threads share it, so lines never interleave."""
-    line = json.dumps(obj) + "\n"
-    with STDOUT_LOCK:
-        sys.stdout.write(line)
-        sys.stdout.flush()
+    """A control line (reply, link, ready) for the backend. Never blocks: a stuck pipe must not stop the drive tick."""
+    output().send(obj)
+
+
+def write_stream(obj: dict[str, Any]) -> None:
+    """A sensor payload for the backend. Never blocks; the oldest is dropped when the pipe is behind."""
+    output().send_stream(obj)
 
 
 class RobotWorkerLoop:
@@ -739,7 +752,7 @@ class RobotWorkerLoop:
             QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST),
         )
         self.clients: dict[str, Any] = {}
-        self.watcher = sensor_watch.SensorWatcher(self.node, write_line, RATE_CAPS)
+        self.watcher = sensor_watch.SensorWatcher(self.node, write_stream, RATE_CAPS, outputs.ThrottledLog(self.log).log)
         self.confirmer = robot_link.StopConfirmer()
         self.burst: list[float] = []           # times of the stop repeats still to send
         self.power = robot_link.DEFAULT_POWER
@@ -1139,6 +1152,7 @@ class RobotWorkerLoop:
         finally:
             self.shutdown_stop()
             self.watcher.stop()
+            output().flush(0.5)  # the last replies leave before the process does
             self.node.destroy_node()
             self.rclpy.shutdown()
 
