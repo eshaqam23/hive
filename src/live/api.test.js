@@ -37,3 +37,9 @@ describe("postCamera", () => {
     expect(await postCamera(postApi, robot, { quality: "low", depth: false })).toEqual({ applied: false });
   });
 });
+
+describe("streamUrl images", () => {
+  it("adds the images list only when there is one", () => {
+    expect(streamUrl(base, robot, ["/a"], ["/cam"])).toBe(`${base}/robots/stream?ip=10.0.0.5&domain_id=42&topics=${encodeURIComponent("/a")}&images=${encodeURIComponent("/cam")}`);
+  });
+});

@@ -615,6 +615,42 @@ def t_stream_route_errors():
     check("stream routes validate topic, kind, worker, input and origin", not bad, "; ".join(bad) or f"{len(cases) + 1} cases")
 
 
+def t_sse_mixed_topics():
+    """One bad topic must not sink the stream: skipped topics are reported as status errors."""
+    call("/robots/connect", CAR)
+    q = f"ip={CAR['ip']}&domain_id={CAR['domain_id']}"
+    s = Stream(f"/robots/stream?{q}&topics=/nope,{IMAGE_TOPIC},/ros_data,/tf")
+    try:
+        _, seen = s.wait(lambda e, d: e == "status" and d.get("topic") == "/tf", 3)
+    finally:
+        s.close()
+    errors = {d["topic"]: d["error"] for e, d in seen if e == "status" and "error" in d}
+    ok = (s.status == 200 and errors.get("/nope") == "unknown_topic" and errors.get(IMAGE_TOPIC) == "use_mjpeg"
+          and errors.get("/tf") == "watch_failed" and "/ros_data" not in errors)
+    check("a mixed topic list streams the valid topics and reports each bad one as a status error", ok,
+          f"HTTP {s.status} errors={errors}")
+    s2 = Stream(f"/robots/stream?{q}&topics=/nope,{IMAGE_TOPIC}")
+    check("a list with no valid topic is refused with 404", s2.status == 404, f"HTTP {s2.status} {s2.error}")
+    s2.close()
+
+
+def t_sse_image_stats_while_mjpeg_open():
+    call("/robots/connect", CAR)
+    q = f"ip={CAR['ip']}&domain_id={CAR['domain_id']}"
+    cam = Stream(f"/robots/camera.mjpg?{q}&topic={IMAGE_TOPIC}")
+    s = Stream(f"/robots/stream?{q}&topics=/ros_data&images={IMAGE_TOPIC}")
+    try:
+        ev, seen = s.wait(lambda e, d: e == "image_stats" and d.get("topic") == IMAGE_TOPIC, 4)
+        frames = [d for e, d in seen if e == "data" and d.get("kind") == "image"]
+    finally:
+        s.close()
+        cam.close()
+    d = ev[1] if ev else {}
+    check("image_stats arrives while MJPEG is open, with rate, bandwidth and size, and no frames",
+          bool(ev) and d.get("hz", 0) > 0 and d.get("bytes_per_s", 0) > 0 and d.get("width") and d.get("height") and not frames,
+          f"HTTP {s.status} {d}")
+
+
 def param_log(robot):
     path = f"{MOCK}/robots/{robot['ip']}_{robot['domain_id']}.params.jsonl"
     return [json.loads(l) for l in open(path) if l.strip()] if os.path.exists(path) else []
@@ -788,7 +824,8 @@ if __name__ == "__main__":
                t_gripper_trigger, t_no_gripper, t_other_publishers, t_rmw_pinned,
                t_stop_ignores_bad_power, t_bool_gripper_has_no_position, t_position_gripper_first_command, t_tap_not_falsely_confirmed,
                t_sse_scan, t_mjpeg_frames, t_unwatch_on_disconnect, t_unwatch_on_instant_disconnect, t_stale_on_drop, t_no_cross_talk_streams,
-               t_drive_tick_under_load, t_sse_rejects_image, t_stream_route_errors,
+               t_drive_tick_under_load, t_sse_rejects_image, t_stream_route_errors, t_sse_mixed_topics,
+               t_sse_image_stats_while_mjpeg_open,
                t_camera_tuned_on_connect, t_camera_quality_change, t_camera_reapplied_on_reconnect, t_camera_refused_blocks_stream,
                t_camera_appearing_after_connect_is_tuned_on_stream, t_camera_lazy_retry_is_bounded]:
         if only and fn.__name__ not in only:

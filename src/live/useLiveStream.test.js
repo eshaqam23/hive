@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook, cleanup } from "@testing-library/react";
 import { setEventSourceFactory, useLiveStream } from "./useLiveStream.js";
 
@@ -62,15 +62,71 @@ describe("useLiveStream", () => {
   });
 });
 
-describe("useLiveStream fallback", () => {
-  it("splits a refused multi-topic stream into one stream per topic", () => {
+describe("useLiveStream resilience", () => {
+  it("keeps exactly one EventSource and reconnects with backoff after errors", () => {
+    vi.useFakeTimers();
+    try {
+      setEventSourceFactory((url) => new FakeSource(url));
+      const { result } = renderHook(() => useLiveStream({ base: "b", robot, topics: ["/a", "/b", "/c", "/d", "/e", "/f", "/g"], enabled: true }));
+      const live = () => FakeSource.instances.filter((s) => !s.closed);
+      expect(live()).toHaveLength(1);
+      act(() => FakeSource.instances[0].onerror());
+      expect(result.current.error).toMatch(/reconnecting/);
+      expect(live()).toHaveLength(0);
+      act(() => vi.advanceTimersByTime(999));
+      expect(FakeSource.instances).toHaveLength(1);
+      act(() => vi.advanceTimersByTime(1));
+      expect(live()).toHaveLength(1);
+      act(() => FakeSource.instances[1].onerror());
+      act(() => vi.advanceTimersByTime(1999));
+      expect(FakeSource.instances).toHaveLength(2);
+      act(() => vi.advanceTimersByTime(1));
+      act(() => FakeSource.instances[2].onerror());
+      act(() => vi.advanceTimersByTime(5000));
+      expect(FakeSource.instances).toHaveLength(4);
+      act(() => FakeSource.instances[3].emit("link", { stop: "idle" }));
+      expect(result.current.error).toBeNull();
+      expect(live()).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not reconnect after unmount", () => {
+    vi.useFakeTimers();
+    try {
+      setEventSourceFactory((url) => new FakeSource(url));
+      const { unmount } = renderHook(() => useLiveStream({ base: "b", robot, topics: ["/a"], enabled: true }));
+      act(() => FakeSource.instances[0].onerror());
+      unmount();
+      act(() => vi.advanceTimersByTime(10000));
+      expect(FakeSource.instances).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("collects image stats, stale flags and per-topic errors from the one stream", () => {
     setEventSourceFactory((url) => new FakeSource(url));
-    renderHook(() => useLiveStream({ base: "b", robot, topics: ["/a", "/b"], enabled: true }));
-    const first = FakeSource.instances[0];
-    first.readyState = 2;
-    act(() => first.onerror());
-    expect(FakeSource.instances).toHaveLength(3);
-    expect(FakeSource.instances[1].url).toContain("topics=%2Fa");
-    expect(FakeSource.instances[2].url).toContain("topics=%2Fb");
+    const { result } = renderHook(() => useLiveStream({ base: "b", robot, topics: ["/a"], images: ["/cam"], enabled: true }));
+    expect(FakeSource.instances).toHaveLength(1);
+    const src = FakeSource.instances[0];
+    expect(src.url).toContain("images=%2Fcam");
+    act(() => src.emit("image_stats", { topic: "/cam", hz: 14.5, bytes_per_s: 120000, width: 640, height: 480 }));
+    expect(result.current.imageStats["/cam"].width).toBe(640);
+    act(() => src.emit("status", { topic: "/cam", stale: true }));
+    expect(result.current.stale["/cam"]).toBe(true);
+    act(() => src.emit("status", { topic: "/tf", error: "watch_failed" }));
+    expect(result.current.topicErrors["/tf"]).toBe("watch_failed");
+    expect(result.current.stale["/tf"]).toBeUndefined();
+    act(() => src.listeners.data({ data: "not json" }));
+    expect(Object.keys(result.current.payloads)).toHaveLength(0);
+  });
+
+  it("opens a stream for image stats alone", () => {
+    setEventSourceFactory((url) => new FakeSource(url));
+    renderHook(() => useLiveStream({ base: "b", robot, topics: [], images: ["/cam"], enabled: true }));
+    expect(FakeSource.instances).toHaveLength(1);
+    expect(FakeSource.instances[0].url).toContain("topics=&images=");
   });
 });

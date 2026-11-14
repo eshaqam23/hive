@@ -250,3 +250,63 @@ def test_on_last_failure_is_logged_not_silent(capsys):
         hub.unsubscribe(hub.subscribe(KEY, "/a"))
     out = capsys.readouterr().out
     assert out.count("RuntimeError: timed out") == 1 and "/a" in out  # logged once, then throttled
+
+
+# ---- tolerant subscribe, image stats --------------------------------------------------------------
+def test_subscribe_with_errors_skips_failing_topics_and_keeps_the_rest():
+    def on_first(key, topic):
+        if topic == "/bad":
+            raise RuntimeError("no such message package")
+
+    hub = streams.StreamHub(on_first=on_first)
+    errors = []
+    viewer = hub.subscribe(KEY, ["/a", "/bad", "/b"], errors=errors)
+    assert viewer.topics == ("/a", "/b")
+    assert [t for t, _ in errors] == ["/bad"]
+    assert hub.viewer_count(KEY, "/bad") == 0
+
+
+def test_sse_reports_topic_errors_first():
+    hub, _ = hub_with_log()
+    v = hub.subscribe(KEY, ["/a"])
+    sink = Sink()
+    streams.serve_sse(sink, hub, v, alive=lambda: True, client_gone=lambda: True, errors=[("/x", "unknown_topic")], poll=0)
+    assert sink.events()[0] == ("status", {"topic": "/x", "error": "unknown_topic"})
+
+
+def sized_image(topic, n, width=640, height=480):
+    return {**image(topic, b"x" * n), "width": width, "height": height}
+
+
+def test_image_stats_sse_emits_rate_size_and_stale_without_frames():
+    hub, _ = hub_with_log()
+    v = hub.subscribe(KEY, [])
+    v.image_topics = ("/cam",)
+    sink, clock, state = Sink(), Clock(), {"step": 0}
+
+    def gone():
+        state["step"] += 1
+        s = state["step"]
+        clock.t = s * 0.25
+        if s <= 8:  # 4 frames a second for 2 s, then silence
+            hub.publish(KEY, sized_image("/cam", 1000))
+        if 22 <= s <= 26:
+            hub.publish(KEY, sized_image("/cam", 1000))
+        return s > 32
+
+    streams.serve_sse(sink, hub, v, alive=lambda: True, client_gone=gone, clock=clock, poll=0)
+    events = sink.events()
+    stats = [d for e, d in events if e == "image_stats"]
+    assert stats and stats[0]["topic"] == "/cam" and stats[0]["width"] == 640 and stats[0]["height"] == 480
+    assert stats[0]["hz"] == pytest.approx(4.0, rel=0.3) and stats[0]["bytes_per_s"] > 0
+    assert not any(e == "data" for e, _ in events)
+    flags = [d["stale"] for e, d in events if e == "status" and "stale" in d]
+    assert flags[:2] == [True, False]
+
+
+def test_image_stats_counts_frames_even_without_viewers():
+    hub, _ = hub_with_log()
+    hub.publish(KEY, sized_image("/cam", 10))
+    hub.publish(KEY, sized_image("/cam", 20))
+    assert hub.image_stats(KEY, "/cam") == (2, 30, 640, 480)
+    assert hub.image_stats(KEY, "/other") is None

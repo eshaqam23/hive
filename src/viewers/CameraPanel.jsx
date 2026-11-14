@@ -1,11 +1,24 @@
 import React, { useEffect, useState } from "react";
 import { cameraUrl } from "../live/api.js";
+import { probeCamera } from "../live/probeCamera.js";
 
 const FULL_LABEL = "Stream full size anyway (~27 MB/s, may disrupt driving)";
 
-/* Probe the MJPEG URL first: the backend answers 409 camera_untuned when the camera is not yet at a
-   safe size, and an <img> cannot read that reason. On 200 the probe is aborted and the <img> takes over. */
-export default function CameraPanel({ base, robot, topic, stale, onForceFull }) {
+export const statsLine = (stats) =>
+  stats
+    ? [
+        stats.hz != null ? `${Number(stats.hz).toFixed(1)} fps` : null,
+        stats.bytes_per_s != null ? `${(stats.bytes_per_s / 1e6).toFixed(2)} MB/s` : null,
+        stats.width && stats.height ? `${stats.width}×${stats.height}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : "";
+
+/* Probe the MJPEG URL first (R20): the backend answers 409 camera_untuned when the camera is not yet at
+   a safe size. On 200 the probe is aborted and the <img> takes over. fps, MB/s, size and the Stale
+   overlay come from the page's single SSE stream (image_stats and status events). */
+export default function CameraPanel({ base, robot, topic, stale, stats, onForceFull }) {
   const [forceFull, setForceFull] = useState(false);
   const [phase, setPhase] = useState({ state: "probing" }); // probing | ready | blocked | error
   const [attempt, setAttempt] = useState(0);
@@ -14,23 +27,9 @@ export default function CameraPanel({ base, robot, topic, stale, onForceFull }) 
   useEffect(() => {
     const controller = new AbortController();
     setPhase({ state: "probing" });
-    fetch(url, { signal: controller.signal })
-      .then(async (response) => {
-        if (controller.signal.aborted) return;
-        if (response.status === 409) {
-          const body = await response.json().catch(() => ({}));
-          setPhase({ state: "blocked", reason: body.reason || body.error || "The camera is not tuned for streaming yet." });
-        } else if (response.ok) {
-          controller.abort();
-          setPhase({ state: "ready" });
-        } else {
-          const body = await response.json().catch(() => ({}));
-          setPhase({ state: "error", reason: body.error || `Camera request failed (${response.status}).` });
-        }
-      })
-      .catch((error) => {
-        if (error?.name !== "AbortError") setPhase({ state: "error", reason: "Could not reach the camera stream." });
-      });
+    probeCamera(fetch, url, { signal: controller.signal, abort: () => controller.abort() }).then((result) => {
+      if (result.state !== "aborted") setPhase(result);
+    });
     return () => controller.abort();
   }, [url, attempt]);
 
@@ -75,6 +74,7 @@ export default function CameraPanel({ base, robot, topic, stale, onForceFull }) 
         />
       )}
       {phase.state === "probing" && <p className="absolute inset-0 grid place-items-center text-[14px] text-muted">Starting camera…</p>}
+      {stats && <p className="pointer-events-none absolute left-3 top-2 font-mono text-[12px] text-faint">{statsLine(stats)}</p>}
       {stale && <div className="absolute inset-0 grid place-items-center bg-black/50 text-[15px] font-semibold text-warn">Stale</div>}
     </div>
   );

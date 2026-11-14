@@ -1,8 +1,6 @@
 import React, { useEffect, useRef } from "react";
-import { nearestObstacle, scanToPoints } from "./lidarGeometry.js";
-
-const SIZE = 480;
-const MAX_RANGE_M = 6;
+import { drawLidar, SIZE } from "./drawLidar.js";
+import { nearestObstacle } from "./lidarGeometry.js";
 
 export default function LidarPanel({ payload, stale }) {
   const canvasRef = useRef(null);
@@ -14,35 +12,11 @@ export default function LidarPanel({ payload, stale }) {
     const ctx = canvas?.getContext?.("2d");
     if (!ctx) return;
     const css = getComputedStyle(canvas);
-    const color = (name, fallback) => css.getPropertyValue(name).trim() || fallback;
-    const centre = SIZE / 2;
-    ctx.clearRect(0, 0, SIZE, SIZE);
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = color("--color-line-strong", "rgba(222,220,209,0.22)");
-    ctx.fillStyle = color("--color-faint", "#9c9a92");
-    ctx.font = "11px sans-serif";
-    for (let m = 1; m <= MAX_RANGE_M; m += 1) {
-      const r = (m / MAX_RANGE_M) * centre;
-      ctx.beginPath();
-      ctx.arc(centre, centre, r, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.fillText(`${m} m`, centre + 3, centre - r + 11);
-    }
-    ctx.beginPath();
-    ctx.moveTo(centre, 0);
-    ctx.lineTo(centre, SIZE);
-    ctx.moveTo(0, centre);
-    ctx.lineTo(SIZE, centre);
-    ctx.stroke();
-    ctx.fillStyle = stale ? color("--color-faint", "#9c9a92") : color("--color-live", "#5db872");
-    for (const p of scanToPoints(scan, { size: SIZE, maxRangeM: MAX_RANGE_M })) ctx.fillRect(p.x - 1, p.y - 1, 2.5, 2.5);
-    ctx.fillStyle = color("--color-coral", "#d97757");
-    ctx.beginPath();
-    ctx.moveTo(centre, centre - 8);
-    ctx.lineTo(centre - 5, centre + 5);
-    ctx.lineTo(centre + 5, centre + 5);
-    ctx.closePath();
-    ctx.fill();
+    const read = (name) => css.getPropertyValue(name).trim() || undefined;
+    drawLidar(ctx, scan, {
+      stale,
+      colors: { line: read("--color-line-strong"), faint: read("--color-faint"), live: read("--color-live"), coral: read("--color-coral") },
+    });
   }, [scan, stale]);
 
   return (

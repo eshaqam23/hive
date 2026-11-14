@@ -658,19 +658,36 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
             query = {k: v[0] for k, v in parse_qs(url.query).items()}
             peer, domain_id = validate_peer(query.get("ip")), validate_domain_id(query.get("domain_id"))
             names = [query.get("topic", "")] if mjpeg else [t for t in query.get("topics", "").split(",") if t]
-            if not names or len(names) > MAX_STREAM_TOPICS or any(not t.startswith("/") for t in names):
+            shown = [] if mjpeg else [t for t in query.get("images", "").split(",") if t]
+            if not (names or shown) or len(names) > MAX_STREAM_TOPICS or len(shown) > MAX_STREAM_TOPICS or any(not t.startswith("/") for t in names + shown):
                 raise ApiError(400, "Name the topic(s) to stream, each starting with /.", code="bad_topics")
             worker = existing_worker(peer, domain_id)
             if worker is None:
                 raise ApiError(502, "The ROS 2 worker for this robot is not running. Connect first.", code="worker_gone")
-            for name in names:
-                kind = worker.topic_kinds.get(name)
-                if kind is None:
-                    raise ApiError(404, f"The robot has no topic {name}.", code="unknown_topic")
-                if mjpeg and kind != "image":
-                    raise ApiError(400, f"{name} is not an image topic; use the data stream.", code="use_sse")
-                if not mjpeg and kind == "image":
-                    raise ApiError(400, f"{name} is an image topic; use camera.mjpg.", code="use_mjpeg")
+            problems: list[tuple[str, str]] = []  # SSE only: topics skipped, reported as status events
+            if mjpeg:
+                for name in names:
+                    kind = worker.topic_kinds.get(name)
+                    if kind is None:
+                        raise ApiError(404, f"The robot has no topic {name}.", code="unknown_topic")
+                    if kind != "image":
+                        raise ApiError(400, f"{name} is not an image topic; use the data stream.", code="use_sse")
+                valid = names
+            else:
+                valid = []
+                for name in names:
+                    kind = worker.topic_kinds.get(name)
+                    if kind is None:
+                        problems.append((name, "unknown_topic"))
+                    elif kind == "image":
+                        problems.append((name, "use_mjpeg"))
+                    else:
+                        valid.append(name)
+                shown = [t for t in dict.fromkeys(shown) if worker.topic_kinds.get(t) == "image"]
+                if not valid and not shown:
+                    if any(code == "unknown_topic" for _, code in problems):
+                        raise ApiError(404, f"The robot has no topic {problems[0][0]}.", code="unknown_topic")
+                    raise ApiError(400, f"{problems[0][0]} is an image topic; use camera.mjpg.", code="use_mjpeg")
             key = (peer, domain_id)
             if mjpeg:
                 retry_camera(worker)
@@ -683,7 +700,14 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
                     reason=camera.get("reason"),
                 )
             try:
-                viewer = HUB.subscribe(key, names)
+                failed: list = []
+                viewer = HUB.subscribe(key, valid, errors=None if mjpeg else failed)
+                problems += [(topic, "watch_failed") for topic, _ in failed]
+                if not mjpeg:
+                    viewer.image_topics = tuple(shown)
+                    if not viewer.topics and not shown:
+                        HUB.unsubscribe(viewer)
+                        raise ApiError(502, "Could not start watching any of the topics.", code="watch_failed")
             except ApiError:
                 raise
             except Exception as error:  # noqa: BLE001
@@ -712,7 +736,7 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
             if mjpeg:
                 streams.serve_mjpeg(write, HUB, key, names[0], alive=worker.is_running, client_gone=client_gone)
             else:
-                streams.serve_sse(write, HUB, viewer, alive=worker.is_running, client_gone=client_gone, link=worker.link)
+                streams.serve_sse(write, HUB, viewer, alive=worker.is_running, client_gone=client_gone, link=worker.link, errors=problems)
         except OSError:  # the browser left (BrokenPipe, ConnectionReset), even before the first byte
             pass
         finally:

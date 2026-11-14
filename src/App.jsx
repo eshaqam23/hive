@@ -4,7 +4,8 @@ import { PRESET_MODELS, snapshot } from "./robotModels.js";
 import LiveView from "./live/LiveView.jsx";
 import { useLiveStream } from "./live/useLiveStream.js";
 import { postCamera } from "./live/api.js";
-import { describeLink, ddsPorts } from "./live/link.js";
+import { describeLink } from "./live/link.js";
+import { connectPatch, driveBody, gripperEnabled, gripperSliderShown, keepaliveBody, notFoundHint } from "./live/carHelpers.js";
 import { liveListTopics } from "./viewers/registry.js";
 import { compactValue } from "./viewers/ValuePanel.jsx";
 
@@ -586,10 +587,7 @@ export default function App() {
             cmdVelSubscribers: found.cmd_vel_subscribers ?? 0,
             at: Date.now(),
           },
-          services: found.services || [],
-          gripperInterface: found.gripper_interface ?? null,
-          otherPublishers: found.other_publishers ?? 0,
-          camera: found.camera ?? null,
+          ...connectPatch(found),
         });
         logActivity(robot.id, "ok", run.attempt > 1 ? `Connected after ${run.attempt} attempts.` : "Connected.");
         (found.warnings || []).forEach((w) => logActivity(robot.id, "warn", w));
@@ -602,11 +600,7 @@ export default function App() {
           return;
         }
         const delay = RETRY_DELAYS_MS[Math.min(run.attempt - 1, RETRY_DELAYS_MS.length - 1)];
-        let message = error.message;
-        if (error.data?.code === "not_found") {
-          const [a, b] = ddsPorts(current.domainId);
-          message = `${message} Expected ROS domain ${current.domainId}; the Pi and this laptop must allow UDP ${a}–${b}. See docs/robot-setup.md.`;
-        }
+        const message = error.data?.code === "not_found" ? notFoundHint(current.domainId, error.message) : error.message;
         updateRobot(robot.id, { mode: `Attempt ${run.attempt} failed · retrying in ${delay / 1000} s`, lastError: message });
         logActivity(robot.id, "info", `Attempt ${run.attempt} failed. Retrying in ${delay / 1000} s.`);
         run.timer = window.setTimeout(attempt, delay);
@@ -674,7 +668,7 @@ export default function App() {
   async function keepDriving(robot) {
     if (driveRef.current.robotId !== robot.id) return;
     try {
-      noteLink(robot, await robotApi(robot, "/robots/drive/keepalive", { ...target(robot), power: powerRef.current }, { quiet: true }));
+      noteLink(robot, await robotApi(robot, "/robots/drive/keepalive", keepaliveBody(target(robot), powerRef.current), { quiet: true }));
       if (driveRef.current.robotId === robot.id) driveRef.current.keepalives += 1;
     } catch (error) {
       if (driveRef.current.robotId !== robot.id) return;
@@ -699,7 +693,7 @@ export default function App() {
     setPressed(action);
     updateRobot(robot.id, { mode: `Driving ${DRIVE_LABEL[action]}`, lastError: "" });
     try {
-      noteLink(robot, await robotApi(robot, "/robots/drive", { ...ordered(robot, action), power: powerRef.current }));
+      noteLink(robot, await robotApi(robot, "/robots/drive", driveBody(ordered(robot, action), powerRef.current)));
       if (driveRef.current.action === action) updateRobot(robot.id, { lastCommand: action });
     } catch (error) {
       if (driveRef.current.action !== action) return; // already released or switched
@@ -1517,6 +1511,7 @@ function RobotView({
     base: API_BASE_URL,
     robot,
     topics: liveListTopics(listed).map((t) => t.name),
+    images: listed.filter((t) => t.kind === "image").map((t) => t.name),
     enabled: true,
   });
   const link = live.link ?? replyLink ?? null;
@@ -1546,7 +1541,7 @@ function RobotView({
           className="relative aspect-[16/9] overflow-hidden rounded-2xl border border-line xl:aspect-[16/11]"
           style={{ background: stageBg(0.14) }}
         >
-          <LiveView base={API_BASE_URL} payloads={live.payloads} robot={robot} selectedTopic={selectedTopic} stale={live.stale} />
+          <LiveView base={API_BASE_URL} error={live.error} imageStats={live.imageStats} payloads={live.payloads} robot={robot} selectedTopic={selectedTopic} stale={live.stale} />
         </div>
 
         <div className="min-w-0 animate-enter">
@@ -1631,6 +1626,7 @@ function RobotView({
             onSelectTopic={onSelectTopic}
             payloads={live.payloads}
             selectedTopic={selectedTopic}
+            topicErrors={live.topicErrors}
             topics={listed.length ? listed.filter((t) => !["/rosout", "/parameter_events"].includes(t.name)) : robot.topics}
           />
 
@@ -1823,7 +1819,7 @@ function DrivePad({ robot, onPress, onRelease, onStop, onGripper, pressed, power
               <button
                 className="btn btn-secondary min-w-0 flex-1 basis-36 px-4"
                 data-pressed={pressed === c.action}
-                disabled={disabled || !robot.gripperInterface}
+                disabled={disabled || !gripperEnabled(robot)}
                 key={c.action}
                 onClick={() => onGripper(c.action)}
                 title={robot.gripperInterface ? c.label : "No gripper interface found on this car"}
@@ -1834,7 +1830,7 @@ function DrivePad({ robot, onPress, onRelease, onStop, onGripper, pressed, power
               </button>
             ))}
           </div>
-          {robot.gripperInterface === "position" && (
+          {gripperSliderShown(robot) && (
             <label className="mt-3 flex items-center gap-3 text-[14px] text-muted">
               <span className="w-14 flex-none">Gripper</span>
               <input
@@ -1916,8 +1912,10 @@ function DrivePad({ robot, onPress, onRelease, onStop, onGripper, pressed, power
   );
 }
 
+const TOPIC_ERROR = { unknown_topic: "not on the car", use_mjpeg: "camera view only", watch_failed: "cannot be watched" };
+
 /* Spotify's tracklist: the selected topic plays its bars instead of its number. */
-function TopicList({ topics, selectedTopic, onSelectTopic, payloads = {} }) {
+function TopicList({ topics, selectedTopic, onSelectTopic, payloads = {}, topicErrors = {} }) {
   return (
     <div className="mt-4">
       <div
@@ -1954,6 +1952,7 @@ function TopicList({ topics, selectedTopic, onSelectTopic, payloads = {} }) {
                 <span className="truncate font-mono text-[13px] text-muted" translate="no">
                   {topic.kind && <span className="mr-2 text-faint">{topic.kind}</span>}
                   {payloads[topic.name]?.hz != null && <span className="mr-2">{Number(payloads[topic.name].hz).toFixed(1)} Hz</span>}
+                  {topicErrors[topic.name] && <span className="text-warn">{TOPIC_ERROR[topicErrors[topic.name]] || topicErrors[topic.name]}</span>}
                   {topic.kind === "value" && payloads[topic.name] && <span className="text-ink">{compactValue(payloads[topic.name].data)}</span>}
                 </span>
               </button>

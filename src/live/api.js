@@ -1,8 +1,10 @@
 // Pure URL builders and the camera POST wrapper; the caller owns fetch/EventSource.
 const query = (robot) => `ip=${encodeURIComponent(robot.host)}&domain_id=${encodeURIComponent(robot.domainId)}`;
 
-export function streamUrl(base, robot, topics) {
-  return `${base}/robots/stream?${query(robot)}&topics=${encodeURIComponent(topics.join(","))}`;
+// images: image topics shown on the page; the stream sends their stats and stale flag, never frames
+export function streamUrl(base, robot, topics, images = []) {
+  const shown = images.length ? `&images=${encodeURIComponent(images.join(","))}` : "";
+  return `${base}/robots/stream?${query(robot)}&topics=${encodeURIComponent(topics.join(","))}${shown}`;
 }
 
 export function cameraUrl(base, robot, topic, { forceFull = false } = {}) {

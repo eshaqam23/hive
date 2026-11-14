@@ -6,7 +6,7 @@ import { resolvePanel, stageTopics } from "../viewers/registry.js";
 const MODEL = "3D model";
 const TAB_LABEL = { image: "Camera", scan: "LiDAR" };
 
-export default function LiveView({ robot, selectedTopic, payloads = {}, stale = {}, base, onForceFull }) {
+export default function LiveView({ robot, selectedTopic, payloads = {}, stale = {}, imageStats = {}, error = null, base, onForceFull }) {
   const connected = robot.status === "connected";
   const discovered = robot.discovery?.topics ?? [];
   const staged = connected ? stageTopics(discovered) : [];
@@ -23,6 +23,7 @@ export default function LiveView({ robot, selectedTopic, payloads = {}, stale = 
   const current = active === MODEL ? null : (tabs.find((t) => t.name === active) ?? tabs[0] ?? null);
   const label = (t) => (TAB_LABEL[t.kind] && tabs.find((x) => x.kind === t.kind) === t ? TAB_LABEL[t.kind] : t.name);
   const payload = current ? payloads[current.name] : null;
+  const stats = current ? imageStats[current.name] : null;
   const Panel = current ? PANELS[resolvePanel({ kind: current.kind, type: current.type, topic: current.name })] : null;
   const shown = [...tabs.map((t) => ({ id: t.name, text: label(t) })), { id: MODEL, text: MODEL }];
 
@@ -45,12 +46,17 @@ export default function LiveView({ robot, selectedTopic, payloads = {}, stale = 
               </button>
             );
           })}
-          {payload?.hz != null && <span className="ml-auto font-mono text-[13px] text-live">● {Number(payload.hz).toFixed(1)} Hz</span>}
+          {(payload?.hz ?? stats?.hz) != null && <span className="ml-auto font-mono text-[13px] text-live">● {Number(payload?.hz ?? stats.hz).toFixed(1)} Hz</span>}
         </div>
+      )}
+      {connected && error && (
+        <p className="flex-none bg-warn/15 px-3 py-1.5 text-center text-[13px] font-medium text-warn" role="status">
+          {error}
+        </p>
       )}
       <div className="relative min-h-0 flex-1">
         {current && Panel ? (
-          <Panel base={base} onForceFull={onForceFull} payload={payload} robot={robot} stale={Boolean(stale[current.name])} topic={current} />
+          <Panel base={base} onForceFull={onForceFull} payload={payload} robot={robot} stale={Boolean(stale[current.name])} stats={stats} topic={current} />
         ) : (
           <RobotViewer className="absolute inset-0" key={robot.preset} preset={robot.preset} />
         )}

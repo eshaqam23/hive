@@ -14,6 +14,7 @@ BOUNDARY = "hiveframe"
 QUEUE_MAX = 30
 STALE_SECONDS = 2.0
 PING_SECONDS = 10.0
+IMAGE_STATS_SECONDS = 0.5
 
 
 def sse_event(event: str, data: dict) -> bytes:
@@ -29,6 +30,7 @@ class Viewer:
 
     def __init__(self, key: tuple, topics: tuple[str, ...]) -> None:
         self.key, self.topics = key, topics
+        self.image_topics: tuple[str, ...] = ()  # image topics this page shows: stats and stale only, never frames
         self._queue: collections.deque = collections.deque(maxlen=QUEUE_MAX)
         self._cond = threading.Condition()
 
@@ -54,9 +56,12 @@ class StreamHub:
         self._viewers: dict[tuple, list[Viewer]] = {}  # (key, topic) -> viewers
         self._jpeg: dict[tuple, tuple[bytes, int]] = {}
         self._seq: dict[tuple, int] = {}
+        self._img: dict[tuple, tuple[int, int, int, int]] = {}  # (key, topic) -> frames, bytes, width, height
 
     # -- viewers
-    def subscribe(self, key: tuple, topics: str | Iterable[str]) -> Viewer:
+    def subscribe(self, key: tuple, topics: str | Iterable[str], errors: list | None = None) -> Viewer:
+        """With errors a list, a topic whose watch fails is appended there as (topic, error) and skipped
+        instead of failing the whole subscription."""
         wanted = (topics,) if isinstance(topics, str) else tuple(dict.fromkeys(topics))
         viewer = Viewer(key, wanted)
         with self._ops:
@@ -66,7 +71,13 @@ class StreamHub:
                     with self._cond:
                         first = not self._viewers.get((key, topic))
                     if first and self.on_first:
-                        self.on_first(key, topic)
+                        try:
+                            self.on_first(key, topic)
+                        except Exception as error:  # noqa: BLE001
+                            if errors is None:
+                                raise
+                            errors.append((topic, error))
+                            continue
                     started.append(topic)
                     with self._cond:
                         self._viewers.setdefault((key, topic), []).append(viewer)
@@ -74,6 +85,7 @@ class StreamHub:
                 for topic in started:
                     self._remove(viewer, key, topic)
                 raise
+            viewer.topics = tuple(started)
         return viewer
 
     def unsubscribe(self, viewer: Viewer) -> None:
@@ -113,6 +125,8 @@ class StreamHub:
             with self._cond:
                 seq = self._seq.get((key, topic), 0) + 1
                 self._seq[(key, topic)] = seq
+                frames, size, _, _ = self._img.get((key, topic), (0, 0, 0, 0))
+                self._img[(key, topic)] = (frames + 1, size + len(jpeg), int(payload.get("width") or 0), int(payload.get("height") or 0))
                 if self._viewers.get((key, topic)):
                     self._jpeg[(key, topic)] = (jpeg, seq)
                 self._cond.notify_all()
@@ -127,6 +141,11 @@ class StreamHub:
             seen = {id(v): v for (k, _), vs in self._viewers.items() if k == key for v in vs}
         for viewer in seen.values():
             viewer.push({"event": "link", "data": link})
+
+    def image_stats(self, key: tuple, topic: str) -> tuple[int, int, int, int] | None:
+        """Running (frames, bytes, width, height) of an image topic; callers diff two readings for a rate."""
+        with self._cond:
+            return self._img.get((key, topic))
 
     # -- camera frames
     def latest_jpeg(self, key: tuple, topic: str) -> tuple[bytes, int] | None:
@@ -149,12 +168,18 @@ class StreamHub:
 # ------------------------------------------------------------------ serving one connection
 def serve_sse(write: Callable[[bytes], Any], hub: StreamHub, viewer: Viewer, *, alive: Callable[[], bool],
               client_gone: Callable[[], bool], link: dict | None = None, clock: Callable[[], float] = time.monotonic,
-              poll: float = 0.25) -> str:
+              poll: float = 0.25, errors: Iterable[tuple[str, str]] = ()) -> str:
     """Write SSE events until the client or the worker is gone. Returns why it ended."""
     try:
         if link:
             write(sse_event("link", link))
+        for topic, code in errors:
+            write(sse_event("status", {"topic": topic, "error": code}))
         start = clock()
+        images = {}
+        for topic in viewer.image_topics:
+            reading = hub.image_stats(viewer.key, topic) or (0, 0, 0, 0)
+            images[topic] = {"frames": reading[0], "bytes": reading[1], "emit": start, "change": start, "stale": False}
         last = {t: start for t in viewer.topics}
         stale = {t: False for t in viewer.topics}
         last_ping = start
@@ -177,6 +202,24 @@ def serve_sse(write: Callable[[bytes], Any], hub: StreamHub, viewer: Viewer, *, 
             for topic in viewer.topics:
                 if not stale[topic] and now - last[topic] > STALE_SECONDS:
                     stale[topic] = True
+                    write(sse_event("status", {"topic": topic, "stale": True}))
+            for topic, st in images.items():
+                reading = hub.image_stats(viewer.key, topic) or (st["frames"], st["bytes"], 0, 0)
+                moved = reading[0] != st["frames"]
+                if moved:
+                    st["change"] = now
+                    if st["stale"]:
+                        st["stale"] = False
+                        write(sse_event("status", {"topic": topic, "stale": False}))
+                if now - st["emit"] >= IMAGE_STATS_SECONDS:
+                    span = now - st["emit"]
+                    if moved:
+                        write(sse_event("image_stats", {
+                            "topic": topic, "hz": round((reading[0] - st["frames"]) / span, 2),
+                            "bytes_per_s": int((reading[1] - st["bytes"]) / span), "width": reading[2], "height": reading[3]}))
+                    st["frames"], st["bytes"], st["emit"] = reading[0], reading[1], now
+                if not st["stale"] and now - st["change"] > STALE_SECONDS:
+                    st["stale"] = True
                     write(sse_event("status", {"topic": topic, "stale": True}))
             if now - last_ping >= PING_SECONDS:
                 last_ping = now
