@@ -1,6 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import RobotViewer from "./RobotViewer.jsx";
 import { PRESET_MODELS, snapshot } from "./robotModels.js";
+import LiveView from "./live/LiveView.jsx";
+import { useLiveStream } from "./live/useLiveStream.js";
+import { postCamera } from "./live/api.js";
+import { describeLink, ddsPorts } from "./live/link.js";
+import { liveListTopics } from "./viewers/registry.js";
+import { compactValue } from "./viewers/ValuePanel.jsx";
 
 const API_BASE_URL = import.meta.env.VITE_HIVE_API_URL || "http://127.0.0.1:8787/api";
 const FLEET_STORAGE_KEY = "hive:fleet:manual-rc-v1";
@@ -188,7 +194,7 @@ const PRESET_ROBOTS = {
     ],
     topics: [
       { name: "/cmd_vel", type: "geometry_msgs/msg/Twist", viewer: "raw" },
-      { name: "/camera/raw", type: "sensor_msgs/msg/Image", viewer: "raw" },
+      { name: "/camera/camera/color/image_raw", type: "sensor_msgs/msg/Image", viewer: "raw" },
     ],
     controls: DRIVE_CONTROLS,
   },
@@ -445,6 +451,10 @@ export default function App() {
   const [addingPreset, setAddingPreset] = useState(null);
   const [removingRobotId, setRemovingRobotId] = useState(null);
   const [pressed, setPressed] = useState(null);
+  const [power, setPower] = useState(0.5);
+  const powerRef = useRef(0.5);
+  powerRef.current = power;
+  const [replyLinks, setReplyLinks] = useState({}); // robot id -> link from the newest drive/keepalive reply
   const [messages, setMessages] = useState([{ role: "agent", text: "Hive is ready." }]);
   const pressTimer = useRef(0);
   const driveRef = useRef({ robotId: null, action: null, timer: 0 });
@@ -471,7 +481,7 @@ export default function App() {
 
   function openRobot(robot) {
     setSelectedRobotId(robot.id);
-    setSelectedTopic(robot.topics[0]);
+    setSelectedTopic(null);
     setView("robot");
   }
 
@@ -531,7 +541,7 @@ export default function App() {
 
   function connectRobot(robot) {
     setSelectedRobotId(robot.id);
-    setSelectedTopic(robot.topics[0]);
+    setSelectedTopic(null);
     logActivity(robot.id, "info", `Connect: looking for ${robot.host} on ROS domain ${robot.domainId}.`);
     keepConnecting(robot);
   }
@@ -576,6 +586,10 @@ export default function App() {
             cmdVelSubscribers: found.cmd_vel_subscribers ?? 0,
             at: Date.now(),
           },
+          services: found.services || [],
+          gripperInterface: found.gripper_interface ?? null,
+          otherPublishers: found.other_publishers ?? 0,
+          camera: found.camera ?? null,
         });
         logActivity(robot.id, "ok", run.attempt > 1 ? `Connected after ${run.attempt} attempts.` : "Connected.");
         (found.warnings || []).forEach((w) => logActivity(robot.id, "warn", w));
@@ -588,7 +602,12 @@ export default function App() {
           return;
         }
         const delay = RETRY_DELAYS_MS[Math.min(run.attempt - 1, RETRY_DELAYS_MS.length - 1)];
-        updateRobot(robot.id, { mode: `Attempt ${run.attempt} failed · retrying in ${delay / 1000} s`, lastError: error.message });
+        let message = error.message;
+        if (error.data?.code === "not_found") {
+          const [a, b] = ddsPorts(current.domainId);
+          message = `${message} Expected ROS domain ${current.domainId}; the Pi and this laptop must allow UDP ${a}–${b}. See docs/robot-setup.md.`;
+        }
+        updateRobot(robot.id, { mode: `Attempt ${run.attempt} failed · retrying in ${delay / 1000} s`, lastError: message });
         logActivity(robot.id, "info", `Attempt ${run.attempt} failed. Retrying in ${delay / 1000} s.`);
         run.timer = window.setTimeout(attempt, delay);
       }
@@ -636,6 +655,16 @@ export default function App() {
     setPressed(null);
   }
 
+  function noteLink(robot, reply) {
+    const link = reply?.link;
+    if (!link) return;
+    setReplyLinks((all) => {
+      const old = all[robot.id];
+      const same = old && old.stop === link.stop && old.last_line === link.last_line && old.other_publishers === link.other_publishers && old.reporting === link.reporting;
+      return same ? all : { ...all, [robot.id]: link };
+    });
+  }
+
   /* a failed drive request either lost the link (reconnect) or was refused (say why, stay connected) */
   function driveFailed(robot, error, mode) {
     if (linkLost(error)) return keepConnecting(robot, error.message);
@@ -645,7 +674,7 @@ export default function App() {
   async function keepDriving(robot) {
     if (driveRef.current.robotId !== robot.id) return;
     try {
-      await robotApi(robot, "/robots/drive/keepalive", target(robot), { quiet: true });
+      noteLink(robot, await robotApi(robot, "/robots/drive/keepalive", { ...target(robot), power: powerRef.current }, { quiet: true }));
       if (driveRef.current.robotId === robot.id) driveRef.current.keepalives += 1;
     } catch (error) {
       if (driveRef.current.robotId !== robot.id) return;
@@ -670,7 +699,7 @@ export default function App() {
     setPressed(action);
     updateRobot(robot.id, { mode: `Driving ${DRIVE_LABEL[action]}`, lastError: "" });
     try {
-      await robotApi(robot, "/robots/drive", ordered(robot, action));
+      noteLink(robot, await robotApi(robot, "/robots/drive", { ...ordered(robot, action), power: powerRef.current }));
       if (driveRef.current.action === action) updateRobot(robot.id, { lastCommand: action });
     } catch (error) {
       if (driveRef.current.action !== action) return; // already released or switched
@@ -694,7 +723,7 @@ export default function App() {
     flash("stop");
     updateRobot(robot.id, { mode: "Stopping…" });
     try {
-      await robotApi(robot, "/robots/drive", ordered(robot, "stop"));
+      noteLink(robot, await robotApi(robot, "/robots/drive", ordered(robot, "stop")));
       updateRobot(robot.id, { mode: "Stopped", lastCommand: "stop", lastError: "" });
     } catch (error) {
       if (error.data?.superseded) return; // a newer command took over
@@ -702,16 +731,27 @@ export default function App() {
     }
   }
 
-  async function sendGripper(robot, action) {
+  async function sendGripper(robot, action, value) {
     if (!robot || robot.status !== "connected") return;
     flash(action);
-    updateRobot(robot.id, { mode: action === "gripper_open" ? "Opening gripper…" : "Closing gripper…", lastError: "" });
+    const position = action === "gripper_position";
+    updateRobot(robot.id, { mode: position ? "Moving gripper…" : action === "gripper_open" ? "Opening gripper…" : "Closing gripper…", lastError: "" });
     try {
-      await robotApi(robot, "/robots/control", ordered(robot, action));
-      updateRobot(robot.id, { mode: action === "gripper_open" ? "Gripper open" : "Gripper closed", lastCommand: action });
+      await robotApi(robot, "/robots/control", position ? { ...ordered(robot, action), value } : ordered(robot, action));
+      updateRobot(robot.id, { mode: position ? `Gripper at ${Math.round(value * 100)}%` : action === "gripper_open" ? "Gripper open" : "Gripper closed", lastCommand: action });
     } catch (error) {
       if (error.data?.superseded) return;
       driveFailed(robot, error, "Gripper command failed");
+    }
+  }
+
+  async function setCamera(robot, settings) {
+    const want = { quality: robot.camera?.quality ?? "low", depth: robot.camera?.depth ?? false, ...settings };
+    try {
+      const camera = await postCamera((path, payload) => robotApi(robot, path, payload), robot, want);
+      updateRobot(robot.id, { camera: camera ?? robot.camera, lastError: "" });
+    } catch (error) {
+      updateRobot(robot.id, { lastError: error.message });
     }
   }
 
@@ -839,7 +879,7 @@ export default function App() {
     onPress: (action) => pressDrive(robot, action),
     onRelease: (action) => releaseDrive(robot, action),
     onStop: () => stopDrive(robot),
-    onGripper: (action) => sendGripper(robot, action),
+    onGripper: (action, value) => sendGripper(robot, action, value),
   });
   /* the dock floats on Home only: the robot page has the full pad, and the command log's composer
      owns the bottom of its screen */
@@ -882,10 +922,14 @@ export default function App() {
               activity={activity[selectedRobot.id] || []}
               onBack={() => setView("home")}
               onClearActivity={() => setActivity((all) => ({ ...all, [selectedRobot.id]: [] }))}
+              onCamera={(settings) => setCamera(selectedRobot, settings)}
+              onPower={setPower}
               onSelectTopic={setSelectedTopic}
+              power={power}
               pressed={pressed}
+              replyLink={replyLinks[selectedRobot.id]}
               robot={selectedRobot}
-              selectedTopic={selectedTopic || selectedRobot.topics[0]}
+              selectedTopic={selectedTopic}
               {...robotActions}
               {...driveActions(selectedRobot)}
             />
@@ -1462,8 +1506,20 @@ function RobotView({
   onBack,
   activity,
   onClearActivity,
+  power,
+  onPower,
+  onCamera,
+  replyLink,
 }) {
   const preset = PRESET_ROBOTS[robot.preset];
+  const listed = robot.status === "connected" ? robot.discovery?.topics ?? [] : [];
+  const live = useLiveStream({
+    base: API_BASE_URL,
+    robot,
+    topics: liveListTopics(listed).map((t) => t.name),
+    enabled: true,
+  });
+  const link = live.link ?? replyLink ?? null;
   return (
     <div>
       <div className="flex items-center justify-between gap-4 px-8 pt-5">
@@ -1490,7 +1546,7 @@ function RobotView({
           className="relative aspect-[16/9] overflow-hidden rounded-2xl border border-line xl:aspect-[16/11]"
           style={{ background: stageBg(0.14) }}
         >
-          <RobotViewer className="absolute inset-0" key={robot.preset} preset={robot.preset} />
+          <LiveView base={API_BASE_URL} payloads={live.payloads} robot={robot} selectedTopic={selectedTopic} stale={live.stale} />
         </div>
 
         <div className="min-w-0 animate-enter">
@@ -1553,14 +1609,30 @@ function RobotView({
               {robot.status === "connected" ? "Live" : "Connect to drive"}
             </span>
           </div>
-          <DrivePad onGripper={onGripper} onPress={onPress} onRelease={onRelease} onStop={onStop} pressed={pressed} robot={robot} />
+          <DrivePad
+            link={link}
+            onCamera={onCamera}
+            onGripper={onGripper}
+            onPower={onPower}
+            onPress={onPress}
+            onRelease={onRelease}
+            onStop={onStop}
+            power={power}
+            pressed={pressed}
+            robot={robot}
+          />
         </section>
 
         <section aria-labelledby="topics-title">
           <h2 className="font-display text-[26px] tracking-title" id="topics-title">
             Topics
           </h2>
-          <TopicList onSelectTopic={onSelectTopic} selectedTopic={selectedTopic} topics={robot.topics} />
+          <TopicList
+            onSelectTopic={onSelectTopic}
+            payloads={live.payloads}
+            selectedTopic={selectedTopic}
+            topics={listed.length ? listed.filter((t) => !["/rosout", "/parameter_events"].includes(t.name)) : robot.topics}
+          />
 
           <h3 className="mt-8 text-[15px] font-bold">Capabilities</h3>
           <ul className="mt-3 flex flex-wrap gap-2">
@@ -1665,11 +1737,19 @@ const holdToDrive = (action, onPress, onRelease) => ({
   onContextMenu: (event) => event.preventDefault(),
 });
 
-function DrivePad({ robot, onPress, onRelease, onStop, onGripper, pressed }) {
+const QUALITIES = [
+  ["low", "Low"],
+  ["medium", "Medium"],
+  ["high", "High"],
+];
+
+function DrivePad({ robot, onPress, onRelease, onStop, onGripper, pressed, power = 0.5, onPower, onCamera, link }) {
   const disabled = robot.status !== "connected";
   const drive = robot.controls.filter((c) => !c.action.startsWith("gripper"));
   const gripper = robot.controls.filter((c) => c.action.startsWith("gripper"));
   const at = (action) => drive.find((c) => c.action === action);
+  const linkText = describeLink(link);
+  const [gripperValue, setGripperValue] = useState(0.5);
 
   /* a plain render function, not a component: a component defined here would remount on every
      render and drop keyboard focus after each press */
@@ -1721,25 +1801,104 @@ function DrivePad({ robot, onPress, onRelease, onStop, onGripper, pressed }) {
         {direction("backward", "b")}
       </div>
 
+      <label className="mx-auto mt-6 flex max-w-sm items-center gap-3 text-[14px] text-muted">
+        <span className="w-14 flex-none">Power</span>
+        <input
+          aria-valuetext={`${Math.round(power * 100)}%`}
+          className="min-w-0 flex-1 accent-coral"
+          max={100}
+          min={20}
+          onChange={(event) => onPower?.(Number(event.target.value) / 100)}
+          step={10}
+          type="range"
+          value={Math.round(power * 100)}
+        />
+        <span className="w-10 flex-none text-right font-mono text-ink">{Math.round(power * 100)}%</span>
+      </label>
+
       {gripper.length > 0 && (
-        <div className="mx-auto mt-6 flex max-w-sm flex-wrap justify-center gap-3">
-          {gripper.map((c) => (
-            <button
-              className="btn btn-secondary min-w-0 flex-1 basis-36 px-4"
-              data-pressed={pressed === c.action}
-              disabled={disabled}
-              key={c.action}
-              onClick={() => onGripper(c.action)}
-              type="button"
-            >
-              <c.Icon size={18} />
-              {c.label}
-            </button>
-          ))}
+        <div className="mx-auto mt-6 max-w-sm">
+          <div className="flex flex-wrap justify-center gap-3">
+            {gripper.map((c) => (
+              <button
+                className="btn btn-secondary min-w-0 flex-1 basis-36 px-4"
+                data-pressed={pressed === c.action}
+                disabled={disabled || !robot.gripperInterface}
+                key={c.action}
+                onClick={() => onGripper(c.action)}
+                title={robot.gripperInterface ? c.label : "No gripper interface found on this car"}
+                type="button"
+              >
+                <c.Icon size={18} />
+                {c.label}
+              </button>
+            ))}
+          </div>
+          {robot.gripperInterface === "position" && (
+            <label className="mt-3 flex items-center gap-3 text-[14px] text-muted">
+              <span className="w-14 flex-none">Gripper</span>
+              <input
+                className="min-w-0 flex-1 accent-coral"
+                disabled={disabled}
+                max={100}
+                min={0}
+                onChange={(event) => setGripperValue(Number(event.target.value) / 100)}
+                onKeyUp={() => onGripper("gripper_position", gripperValue)}
+                onPointerUp={() => onGripper("gripper_position", gripperValue)}
+                step={5}
+                type="range"
+                value={Math.round(gripperValue * 100)}
+              />
+              <span className="w-10 flex-none text-right font-mono text-ink">{Math.round(gripperValue * 100)}%</span>
+            </label>
+          )}
         </div>
       )}
 
-      <p className="mt-6 text-center text-[14px] text-muted">
+      {robot.camera && (
+        <div className="mx-auto mt-6 flex max-w-sm flex-wrap items-center gap-x-4 gap-y-2 text-[14px] text-muted">
+          <span className="w-14 flex-none">Camera</span>
+          <div aria-label="Camera quality" className="flex gap-1 rounded-full bg-raised p-1" role="group">
+            {QUALITIES.map(([value, text]) => (
+              <button
+                aria-pressed={robot.camera.quality === value}
+                className={`min-h-8 rounded-full px-3 text-[13px] font-medium transition-colors ${robot.camera.quality === value ? "bg-coral text-coral-ink" : "hover:text-ink"}`}
+                disabled={disabled}
+                key={value}
+                onClick={() => onCamera?.({ quality: value })}
+                type="button"
+              >
+                {text}
+              </button>
+            ))}
+          </div>
+          <button
+            aria-pressed={Boolean(robot.camera.depth)}
+            className={`min-h-8 rounded-full border px-3 text-[13px] font-medium transition-colors ${robot.camera.depth ? "border-coral text-coral" : "border-line hover:text-ink"}`}
+            disabled={disabled}
+            onClick={() => onCamera?.({ depth: !robot.camera.depth })}
+            type="button"
+          >
+            Depth
+          </button>
+        </div>
+      )}
+
+      {!disabled && linkText.level === "danger" && (
+        <p className="mt-6 rounded-lg bg-danger/15 px-4 py-3 text-center text-[14px] font-semibold text-danger" role="alert">
+          {linkText.text}
+        </p>
+      )}
+      {!disabled && linkText.level !== "danger" && (
+        <p
+          className={`mt-6 text-center text-[14px] ${linkText.level === "ok" ? "text-live" : linkText.level === "warn" ? "text-warn" : "text-muted"}`}
+          role="status"
+        >
+          {linkText.text}
+        </p>
+      )}
+
+      <p className="mt-3 text-center text-[14px] text-muted">
         {disabled ? (
           "Connect this robot to drive it."
         ) : robot.lastCommand ? (
@@ -1758,16 +1917,17 @@ function DrivePad({ robot, onPress, onRelease, onStop, onGripper, pressed }) {
 }
 
 /* Spotify's tracklist: the selected topic plays its bars instead of its number. */
-function TopicList({ topics, selectedTopic, onSelectTopic }) {
+function TopicList({ topics, selectedTopic, onSelectTopic, payloads = {} }) {
   return (
     <div className="mt-4">
       <div
         aria-hidden="true"
-        className="grid grid-cols-[28px_minmax(0,1fr)_minmax(0,1fr)] gap-4 border-b border-line px-4 pb-2 text-[13px] font-medium text-muted"
+        className="grid grid-cols-[28px_minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)] gap-4 border-b border-line px-4 pb-2 text-[13px] font-medium text-muted"
       >
         <span>#</span>
         <span>Topic</span>
         <span>Type</span>
+        <span>Live</span>
       </div>
       <ol className="mt-2 grid gap-0.5">
         {topics.map((topic, i) => {
@@ -1776,7 +1936,7 @@ function TopicList({ topics, selectedTopic, onSelectTopic }) {
             <li key={topic.name}>
               <button
                 aria-pressed={active}
-                className={`grid w-full grid-cols-[28px_minmax(0,1fr)_minmax(0,1fr)] items-center gap-4 rounded-md px-4 py-3 text-left transition-colors ${
+                className={`grid w-full grid-cols-[28px_minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)] items-center gap-4 rounded-md px-4 py-3 text-left transition-colors ${
                   active ? "bg-raised" : "hover:bg-card"
                 }`}
                 onClick={() => onSelectTopic(topic)}
@@ -1790,6 +1950,11 @@ function TopicList({ topics, selectedTopic, onSelectTopic }) {
                 </span>
                 <span className="truncate font-mono text-[13px] text-muted" translate="no">
                   {topic.type}
+                </span>
+                <span className="truncate font-mono text-[13px] text-muted" translate="no">
+                  {topic.kind && <span className="mr-2 text-faint">{topic.kind}</span>}
+                  {payloads[topic.name]?.hz != null && <span className="mr-2">{Number(payloads[topic.name].hz).toFixed(1)} Hz</span>}
+                  {topic.kind === "value" && payloads[topic.name] && <span className="text-ink">{compactValue(payloads[topic.name].data)}</span>}
                 </span>
               </button>
             </li>

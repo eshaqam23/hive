@@ -28,7 +28,9 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.5",
+    "@testing-library/react": "^16.3.0",
     "@vitest/coverage-v8": "^3.2.4",
+    "jsdom": "^26.1.0",
     "tailwindcss": "^4.3.5",
     "vitest": "^3.2.4"
   }
