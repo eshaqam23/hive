@@ -8,3 +8,5 @@ __pycache__/
 backend/test/mock_ros/robots/
 backend/test/mock_ros/calls.log
 backend/test/mock_ros/jitter
+.coverage
+.coverage.*

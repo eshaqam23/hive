@@ -57,19 +57,21 @@ class TopicEndpointInfo:
 
 
 class Publisher:
-    def __init__(self, msg_type, topic):
-        self.msg_type, self.topic = msg_type, topic
+    def __init__(self, node, msg_type, topic):
+        self.node, self.msg_type, self.topic = node, msg_type, topic
 
     def publish(self, msg):
         for key, robot in _visible():
             if robot.get("subscribers", {}).get(self.topic, 0):
                 _log(key, self.topic, msg._yaml())
+                _graph.on_publish(self.node, robot, self.topic, msg)
 
 
 class Node:
     def __init__(self, name):
         self._name = name
         self._publishers = {}
+        self._subscriptions = []
 
     def get_name(self):
         return self._name
@@ -78,8 +80,29 @@ class Node:
         return "/"
 
     def create_publisher(self, msg_type, topic, qos):
-        self._publishers[topic] = Publisher(msg_type, topic)
+        self._publishers[topic] = Publisher(self, msg_type, topic)
+        _graph.log_worker_publisher(topic, qos)
         return self._publishers[topic]
+
+    def create_subscription(self, msg_type, topic, callback, qos, raw=False):
+        sub = _graph.Subscription(msg_type, topic, callback, raw)
+        self._subscriptions.append(sub)
+        _graph.log_sub("create", topic, raw)
+        return sub
+
+    def destroy_subscription(self, sub):
+        if sub in self._subscriptions:
+            self._subscriptions.remove(sub)
+            _graph.log_sub("destroy", sub.topic, sub.raw)
+
+    def create_client(self, srv_type, name):
+        return _graph.Client(srv_type, name)
+
+    def count_publishers(self, topic):
+        return _graph.count_publishers(self, topic)
+
+    def get_service_names_and_types(self):
+        return _graph.service_names_and_types()
 
     def _own_topics(self):
         topics = {t: [p.msg_type._type] for t, p in self._publishers.items()}
@@ -95,7 +118,7 @@ class Node:
     def get_topic_names_and_types(self):
         topics = self._own_topics()
         for _, robot in _visible():
-            for name, typ in robot.get("topics", {}).items():
+            for name, typ in {**robot.get("topics", {}), **_graph.robot_topics(robot)}.items():
                 topics.setdefault(name, [typ])
         return sorted(topics.items())
 
@@ -130,12 +153,16 @@ def init(args=None, signal_handler_options=None):
 def create_node(name):
     global _created_at
     _created_at = time.monotonic()
+    _graph.write_worker_env()
     return Node(name)
 
 
 def spin_once(node, timeout_sec=None):
-    pass
+    _graph.spin(node, timeout_sec)
 
 
 def shutdown():
     pass
+
+
+from rclpy import _graph  # noqa: E402  (imports this module back, so it comes last)

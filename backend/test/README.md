@@ -30,3 +30,27 @@ and its 20 Hz rate, press latency, the deadman stop, release, stop-after-forward
 an out-of-order command, the gripper, the command log, CORS and input validation. It does not prove
 DDS behaviour on a real network: run the checklist in the main README with the real robots before
 relying on it.
+
+## Live data, services and parameters
+
+The mock also supports what the live-data features need. Robots in `robots.json` gain these keys
+(all optional):
+
+| Key | Meaning |
+| --- | --- |
+| `publishes` | `{topic: {type, hz, width?, height?}}`: LaserScan or Image streams, delivered inside `spin_once` (at most one message per subscription per call, newest due wins). LaserScan has 360 ranges and `frame_id` is the robot IP; Image is a solid colour derived from the IP. |
+| `echo_ros_data` | Every `/cmd_vel` Twist the robot receives produces a `/ros_data` String line (`lp,ld,rp,rd`, wheelbase 0.2032, 0.5 m/s is 255). A robot with `line_prefix` (gripper car, `"D"`) prefixes it `D,`. |
+| `services` | `{name: srv type}`, e.g. `/gripper/grab` as `std_srvs/srv/Trigger`. |
+| `params`, `param_runtime` | Declared parameters per node. A node in `params` gets `set_parameters` and `get_parameters` services. Setting a parameter fails unless `param_runtime` is true. Image size does not change when a camera parameter is set. |
+| `extra_cmd_vel_publishers` | Added to `count_publishers("/cmd_vel")`, to simulate another controller. |
+
+Extra robots: `192.168.1.50:45` is a LiDAR car (`/scan`, `ros_data` echo) and `192.168.1.60:46` is a
+gripper car (Trigger services, `/gripper/position`, prefixed `ros_data`). `192.168.1.44:44` publishes
+no `ros_data`.
+
+Mock API for the worker: `create_subscription(msg_type, topic, cb, qos, raw=False)` (bytes when `raw`),
+`destroy_subscription`, `count_publishers`, `get_service_names_and_types`, `create_client` with
+`wait_for_service` and `call_async`, `rclpy.qos` and `rclpy.serialization` (pickle). Files written under
+`mock_ros/robots/`: `<ip>_<domain>.subs.jsonl` (subscription create/destroy), `.params.jsonl`
+(parameter sets), `worker_pubs.jsonl` (publisher topic, depth, reliability) and `worker_env.json`
+(the worker's environment). Unit tests for the mock: `python3 -m pytest backend/tests/test_mock_ros.py`.

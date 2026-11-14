@@ -17,7 +17,24 @@
       "/cmd_vel": 1,
       "/gripper_open": 1,
       "/hive/command": 1
-    }
+    },
+    "publishes": {
+      "/camera/camera/color/image_raw": {
+        "type": "sensor_msgs/msg/Image",
+        "hz": 30,
+        "width": 640,
+        "height": 480
+      }
+    },
+    "echo_ros_data": true,
+    "params": {
+      "/camera/camera": {
+        "rgb_camera.color_profile": "640x480x30",
+        "enable_depth": true
+      }
+    },
+    "param_runtime": true,
+    "extra_cmd_vel_publishers": 0
   },
   "192.168.1.31:43": {
     "online": false,
@@ -40,5 +57,48 @@
       "/camera/raw": "sensor_msgs/msg/Image"
     },
     "subscribers": {}
+  },
+  "192.168.1.50:45": {
+    "online": true,
+    "nodes": [
+      "/base_driver",
+      "/sllidar_node"
+    ],
+    "topics": {
+      "/cmd_vel": "geometry_msgs/msg/Twist"
+    },
+    "subscribers": {
+      "/cmd_vel": 1
+    },
+    "publishes": {
+      "/scan": {
+        "type": "sensor_msgs/msg/LaserScan",
+        "hz": 7.5
+      }
+    },
+    "echo_ros_data": true,
+    "extra_cmd_vel_publishers": 0
+  },
+  "192.168.1.60:46": {
+    "online": true,
+    "nodes": [
+      "/base_driver",
+      "/gripper_node"
+    ],
+    "topics": {
+      "/cmd_vel": "geometry_msgs/msg/Twist",
+      "/gripper/position": "std_msgs/msg/Float32"
+    },
+    "subscribers": {
+      "/cmd_vel": 1,
+      "/gripper/position": 1
+    },
+    "services": {
+      "/gripper/grab": "std_srvs/srv/Trigger",
+      "/gripper/release": "std_srvs/srv/Trigger"
+    },
+    "line_prefix": "D",
+    "echo_ros_data": true,
+    "extra_cmd_vel_publishers": 0
   }
 }
