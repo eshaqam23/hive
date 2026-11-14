@@ -33,3 +33,8 @@ class Parameter:
 class SetParametersResult:
     def __init__(self, successful=False, reason=""):
         self.successful, self.reason = successful, reason
+
+
+class ListParametersResult:
+    def __init__(self):
+        self.names, self.prefixes = [], []

@@ -228,3 +228,49 @@ def test_gripper_car_prefix(tmp_path):
     assert _spin_until(rclpy, node, lambda: lines)
     assert lines == ["D,0,1,0,1\n"]
     rclpy.shutdown()
+
+
+def test_publisher_info_and_count_include_robot_streams(mock):
+    rclpy, node, _ = mock
+    assert len(node.get_publishers_info_by_topic("/scan")) == 1
+    assert len(node.get_publishers_info_by_topic("/camera/camera/color/image_raw")) == 1
+    assert len(node.get_publishers_info_by_topic("/ros_data")) == 1
+    assert node.count_publishers("/ros_data") == 1
+    assert node.get_subscriptions_info_by_topic("/scan") == []
+
+
+def test_list_parameters_service_filters_by_prefix(mock):
+    rclpy, node, _ = mock
+    from rcl_interfaces.srv import ListParameters
+    names = dict(node.get_service_names_and_types())
+    assert names["/camera/camera/list_parameters"] == ["rcl_interfaces/srv/ListParameters"]
+    assert "/camera/camera/set_parameters" in names
+    client = node.create_client(ListParameters, "/camera/camera/list_parameters")
+    assert client.wait_for_service(timeout_sec=1.0)
+    req = ListParameters.Request()
+    req.prefixes = ["rgb_camera"]
+    fut = client.call_async(req)
+    assert fut.done() and fut.result().result.names == ["rgb_camera.color_profile"]
+
+
+def test_float32_messages():
+    sys.path.insert(0, MOCK_PY)
+    from std_msgs.msg import Float32, Float32MultiArray
+    assert Float32._type == "std_msgs/msg/Float32" and Float32()._yaml() == "{data: 0.0}"
+    m = Float32MultiArray()
+    m.data = [1, 2.5]
+    assert Float32MultiArray._type.endswith("Float32MultiArray") and m._yaml() == "{data: [1.0, 2.5]}"
+
+
+def test_worker_env_file_has_only_allowlisted_keys(tmp_path):
+    os.environ["HIVE_TEST_SECRET"] = "x"
+    try:
+        rclpy = _load(tmp_path, "10.0.0.1")
+        rclpy.init()
+        rclpy.create_node("t")
+    finally:
+        del os.environ["HIVE_TEST_SECRET"]
+    env = json.loads((tmp_path / "robots" / "worker_env.json").read_text())
+    assert "HIVE_TEST_SECRET" not in env and "PATH" not in env
+    assert env["ROS_DOMAIN_ID"] == "7" and env["ROS_STATIC_PEERS"] == "10.0.0.1"
+    assert env["ROS_LOCALHOST_ONLY_set"] is False

@@ -11,6 +11,7 @@ import os
 import time
 
 import rclpy as _r
+from rcl_interfaces.srv import ListParameters
 from rclpy.serialization import serialize_message
 
 WHEELBASE = 0.2032
@@ -34,10 +35,17 @@ def log_worker_publisher(topic, qos):
                  {"topic": topic, "depth": getattr(qos, "depth", qos), "reliability": reliability})
 
 
+WORKER_ENV_KEYS = ("ROS_DOMAIN_ID", "ROS_STATIC_PEERS", "ROS_AUTOMATIC_DISCOVERY_RANGE", "RMW_IMPLEMENTATION")
+
+
 def write_worker_env():
+    """Record only the ROS-related environment (never the whole of os.environ: it may hold secrets)."""
+    env = {k: os.environ[k] for k in WORKER_ENV_KEYS if k in os.environ}
+    env["ROS_LOCALHOST_ONLY_set"] = "ROS_LOCALHOST_ONLY" in os.environ
     os.makedirs(os.path.join(_r.ROOT, "robots"), exist_ok=True)
-    with open(os.path.join(_r.ROOT, "robots", "worker_env.json"), "w") as f:
-        json.dump(dict(os.environ), f)
+    fd = os.open(os.path.join(_r.ROOT, "robots", "worker_env.json"), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(env, f)
 
 
 def log_sub(event, topic, raw):
@@ -171,7 +179,17 @@ def robot_services(robot):
     for node in robot.get("params", {}):
         services[f"{node}/set_parameters"] = "rcl_interfaces/srv/SetParameters"
         services[f"{node}/get_parameters"] = "rcl_interfaces/srv/GetParameters"
+        services[f"{node}/list_parameters"] = "rcl_interfaces/srv/ListParameters"
     return services
+
+
+def _list_parameters(robot, name, req):
+    node = name[: -len("/list_parameters")]
+    names = [n for n in robot.get("params", {}).get(node, {})
+             if not req.prefixes or any(n == p or n.startswith(p + ".") for p in req.prefixes)]
+    resp = ListParameters.Response()
+    resp.result.names = names
+    return resp
 
 
 def service_names_and_types():
@@ -204,6 +222,8 @@ def _set_parameters(key, robot, name, req):
 def _handle(srv_type, key, robot, name, req):
     from rcl_interfaces.msg import ParameterValue
     resp = srv_type.Response()
+    if srv_type._type == "rcl_interfaces/srv/ListParameters":
+        return _list_parameters(robot, name, req)
     if srv_type._type == "rcl_interfaces/srv/SetParameters":
         resp.results = _set_parameters(key, robot, name, req)
     elif srv_type._type == "rcl_interfaces/srv/GetParameters":

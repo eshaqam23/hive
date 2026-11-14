@@ -125,6 +125,9 @@ class Node:
     def _robot_endpoints(self, topic, subscribers):
         endpoints = []
         for _, robot in _visible():
+            if not subscribers and topic in _graph.robot_topics(robot):
+                endpoints.append(TopicEndpointInfo(*_split(robot.get("nodes", ["/robot"])[0])))
+                continue
             if topic not in robot.get("topics", {}):
                 continue
             listens = robot.get("subscribers", {}).get(topic, 0) > 0
