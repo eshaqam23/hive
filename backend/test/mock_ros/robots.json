@@ -117,5 +117,26 @@
     },
     "echo_ros_data": true,
     "extra_cmd_vel_publishers": 0
+  },
+  "192.168.1.51:48": {
+    "online": true,
+    "nodes": [
+      "/base_driver",
+      "/sllidar_node"
+    ],
+    "topics": {
+      "/cmd_vel": "geometry_msgs/msg/Twist"
+    },
+    "subscribers": {
+      "/cmd_vel": 1
+    },
+    "publishes": {
+      "/scan": {
+        "type": "sensor_msgs/msg/LaserScan",
+        "hz": 7.5
+      }
+    },
+    "echo_ros_data": true,
+    "extra_cmd_vel_publishers": 0
   }
 }

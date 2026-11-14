@@ -21,12 +21,21 @@ except (OSError, ValueError):
 _created_at = None
 
 
+_robots_cache = (0.0, {})
+ROBOTS_TTL = 0.03  # seconds a parsed robots.json is reused
+
+
 def _robots():
-    try:
-        with open(os.path.join(ROOT, "robots.json")) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+    """robots.json as it is now, re-read at most every ROBOTS_TTL: the worker asks several times per tick,
+    and every read of a Windows drive mounted in WSL costs milliseconds that would show up as drive jitter."""
+    global _robots_cache
+    if time.monotonic() - _robots_cache[0] > ROBOTS_TTL:
+        try:
+            with open(os.path.join(ROOT, "robots.json")) as f:
+                _robots_cache = (time.monotonic(), json.load(f))
+        except FileNotFoundError:
+            _robots_cache = (time.monotonic(), {})
+    return _robots_cache[1]
 
 
 def _visible():

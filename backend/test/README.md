@@ -44,7 +44,7 @@ The mock also supports what the live-data features need. Robots in `robots.json`
 | `params`, `param_runtime` | Declared parameters per node. A node in `params` gets `set_parameters` and `get_parameters` services. Setting a parameter fails unless `param_runtime` is true. Image size does not change when a camera parameter is set. |
 | `extra_cmd_vel_publishers` | Added to `count_publishers("/cmd_vel")`, to simulate another controller. |
 
-Extra robots: `192.168.1.50:45` is a LiDAR car (`/scan`, `ros_data` echo) and `192.168.1.60:46` is a
+Extra robots: `192.168.1.51:48` is a second LiDAR car (same as :45, for cross-talk checks). `192.168.1.50:45` is a LiDAR car (`/scan`, `ros_data` echo) and `192.168.1.60:46` is a
 gripper car (Trigger services, `/gripper/position`, prefixed `ros_data`). `192.168.1.44:44` publishes
 no `ros_data`.
 

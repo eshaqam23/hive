@@ -27,6 +27,7 @@ import os
 import queue
 import re
 import select
+import socket
 import shlex
 import signal
 import subprocess
@@ -35,9 +36,11 @@ import threading
 import time
 import traceback
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import adapters
 import robot_link
+import streams
 
 HOST = os.environ.get("HIVE_BACKEND_HOST", "127.0.0.1")
 PORT = int(os.environ.get("HIVE_BACKEND_PORT", "8787"))
@@ -68,6 +71,14 @@ DISCOVERY_SPIN_SECONDS = 2.5     # how long a new worker listens for the robot b
 WORKER_START_SECONDS = 15
 MAX_COMMAND_LENGTH = 500
 MAX_BODY_BYTES = 64 * 1024
+MAX_STREAM_TOPICS = 8
+STREAM_WATCH_TIMEOUT = 5.0
+RATE_CAPS = {"image": 15.0, "scan": 10.0, "value": 5.0, "generic": 5.0}  # Hz per payload kind, converter side
+HUB = streams.StreamHub(
+    on_first=lambda key, topic: watch_request(key, "watch", topic),
+    on_last=lambda key, topic: watch_request(key, "unwatch", topic),
+)
+STDOUT_LOCK = threading.Lock()  # the worker's stdout is written from two threads
 
 IP_OR_HOST_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 
@@ -161,9 +172,14 @@ class RobotWorker:
         self.last_order: dict[str, tuple[str | None, int]] = {}  # channel -> newest (session, seq) applied
         self.discovered = threading.Event()  # set once DDS has had time to find the robot
         self.link: dict[str, Any] | None = None  # newest link state the worker reported
+        self.topic_kinds: dict[str, str] = {}  # topic -> payload kind, from the last discover reply
 
     def on_link(self, link: dict[str, Any]) -> None:
         self.link = link
+        HUB.publish_link((self.peer, self.domain_id), link)
+
+    def on_stream(self, payload: dict[str, Any]) -> None:
+        HUB.publish((self.peer, self.domain_id), payload)
 
     def is_running(self) -> bool:
         return self.process is not None and self.process.poll() is None
@@ -237,6 +253,9 @@ class RobotWorker:
                 reply = None
             if isinstance(reply, dict) and "id" not in reply and isinstance(reply.get("link"), dict):
                 self.on_link(reply["link"])
+                continue
+            if isinstance(reply, dict) and "id" not in reply and isinstance(reply.get("stream"), dict):
+                self.on_stream(reply["stream"])
                 continue
             if not isinstance(reply, dict) or "id" not in reply:
                 # DDS and ROS libraries can print to stdout too; show it rather than choke on it
@@ -316,6 +335,8 @@ class RobotWorker:
         wait = 0.0 if self.discovered.is_set() else DISCOVERY_SPIN_SECONDS
         found = self.request("discover", timeout=wait + 5, wait=wait, topics=with_topics)
         self.discovered.set()
+        if with_topics:
+            self.topic_kinds = {t["name"]: t.get("kind", "generic") for t in found.get("topics", [])}
         return found
 
     def wait_for_discovery(self) -> None:
@@ -366,6 +387,14 @@ def existing_worker(peer: str, domain_id: int) -> RobotWorker | None:
     return worker if worker and worker.is_running() else None
 
 
+def watch_request(key: tuple, op: str, topic: str) -> None:
+    """The hub's on_first / on_last: tell the robot's worker to start or stop watching a topic."""
+    worker = existing_worker(*key)
+    if worker is None:
+        raise ApiError(502, "The ROS 2 worker for this robot is not running.", code="worker_gone")
+    worker.request(op, timeout=STREAM_WATCH_TIMEOUT, topic=topic)
+
+
 def drop_worker(peer: str, domain_id: int) -> RobotWorker | None:
     with WORKERS_LOCK:
         return WORKERS.pop((peer, domain_id), None)
@@ -408,6 +437,9 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if not self.origin_allowed():
             return self.write_json(403, {"ok": False, "error": "This origin may not use the Hive backend."})
+        url = urlparse(self.path)
+        if url.path in ("/api/robots/stream", "/api/robots/camera.mjpg"):
+            return self.handle_stream(url)
         if self.path == "/api/health":
             return self.write_json(
                 200,
@@ -550,6 +582,63 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
         finally:
             worker.stop()
 
+    # -------------------------------------------------------------- live streams
+
+    def handle_stream(self, url: Any) -> None:
+        """SSE for data topics, MJPEG for one image topic. The viewer is registered before the headers go
+        out, so a worker that refuses the watch becomes an HTTP error and leaves no viewer behind."""
+        mjpeg = url.path.endswith(".mjpg")
+        try:
+            query = {k: v[0] for k, v in parse_qs(url.query).items()}
+            peer, domain_id = validate_peer(query.get("ip")), validate_domain_id(query.get("domain_id"))
+            names = [query.get("topic", "")] if mjpeg else [t for t in query.get("topics", "").split(",") if t]
+            if not names or len(names) > MAX_STREAM_TOPICS or any(not t.startswith("/") for t in names):
+                raise ApiError(400, "Name the topic(s) to stream, each starting with /.", code="bad_topics")
+            worker = existing_worker(peer, domain_id)
+            if worker is None:
+                raise ApiError(502, "The ROS 2 worker for this robot is not running. Connect first.", code="worker_gone")
+            for name in names:
+                kind = worker.topic_kinds.get(name)
+                if kind is None:
+                    raise ApiError(404, f"The robot has no topic {name}.", code="unknown_topic")
+                if mjpeg and kind != "image":
+                    raise ApiError(400, f"{name} is not an image topic; use the data stream.", code="use_sse")
+                if not mjpeg and kind == "image":
+                    raise ApiError(400, f"{name} is an image topic; use camera.mjpg.", code="use_mjpeg")
+            key = (peer, domain_id)
+            try:
+                viewer = HUB.subscribe(key, names)
+            except ApiError:
+                raise
+            except Exception as error:  # noqa: BLE001
+                raise ApiError(502, f"Could not start watching: {error}", code="watch_failed") from None
+        except ApiError as error:
+            return self.write_json(error.status, {"ok": False, "error": error.message, **error.extra})
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header("Content-Type", f"multipart/x-mixed-replace; boundary={streams.BOUNDARY}" if mjpeg else "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+
+        def write(data: bytes) -> None:
+            self.wfile.write(data)
+            self.wfile.flush()
+
+        def client_gone() -> bool:
+            try:
+                readable, _, _ = select.select([self.connection], [], [], 0)
+                return bool(readable) and self.connection.recv(1, socket.MSG_PEEK) == b""
+            except (OSError, ValueError):
+                return True
+
+        try:
+            if mjpeg:
+                streams.serve_mjpeg(write, HUB, key, names[0], alive=worker.is_running, client_gone=client_gone)
+            else:
+                streams.serve_sse(write, HUB, viewer, alive=worker.is_running, client_gone=client_gone, link=worker.link)
+        finally:
+            HUB.unsubscribe(viewer)
+
     # -------------------------------------------------------------- io
 
     def read_json(self) -> dict[str, Any]:
@@ -603,6 +692,14 @@ def main() -> None:
 # ------------------------------------------------------------------ the worker process (robot side)
 
 
+def write_line(obj: dict[str, Any]) -> None:
+    """One JSON line on the worker's stdout. The main and converter threads share it, so lines never interleave."""
+    line = json.dumps(obj) + "\n"
+    with STDOUT_LOCK:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+
+
 class RobotWorkerLoop:
     """Runs inside the worker process: owns the rclpy node and publishers for one robot, and the drive
     state. Everything that touches ROS happens on this one thread."""
@@ -612,6 +709,9 @@ class RobotWorkerLoop:
         from geometry_msgs.msg import Twist
         from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
         from std_msgs.msg import Bool, Float32, String
+
+        global sensor_watch
+        import sensor_watch  # needs rclpy, so only the worker imports it
 
         try:
             from rclpy.signals import SignalHandlerOptions
@@ -639,6 +739,7 @@ class RobotWorkerLoop:
             QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST),
         )
         self.clients: dict[str, Any] = {}
+        self.watcher = sensor_watch.SensorWatcher(self.node, write_line, RATE_CAPS)
         self.confirmer = robot_link.StopConfirmer()
         self.burst: list[float] = []           # times of the stop repeats still to send
         self.power = robot_link.DEFAULT_POWER
@@ -659,11 +760,11 @@ class RobotWorkerLoop:
 
     @staticmethod
     def reply(request_id: Any, **fields: Any) -> None:
-        print(json.dumps({"id": request_id, "ok": True, **fields}), flush=True)
+        write_line({"id": request_id, "ok": True, **fields})
 
     @staticmethod
     def fail(request_id: Any, status: int, error: str, **extra: Any) -> None:
-        print(json.dumps({"id": request_id, "ok": False, "status": status, "error": error, "extra": extra}), flush=True)
+        write_line({"id": request_id, "ok": False, "status": status, "error": error, "extra": extra})
 
     @staticmethod
     def log(text: str) -> None:
@@ -699,9 +800,9 @@ class RobotWorkerLoop:
     def drain(self) -> None:
         """Handle every ready callback (the /ros_data echoes), at most 50 per call."""
         for _ in range(50):
-            before = self.received
+            before = self.received + self.watcher.callbacks
             self.rclpy.spin_once(self.node, timeout_sec=0.0)
-            if self.received == before:
+            if self.received + self.watcher.callbacks == before:
                 break
 
     def refresh_graph(self) -> None:
@@ -732,7 +833,7 @@ class RobotWorkerLoop:
         key = (link["stop"], link["reporting"], link["other_publishers"])
         if key != self.link_sent[0] or now - self.link_sent[1] >= LINK_EMIT_SECONDS:
             self.link_sent = (key, now)
-            print(json.dumps({"link": link}), flush=True)
+            write_line({"link": link})
 
     def detect_gripper(self) -> str | None:
         subscribed = {
@@ -855,6 +956,14 @@ class RobotWorkerLoop:
                 self.fail(request_id, 400, f"Unsupported gripper action: {request.get('action')}")
                 return
             self.pending.append({**request, "deadline": now + float(request.get("wait", 0))})
+        elif op == "watch":
+            try:
+                self.reply(request_id, **self.watcher.watch(request.get("topic")))
+            except KeyError:
+                self.fail(request_id, 404, f"The robot has no topic {request.get('topic')}.", code="unknown_topic")
+        elif op == "unwatch":
+            self.watcher.unwatch(request.get("topic"))
+            self.reply(request_id)
         elif op == "discover":
             self.pending.append({**request, "deadline": now + float(request.get("wait", 0))})
         else:
@@ -1004,7 +1113,7 @@ class RobotWorkerLoop:
 
     def run(self) -> None:
         threading.Thread(target=self.read_stdin, daemon=True).start()
-        print(json.dumps({"ready": True}), flush=True)
+        write_line({"ready": True})
         try:
             while True:
                 due = min([self.next_publish_at, *self.burst[:1]])
@@ -1029,6 +1138,7 @@ class RobotWorkerLoop:
                     self.log_throttled(f"drive loop error (worker still running):\n{traceback.format_exc()}")
         finally:
             self.shutdown_stop()
+            self.watcher.stop()
             self.node.destroy_node()
             self.rclpy.shutdown()
 
@@ -1039,7 +1149,7 @@ def run_robot_worker() -> None:
     try:
         loop = RobotWorkerLoop()
     except Exception as error:  # noqa: BLE001 - reported to the backend, which shows it to the operator
-        print(json.dumps({"ready": False, "error": f"{type(error).__name__}: {error}"}), flush=True)
+        write_line({"ready": False, "error": f"{type(error).__name__}: {error}"})
         raise
     loop.run()
 

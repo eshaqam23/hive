@@ -6,7 +6,7 @@ robot receives (robots/<ip>_<domain>.jsonl), so ordering and stop behaviour are 
 
     python3 -I hive_e2e.py <mock_root> [base_url]
 """
-import glob, json, os, sys, threading, time, urllib.error, urllib.request
+import glob, http.client, json, os, queue, socket, sys, threading, time, urllib.error, urllib.request
 
 MOCK = sys.argv[1]
 BASE = sys.argv[2] if len(sys.argv) > 2 else "http://127.0.0.1:8787/api"
@@ -18,6 +18,7 @@ OFF = {"ip": "192.168.1.31", "domain_id": 43}       # powered off
 NODRV = {"ip": "192.168.1.44", "domain_id": 44}     # online, but nothing subscribes to /cmd_vel
 LIDAR = {"ip": "192.168.1.50", "domain_id": 45}     # /cmd_vel listener, /scan, /ros_data echo
 POS = {"ip": "192.168.1.61", "domain_id": 47}       # /gripper/position subscriber only
+LIDAR2 = {"ip": "192.168.1.51", "domain_id": 48}    # a second LiDAR car, for cross-talk checks
 GRIP = {"ip": "192.168.1.60", "domain_id": 46}      # Trigger gripper services, prefixed /ros_data echo
 
 
@@ -379,13 +380,230 @@ def t_tap_not_falsely_confirmed():
           f"link in the stop reply={early} final={final.get('stop')} last_line={final.get('last_line')}")
 
 
+# ------------------------------------------------------------------ live streams
+IMAGE_TOPIC = "/camera/camera/color/image_raw"
+PART_HEAD = b"--hiveframe\r\nContent-Type: image/jpeg\r\nContent-Length: "
+
+
+def open_get(path):
+    conn = http.client.HTTPConnection(BASE.split("//")[1].split("/")[0], timeout=10)
+    conn.connect()
+    conn.request("GET", "/api" + path, headers={"Origin": ORIGIN})
+    sock = conn.sock  # http.client drops its own reference once the response will close, so keep ours
+    return conn, conn.getresponse(), sock
+
+
+class Stream:
+    """A GET stream read on a thread: SSE events land in .events, MJPEG part times in .parts."""
+
+    def __init__(self, path):
+        self.conn, self.resp, self.sock = open_get(path)
+        self.status = self.resp.status
+        self.events, self.parts, self.error = queue.Queue(), [], None
+        if self.status == 200:
+            threading.Thread(target=self.pump, daemon=True).start()
+        else:
+            self.error = json.loads(self.resp.read() or b"{}")
+
+    def pump(self):
+        mjpeg = "multipart" in (self.resp.getheader("Content-Type") or "")
+        try:
+            if mjpeg:
+                buf = b""
+                while True:
+                    chunk = self.resp.read1(65536)
+                    if not chunk:
+                        return
+                    buf += chunk
+                    while True:
+                        i = buf.find(PART_HEAD)
+                        if i < 0:
+                            buf = buf[-len(PART_HEAD):]
+                            break
+                        self.parts.append(time.time())
+                        buf = buf[i + len(PART_HEAD):]
+            event = None
+            for raw in self.resp:
+                line = raw.decode().rstrip("\n")
+                if line.startswith("event:"):
+                    event = line[7:]
+                elif line.startswith("data:"):
+                    self.events.put((event, json.loads(line[6:])))
+        except Exception:
+            pass
+
+    def wait(self, pred, seconds):
+        """Collect events until pred(event, data) is true: returns (matching event or None, all seen)."""
+        seen, end = [], time.time() + seconds
+        while time.time() < end:
+            try:
+                ev = self.events.get(timeout=max(0.01, end - time.time()))
+            except queue.Empty:
+                break
+            seen.append(ev)
+            if pred(*ev):
+                return ev, seen
+        return None, seen
+
+    def close(self):
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except (OSError, AttributeError):
+            pass
+        self.conn.close()
+
+
+def subs_events(robot):
+    path = f"{MOCK}/robots/{robot['ip']}_{robot['domain_id']}.subs.jsonl"
+    return [json.loads(l) for l in open(path) if l.strip()] if os.path.exists(path) else []
+
+
+def scan_stream(robot):
+    return Stream(f"/robots/stream?ip={robot['ip']}&domain_id={robot['domain_id']}&topics=/scan")
+
+
+def t_sse_scan():
+    call("/robots/connect", LIDAR)
+    s = scan_stream(LIDAR)
+    try:
+        ev, _ = s.wait(lambda e, d: e == "data" and d.get("kind") == "scan", 3)
+    finally:
+        s.close()
+    d = ev[1] if ev else {}
+    n = len(d.get("data", {}).get("ranges_mm", []))
+    check("SSE delivers a LaserScan with 360 ranges within 3 s", s.status == 200 and n == 360,
+          f"HTTP {s.status} kind={d.get('kind')} ranges={n} hz={d.get('hz')} bps={d.get('bytes_per_s')}")
+
+
+def t_mjpeg_frames():
+    call("/robots/connect", CAR)
+    s = Stream(f"/robots/camera.mjpg?ip={CAR['ip']}&domain_id={CAR['domain_id']}&topic={IMAGE_TOPIC}")
+    time.sleep(2)
+    n = len(s.parts)
+    ctype = s.resp.getheader("Content-Type") or ""
+    s.close()
+    check("MJPEG delivers at least 5 JPEG parts in 2 s", s.status == 200 and n >= 5 and "boundary=hiveframe" in ctype,
+          f"HTTP {s.status} {n} parts, Content-Type={ctype}")
+
+
+def t_unwatch_on_disconnect():
+    reset()
+    call("/robots/connect", LIDAR)
+    s = scan_stream(LIDAR)
+    s.wait(lambda e, d: e == "data", 3)
+    made = [e for e in subs_events(LIDAR) if e["topic"] == "/scan" and e["event"] == "create"]
+    s.close()
+    t0, destroyed = time.time(), []
+    while time.time() - t0 < 2 and not destroyed:
+        time.sleep(0.05)
+        destroyed = [e for e in subs_events(LIDAR) if e["topic"] == "/scan" and e["event"] == "destroy"]
+    check("closing the stream destroys the worker subscription within 2 s", bool(made) and bool(destroyed),
+          f"created={len(made)} destroyed={len(destroyed)} after {time.time() - t0:.2f}s")
+
+
+def t_stale_on_drop():
+    path = f"{MOCK}/robots.json"
+    original = open(path).read()
+    key = f"{LIDAR['ip']}:{LIDAR['domain_id']}"
+    call("/robots/connect", LIDAR)
+    s = scan_stream(LIDAR)
+    stale, back, dt = None, None, 99.0
+    try:
+        s.wait(lambda e, d: e == "data", 3)
+        robots = json.loads(original)
+        robots[key]["online"] = False
+        open(path, "w").write(json.dumps(robots))
+        t0 = time.time()
+        stale, _ = s.wait(lambda e, d: e == "status" and d.get("stale") is True and d.get("topic") == "/scan", 3.5)
+        dt = time.time() - t0
+        open(path, "w").write(original)
+        back, _ = s.wait(lambda e, d: e == "status" and d.get("stale") is False, 3)
+    finally:
+        open(path, "w").write(original)
+        s.close()
+    check("a dropped robot makes the stream report stale within 3 s, and recovery clears it",
+          stale is not None and dt <= 3.0 and back is not None, f"stale after {dt:.2f}s, recovered={back is not None}")
+
+
+def t_no_cross_talk_streams():
+    call("/robots/connect", LIDAR)
+    call("/robots/connect", LIDAR2)
+    a, b = scan_stream(LIDAR), scan_stream(LIDAR2)
+    try:
+        got = {}
+        for name, st in (("a", a), ("b", b)):
+            _, seen = st.wait(lambda e, d: False, 1.5)
+            got[name] = [d["frame_id"] for e, d in seen if e == "data"]
+    finally:
+        a.close()
+        b.close()
+    ok = len(got["a"]) >= 3 and len(got["b"]) >= 3 and set(got["a"]) == {LIDAR["ip"]} and set(got["b"]) == {LIDAR2["ip"]}
+    check("two cars streaming /scan never see each other's data", ok,
+          f"a={sorted(set(got['a']))} x{len(got['a'])} b={sorted(set(got['b']))} x{len(got['b'])}")
+
+
+def t_drive_tick_under_load():
+    reset()
+    call("/robots/connect", CAR)
+    cam = Stream(f"/robots/camera.mjpg?ip={CAR['ip']}&domain_id={CAR['domain_id']}&topic={IMAGE_TOPIC}")
+    time.sleep(0.5)
+    call("/robots/drive", {**CAR, "action": "forward"})
+    for _ in range(16):                      # 4 s of keepalives
+        time.sleep(0.25)
+        call("/robots/drive/keepalive", CAR)
+    call("/robots/drive", {**CAR, "action": "stop"})
+    frames = len(cam.parts)
+    cam.close()
+    ts = [m["t"] for m in received(CAR) if m["topic"] == "/cmd_vel" and moving(m["msg"])]
+    gaps = sorted((b - a) * 1000 for a, b in zip(ts, ts[1:]))
+    within = sum(1 for g in gaps if 80 <= g <= 120)
+    frac = within / len(gaps) if gaps else 0
+    detail = (f"{len(gaps)} intervals, {frac:.1%} in 80-120 ms, p50={gaps[len(gaps) // 2]:.1f} ms "
+              f"p99={gaps[int(len(gaps) * 0.99)]:.1f} ms max={gaps[-1]:.1f} ms, {frames} MJPEG frames") if gaps else "no intervals"
+    check("the 10 Hz drive tick holds 100 +/- 20 ms for 95% of intervals while a 30 Hz camera streams",
+          len(gaps) > 30 and frac >= 0.95 and frames >= 20, detail)
+
+
+def t_sse_rejects_image():
+    call("/robots/connect", CAR)
+    s = Stream(f"/robots/stream?ip={CAR['ip']}&domain_id={CAR['domain_id']}&topics={IMAGE_TOPIC}")
+    check("SSE refuses an image topic with 400 use_mjpeg", s.status == 400 and (s.error or {}).get("code") == "use_mjpeg",
+          f"HTTP {s.status} {s.error}")
+    s.close()
+
+
+def t_stream_route_errors():
+    call("/robots/connect", CAR)
+    q = f"ip={CAR['ip']}&domain_id={CAR['domain_id']}"
+    cases = {
+        "unknown topic": (f"/robots/stream?{q}&topics=/nope", 404, "unknown_topic"),
+        "non-image on MJPEG": (f"/robots/camera.mjpg?{q}&topic=/cmd_vel", 400, "use_sse"),
+        "unknown MJPEG topic": (f"/robots/camera.mjpg?{q}&topic=/nope", 404, "unknown_topic"),
+        "no worker": ("/robots/stream?ip=192.168.1.99&domain_id=49&topics=/scan", 502, "worker_gone"),
+        "no topics": (f"/robots/stream?{q}&topics=", 400, None),
+        "bad ip": ("/robots/stream?ip=bad%20ip&domain_id=1&topics=/scan", 400, None),
+        "bad domain": (f"/robots/stream?ip={CAR['ip']}&domain_id=999&topics=/scan", 400, None),
+    }
+    bad = []
+    for name, (path, status, code) in cases.items():
+        s, d, _, _ = call(path)
+        if s != status or (code and d.get("code") != code):
+            bad.append(f"{name}: HTTP {s} {d}")
+    s, d, _, _ = call(f"/robots/stream?{q}&topics=/cmd_vel", origin="http://evil.example")
+    if s != 403:
+        bad.append(f"foreign origin: HTTP {s}")
+    check("stream routes validate topic, kind, worker, input and origin", not bad, "; ".join(bad) or f"{len(cases) + 1} cases")
+
+
 if __name__ == "__main__":
     only = set(sys.argv[3:])
     for fn in [t_health, t_connect_real, t_connect_off, t_connect_nodriver, t_no_subscriber_fast, t_order_stop_wins,
                t_hold_and_deadman, t_stream_rate_and_latency, t_stale_command_dropped, t_channels_independent, t_release_stops, t_gripper, t_command_text, t_cors, t_bad_input,
                t_power_scales_twist, t_keep_last_one, t_stop_burst, t_stop_confirmed, t_stop_unreported,
                t_gripper_trigger, t_no_gripper, t_other_publishers, t_rmw_pinned,
-               t_stop_ignores_bad_power, t_bool_gripper_has_no_position, t_position_gripper_first_command, t_tap_not_falsely_confirmed]:
+               t_stop_ignores_bad_power, t_bool_gripper_has_no_position, t_position_gripper_first_command, t_tap_not_falsely_confirmed,
+               t_sse_scan, t_mjpeg_frames, t_unwatch_on_disconnect, t_stale_on_drop, t_no_cross_talk_streams,
+               t_drive_tick_under_load, t_sse_rejects_image, t_stream_route_errors]:
         if only and fn.__name__ not in only:
             continue
         try:
