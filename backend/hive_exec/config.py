@@ -24,6 +24,7 @@ def _f(name: str, default: Optional[float]) -> Optional[float]:
 
 @dataclass
 class QwenSettings:
+    provider: str = "vllm"
     base_url: str = ""
     model: str = "Qwen/Qwen3-8B"
     api_key: str = ""
@@ -39,6 +40,7 @@ class QwenSettings:
 
     @classmethod
     def from_env(cls) -> "QwenSettings":
+        provider=os.environ.get("QWEN_PROVIDER", "vllm").lower(),
         top_k = os.environ.get("QWEN_TOP_K", "20")
         return cls(
             base_url=os.environ.get("QWEN_BASE_URL", ""),
