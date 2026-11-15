@@ -40,7 +40,7 @@ class QwenSettings:
 
     @classmethod
     def from_env(cls) -> "QwenSettings":
-        provider=os.environ.get("QWEN_PROVIDER", "vllm").lower(),
+        provider = os.environ.get("QWEN_PROVIDER", "vllm").strip().lower()
         top_k = os.environ.get("QWEN_TOP_K", "20")
         return cls(
             provider=provider,
