@@ -334,7 +334,7 @@
 - Produces: `backendCommand({platform, repoDir, env}) -> {cmd: string, args: string[]}`.
   - On Linux: `{cmd: env.HIVE_PYTHON || "python3", args: [<repoDir>/backend/server.py]}`.
   - On `win32`: `{cmd: "wsl.exe", args: [...(env.HIVE_WSL_DISTRO ? ["-d", env.HIVE_WSL_DISTRO] : []), "--cd", toWslPath(repoDir), "--exec", "python3", "backend/server.py"]}`.
-  - `toWslPath("C:\\Users\\bhavy\\Projects\\hive") === "/mnt/c/Users/bhavy/Projects/hive"`.
+  - `toWslPath("C:\\Users\\alice\\Projects\\hive") === "/mnt/c/Users/alice/Projects/hive"`.
 - `hive.mjs` uses it, keeps `--backend-only` (from `exec` `9d585c3`), and on win32 does not pass `--open` failure through as fatal.
 
 - [ ] **Step 1: Write failing Vitest cases** for both platforms, the distro override and `toWslPath` (drive letter lower-cased, backslashes converted).
