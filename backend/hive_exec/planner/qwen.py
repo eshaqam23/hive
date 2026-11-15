@@ -65,6 +65,14 @@ class QwenPlanner(Planner):
         self.probe_result: Optional[ProbeResult] = None
         self.schema = plan_proposal_json_schema()
 
+        # Ollama sees scope as optional in Pydantic's generated schema because
+        # the field supports null for clarify/reject. HIVE still requires the key:
+        # "full" or "observation_stage" for plans, and null for clarify/reject.
+        # Requiring the key prevents Qwen from omitting it.
+        required = self.schema.setdefault("required", [])
+        if "scope" not in required:
+            required.append("scope")
+
     # ------------------------------------------------------------- provider helpers
     # CHANGE: Ollama and vLLM expose different HTTP APIs. Keep the provider
     # decision in this adapter so the rest of the Executive uses one interface.
