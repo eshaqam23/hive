@@ -223,6 +223,24 @@ def test_a_robots_json_that_cannot_be_read_keeps_the_last_good_copy(mock):
     assert "10.0.0.1:7" in _robots()
 
 
+def test_a_message_is_stamped_when_it_is_published_not_when_the_log_write_finishes(mock, monkeypatch):
+    """The e2e checks time what the robot got: a slow drive-mount read or write must not move the stamp."""
+    rclpy, node, tmp = mock
+    from geometry_msgs.msg import Twist
+    pub = node.create_publisher(Twist, "/cmd_vel", 10)
+    slow = rclpy._visible
+
+    def stalled():
+        time.sleep(0.3)  # like a robots.json read on /mnt/c under load
+        return slow()
+
+    monkeypatch.setattr(rclpy, "_visible", stalled)
+    t0 = time.time()
+    pub.publish(Twist())
+    logged = [json.loads(line) for line in (tmp / "robots" / "10.0.0.1_7.jsonl").read_text().splitlines()]
+    assert logged and logged[-1]["t"] - t0 < 0.1
+
+
 def test_trigger_service_and_graph(mock):
     rclpy, node, _ = mock
     from std_srvs.srv import Trigger

@@ -129,7 +129,7 @@ def t_hold_and_deadman():
     last = msgs[-1]["msg"] if msgs else None
     check("holding drive streams /cmd_vel continuously", len(moves) >= 8, f"{len(moves)} move messages while held (start HTTP {s})")
     check("deadman stops the robot when the client goes silent", bool(msgs) and not after and not moving(last),
-          f"move msgs >1.6 s after silence: {len(after)}; last={last!r}")
+          f"move msgs >1.6 s after silence: {len(after)} at {[round(m['t'] - t_quiet, 3) for m in after]} s; last move at {round(moves[-1]['t'] - t_quiet, 3) if moves else None} s; last={last!r}")
 
 
 def t_stream_rate_and_latency():

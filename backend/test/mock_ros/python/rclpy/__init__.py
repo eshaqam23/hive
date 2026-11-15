@@ -52,9 +52,11 @@ def _visible():
     ]
 
 
-def _log(key, topic, msg):
+def _log(key, topic, msg, t=None):
+    """t is when the message was sent; a slow drive-mount open or write must not make it look later."""
+    stamp = time.time() if t is None else t
     with open(os.path.join(ROOT, "robots", f"{key.replace(':', '_')}.jsonl"), "a") as f:
-        f.write(json.dumps({"t": time.time(), "topic": topic, "msg": msg, "pid": os.getpid()}) + "\n")
+        f.write(json.dumps({"t": stamp, "topic": topic, "msg": msg, "pid": os.getpid()}) + "\n")
 
 
 def _split(full_name):
@@ -72,9 +74,10 @@ class Publisher:
         self.node, self.msg_type, self.topic = node, msg_type, topic
 
     def publish(self, msg):
+        sent = time.time()  # stamped before any file access, which can stall on a Windows drive mounted in WSL
         for key, robot in _visible():
             if robot.get("subscribers", {}).get(self.topic, 0):
-                _log(key, self.topic, msg._yaml())
+                _log(key, self.topic, msg._yaml(), sent)
                 _graph.on_publish(self.node, robot, self.topic, msg)
 
 
