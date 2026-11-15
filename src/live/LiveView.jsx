@@ -1,26 +1,29 @@
 import React, { useEffect, useState } from "react";
 import RobotViewer from "../RobotViewer.jsx";
 import { PANELS } from "../viewers/panels.js";
-import { resolvePanel, stageTopics } from "../viewers/registry.js";
+import { resolvePanel } from "../viewers/registry.js";
+import { currentTab, MODEL_TAB as MODEL, stageTabs } from "./stage.js";
 
-const MODEL = "3D model";
 const TAB_LABEL = { image: "Camera", scan: "LiDAR" };
 
-export default function LiveView({ robot, selectedTopic, payloads = {}, stale = {}, imageStats = {}, error = null, base, onForceFull }) {
+/* With `active` and `onActive` the page owns the chosen tab (it subscribes only to what is on stage, R26);
+   without them the view keeps its own. */
+export default function LiveView({ robot, selectedTopic, payloads = {}, stale = {}, imageStats = {}, error = null, base, onForceFull, active: chosen, onActive }) {
   const connected = robot.status === "connected";
   const discovered = robot.discovery?.topics ?? [];
-  const staged = connected ? stageTopics(discovered) : [];
+  const tabs = connected ? stageTabs(discovered, selectedTopic) : [];
   const picked = connected ? discovered.find((t) => t.name === selectedTopic?.name) : null;
-  const extra = picked && !staged.some((t) => t.name === picked.name) ? [picked] : [];
-  const tabs = [...staged, ...extra];
-  const [active, setActive] = useState(null);
+  const [own, setOwn] = useState(null);
+  const controlled = onActive !== undefined;
+  const active = controlled ? chosen : own;
+  const setActive = controlled ? onActive : setOwn;
 
-  // a row clicked in the topic list opens in the view
+  // a row clicked in the topic list opens in the view (the page does this itself when it owns the tab)
   useEffect(() => {
-    if (picked) setActive(picked.name);
+    if (picked && !controlled) setOwn(picked.name);
   }, [picked?.name]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const current = active === MODEL ? null : (tabs.find((t) => t.name === active) ?? tabs[0] ?? null);
+  const current = currentTab(tabs, active);
   const label = (t) => (TAB_LABEL[t.kind] && tabs.find((x) => x.kind === t.kind) === t ? TAB_LABEL[t.kind] : t.name);
   const payload = current ? payloads[current.name] : null;
   const stats = current ? imageStats[current.name] : null;

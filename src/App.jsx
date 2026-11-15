@@ -4,9 +4,10 @@ import { PRESET_MODELS, snapshot } from "./robotModels.js";
 import LiveView from "./live/LiveView.jsx";
 import { useLiveStream } from "./live/useLiveStream.js";
 import { postCamera } from "./live/api.js";
-import { describeLink } from "./live/link.js";
+import { describeLink, displayMode, newerLink, stopUnconfirmed } from "./live/link.js";
 import { connectPatch, driveBody, gripperEnabled, gripperSliderShown, keepaliveBody, notFoundHint } from "./live/carHelpers.js";
-import { liveListTopics } from "./viewers/registry.js";
+import { currentTab, stageTabs } from "./live/stage.js";
+import { ALWAYS_WATCHED, watchSet } from "./live/watch.js";
 import { compactValue } from "./viewers/ValuePanel.jsx";
 
 const API_BASE_URL = import.meta.env.VITE_HIVE_API_URL || "http://127.0.0.1:8787/api";
@@ -321,6 +322,7 @@ function loadFleet() {
         status: "offline",
         reconnecting: false,
         mode: "Idle",
+        stopping: null,
         lastError: "",
         warnings: [],
         capabilities: presetRobot.capabilities,
@@ -372,6 +374,9 @@ const linkLost = (error) => Boolean(error.unreachable || LINK_LOST_CODES.has(err
 const retryable = (error) => ![400, 403, 404, 413].includes(error.status) && error.data?.code !== "no_ros";
 const RETRY_DELAYS_MS = [1000, 2000, 3000, 5000]; // then every 5 s, until it works or the operator disconnects
 const STATUS_CHECK_MS = 10000;
+const LINK_POLL_MS = 300; // after a stop, how often the page asks for the newest link
+const LINK_FOLLOW_MS = 6000; // and for how long: the worker resends a stop for 5 s
+const REPLACED_MODE = "Reconnected — stop sent";
 const ACTIVITY_LIMIT = 200;
 let activityId = 0;
 
@@ -398,7 +403,7 @@ function replySummary(path, data) {
     case "/robots/status":
       return `${data.nodes?.length ?? 0} nodes answering`;
     case "/robots/drive":
-      return data.streaming ? `robot driving ${ACTION_TEXT[data.action]}, streaming /cmd_vel at 20 Hz` : "robot stopped (zero Twist sent)";
+      return data.streaming ? `robot driving ${ACTION_TEXT[data.action]}, streaming /cmd_vel at 10 Hz` : "stop sent (zero Twist burst), waiting for the car to confirm";
     case "/robots/control":
       return data.topic ? `published on ${data.topic}` : `robot ${data.streaming ? "driving" : "stopped"}`;
     case "/robots/command":
@@ -455,11 +460,12 @@ export default function App() {
   const [power, setPower] = useState(0.5);
   const powerRef = useRef(0.5);
   powerRef.current = power;
-  const [replyLinks, setReplyLinks] = useState({}); // robot id -> link from the newest drive/keepalive reply
+  const [links, setLinks] = useState({}); // robot id -> newest link (highest seq) from any route (R28)
   const [messages, setMessages] = useState([{ role: "agent", text: "Hive is ready." }]);
   const pressTimer = useRef(0);
   const driveRef = useRef({ robotId: null, action: null, timer: 0 });
   const retryRef = useRef({}); // robot id -> the connect loop that is still trying
+  const followRef = useRef({}); // robot id -> timer of the poll that follows a stop's confirmation
   const [activity, setActivity] = useState({}); // robot id -> newest-first log entries
   const robotsRef = useRef(robots);
   robotsRef.current = robots;
@@ -493,9 +499,42 @@ export default function App() {
     openRobot(robot);
   }
 
+  /* A patch that sets a new mode ends the stop display (robot.stopping) unless it sets that too. */
   function updateRobot(id, patch) {
-    setRobots((current) => current.map((robot) => (robot.id === id ? { ...robot, ...patch } : robot)));
+    const next = "mode" in patch && !("stopping" in patch) ? { ...patch, stopping: null } : patch;
+    setRobots((current) => current.map((robot) => (robot.id === id ? { ...robot, ...next } : robot)));
   }
+
+  /* Keep the newest link per robot, whatever route it came by: a stale one never overwrites a newer one. */
+  function noteLink(robotId, link) {
+    if (!link) return;
+    setLinks((all) => {
+      const newest = newerLink(all[robotId], link);
+      return newest === all[robotId] ? all : { ...all, [robotId]: newest };
+    });
+  }
+
+  /* After a stop, ask for the newest link until the car confirms (or the worker's 5 s of resends are
+     over), so the mode and the Home badge follow the confirmation even where no live stream is open. */
+  function followLink(robot) {
+    window.clearTimeout(followRef.current[robot.id]);
+    const until = Date.now() + LINK_FOLLOW_MS;
+    const poll = async () => {
+      const current = robotsRef.current.find((r) => r.id === robot.id);
+      if (current?.status !== "connected") return;
+      let link = null;
+      try {
+        link = (await postApi("/robots/link", target(current))).link;
+        noteLink(robot.id, link);
+      } catch {
+        // a lost link is the status check's business
+      }
+      if (link?.stop !== "confirmed" && Date.now() < until) followRef.current[robot.id] = window.setTimeout(poll, LINK_POLL_MS);
+    };
+    followRef.current[robot.id] = window.setTimeout(poll, LINK_POLL_MS);
+  }
+
+  useEffect(() => () => Object.values(followRef.current).forEach((timer) => window.clearTimeout(timer)), []);
 
   /* A robot that may be live is told to stop and disconnect as it leaves the fleet. If that request
      fails, the backend's deadman still stops a robot whose keepalives have ended. */
@@ -575,10 +614,12 @@ export default function App() {
           return;
         }
         delete retryRef.current[robot.id];
+        // a new worker's links start afresh (and if the backend itself restarted, its seq did too)
+        setLinks((all) => (all[robot.id] ? { ...all, [robot.id]: null } : all));
         updateRobot(robot.id, {
           status: "connected",
           reconnecting: false,
-          mode: lostReason ? "Reconnected" : "Ready",
+          mode: found.worker_replaced ? REPLACED_MODE : lostReason ? "Reconnected" : "Ready",
           lastError: "",
           warnings: found.warnings || [],
           discovery: {
@@ -590,6 +631,7 @@ export default function App() {
           ...connectPatch(found),
         });
         logActivity(robot.id, "ok", run.attempt > 1 ? `Connected after ${run.attempt} attempts.` : "Connected.");
+        if (found.worker_replaced) workerReplaced(current);
         (found.warnings || []).forEach((w) => logActivity(robot.id, "warn", w));
       } catch (error) {
         if (retryRef.current[robot.id] !== run) return;
@@ -607,6 +649,12 @@ export default function App() {
       }
     };
     attempt();
+  }
+
+  /* R29: the backend replaced a worker that had died (crash, kill); the new one stopped the car first. */
+  function workerReplaced(robot) {
+    logActivity(robot.id, "warn", "The car's ROS 2 worker had stopped and was restarted; it sent the car a stop before anything else.");
+    followLink(robot);
   }
 
   function stopRetrying(robotId) {
@@ -649,16 +697,6 @@ export default function App() {
     setPressed(null);
   }
 
-  function noteLink(robot, reply) {
-    const link = reply?.link;
-    if (!link) return;
-    setReplyLinks((all) => {
-      const old = all[robot.id];
-      const same = old && old.stop === link.stop && old.last_line === link.last_line && old.other_publishers === link.other_publishers && old.reporting === link.reporting;
-      return same ? all : { ...all, [robot.id]: link };
-    });
-  }
-
   /* a failed drive request either lost the link (reconnect) or was refused (say why, stay connected) */
   function driveFailed(robot, error, mode) {
     if (linkLost(error)) return keepConnecting(robot, error.message);
@@ -668,7 +706,7 @@ export default function App() {
   async function keepDriving(robot) {
     if (driveRef.current.robotId !== robot.id) return;
     try {
-      noteLink(robot, await robotApi(robot, "/robots/drive/keepalive", keepaliveBody(target(robot), powerRef.current), { quiet: true }));
+      noteLink(robot.id, (await robotApi(robot, "/robots/drive/keepalive", keepaliveBody(target(robot), powerRef.current), { quiet: true })).link);
       if (driveRef.current.robotId === robot.id) driveRef.current.keepalives += 1;
     } catch (error) {
       if (driveRef.current.robotId !== robot.id) return;
@@ -693,7 +731,7 @@ export default function App() {
     setPressed(action);
     updateRobot(robot.id, { mode: `Driving ${DRIVE_LABEL[action]}`, lastError: "" });
     try {
-      noteLink(robot, await robotApi(robot, "/robots/drive", driveBody(ordered(robot, action), powerRef.current)));
+      noteLink(robot.id, (await robotApi(robot, "/robots/drive", driveBody(ordered(robot, action), powerRef.current))).link);
       if (driveRef.current.action === action) updateRobot(robot.id, { lastCommand: action });
     } catch (error) {
       if (driveRef.current.action !== action) return; // already released or switched
@@ -715,10 +753,16 @@ export default function App() {
     }
     endDriveLocally();
     flash("stop");
-    updateRobot(robot.id, { mode: "Stopping…" });
+    // the mode follows the car's confirmation from here (displayMode): never "Stopped" before it
+    updateRobot(robot.id, { mode: "Stopping…", stopping: { seq: null } });
     try {
-      noteLink(robot, await robotApi(robot, "/robots/drive", ordered(robot, "stop")));
-      updateRobot(robot.id, { mode: "Stopped", lastCommand: "stop", lastError: "" });
+      const link = (await robotApi(robot, "/robots/drive", ordered(robot, "stop"))).link;
+      noteLink(robot.id, link);
+      // only links at least as new as this reply speak for this stop; a newer command may have taken over
+      setRobots((current) =>
+        current.map((r) => (r.id === robot.id && r.stopping ? { ...r, stopping: { seq: link?.seq ?? -Infinity }, lastCommand: "stop", lastError: "" } : r)),
+      );
+      followLink(robot);
     } catch (error) {
       if (error.data?.superseded) return; // a newer command took over
       driveFailed(robot, error, "Stop failed");
@@ -784,7 +828,14 @@ export default function App() {
         .filter((r) => r.status === "connected")
         .forEach(async (robot) => {
           try {
-            await robotApi(robot, "/robots/status", target(robot));
+            const status = await robotApi(robot, "/robots/status", target(robot));
+            noteLink(robot.id, status.link);
+            if (status.worker_replaced) {
+              // the old worker died and this check started a new one, which stopped the car first
+              if (driveRef.current.robotId === robot.id) endDriveLocally();
+              updateRobot(robot.id, { mode: REPLACED_MODE });
+              workerReplaced(robot);
+            }
           } catch (error) {
             const current = robotsRef.current.find((r) => r.id === robot.id);
             if (current?.status !== "connected") return;
@@ -903,6 +954,7 @@ export default function App() {
         >
           {view === "home" && (
             <HomeView
+              links={links}
               messages={messages}
               onAdd={setAddingPreset}
               onOpen={openRobot}
@@ -914,14 +966,16 @@ export default function App() {
           {view === "robot" && selectedRobot && (
             <RobotView
               activity={activity[selectedRobot.id] || []}
+              key={selectedRobot.id}
+              link={links[selectedRobot.id] ?? null}
               onBack={() => setView("home")}
               onClearActivity={() => setActivity((all) => ({ ...all, [selectedRobot.id]: [] }))}
               onCamera={(settings) => setCamera(selectedRobot, settings)}
+              onLink={(link) => noteLink(selectedRobot.id, link)}
               onPower={setPower}
               onSelectTopic={setSelectedTopic}
               power={power}
               pressed={pressed}
-              replyLink={replyLinks[selectedRobot.id]}
               robot={selectedRobot}
               selectedTopic={selectedTopic}
               {...robotActions}
@@ -934,6 +988,7 @@ export default function App() {
 
         {showDock && (
           <DriveDock
+            link={links[selectedRobot.id] ?? null}
             onOpen={() => openRobot(selectedRobot)}
             pressed={pressed}
             robot={selectedRobot}
@@ -1248,7 +1303,7 @@ function LibraryList({ robots, selectedRobotId, onOpen, onAdd, className = "" })
 
 /* ================================================================== home */
 
-function HomeView({ robots, messages, onAdd, onOpen, setView, onConnect, onDisconnect, onRemove }) {
+function HomeView({ robots, links = {}, messages, onAdd, onOpen, setView, onConnect, onDisconnect, onRemove }) {
   const live = robots.filter((robot) => robot.status === "connected").length;
   const domains = robots.map((robot) => robot.domainId).filter(Number.isInteger);
   const domainRange = domains.length
@@ -1311,6 +1366,7 @@ function HomeView({ robots, messages, onAdd, onOpen, setView, onConnect, onDisco
             {robots.map((robot) => (
               <RobotCard
                 key={robot.id}
+                link={links[robot.id] ?? null}
                 onConnect={onConnect}
                 onDisconnect={onDisconnect}
                 onOpen={onOpen}
@@ -1341,16 +1397,30 @@ function HomeView({ robots, messages, onAdd, onOpen, setView, onConnect, onDisco
 
 /* A robot's card: its car's 3D model with its information. The card opens the robot; the play button
    (Spotify) connects it. */
-function RobotCard({ robot, onOpen, onConnect, onDisconnect, onRemove }) {
+function RobotCard({ robot, link = null, onOpen, onConnect, onDisconnect, onRemove }) {
   const preset = PRESET_ROBOTS[robot.preset];
   const live = robot.status === "connected";
+  const danger = stopUnconfirmed(robot, link);
   return (
-    <article className="group relative overflow-hidden rounded-2xl border border-line bg-card transition-colors hover:border-line-strong">
+    <article
+      className={`group relative overflow-hidden rounded-2xl border bg-card transition-colors ${danger ? "border-danger" : "border-line hover:border-line-strong"}`}
+    >
       <button aria-label={`Open ${robot.name}`} className="absolute inset-0 z-0 rounded-2xl" onClick={() => onOpen(robot)} type="button" />
       <div className="model pointer-events-none relative aspect-[16/10]" style={{ background: stageBg(0.16) }}>
         <ModelImage alt={modelAlt(robot.preset)} className="absolute inset-[4%] h-[92%] w-[92%]" preset={robot.preset} />
-        <span className="absolute left-3 top-3 rounded-full bg-panel/80 px-2.5 py-1 backdrop-blur">
-          <StatusBadge compact status={displayStatus(robot)} />
+        <span className="absolute left-3 top-3 flex flex-col items-start gap-1.5">
+          <span className="rounded-full bg-panel/80 px-2.5 py-1 backdrop-blur">
+            <StatusBadge compact status={displayStatus(robot)} />
+          </span>
+          {danger && (
+            <span
+              className="rounded-full bg-danger px-2.5 py-1 text-[13px] font-semibold text-panel"
+              role="status"
+              title="The car has not confirmed the last stop: it may still be moving"
+            >
+              Stop not confirmed
+            </span>
+          )}
         </span>
         <button
           aria-label={`Remove ${robot.name}`}
@@ -1503,18 +1573,28 @@ function RobotView({
   power,
   onPower,
   onCamera,
-  replyLink,
+  link: savedLink = null,
+  onLink,
 }) {
   const preset = PRESET_ROBOTS[robot.preset];
   const listed = robot.status === "connected" ? robot.discovery?.topics ?? [] : [];
-  const live = useLiveStream({
-    base: API_BASE_URL,
-    robot,
-    topics: liveListTopics(listed).map((t) => t.name),
-    images: listed.filter((t) => t.kind === "image").map((t) => t.name),
-    enabled: true,
-  });
-  const link = live.link ?? replyLink ?? null;
+  /* R26: the one stream carries only what is viewed: the stage topic, /ros_data and /esp_data, and the
+     Topics rows the operator watches. Changing any of these reopens it. */
+  const [stage, setStage] = useState(null); // the Live view tab the operator chose (null: the first one)
+  const [watched, setWatched] = useState([]);
+  const onStage = currentTab(stageTabs(listed, selectedTopic), stage);
+  const { topics, images } = watchSet({ listed, stage: onStage, watched });
+  const live = useLiveStream({ base: API_BASE_URL, robot, topics, images, enabled: true });
+  useEffect(() => {
+    if (live.link) onLink?.(live.link);
+  }, [live.link]); // eslint-disable-line react-hooks/exhaustive-deps
+  const link = newerLink(savedLink, live.link); // R28: the newest from any route
+  const mode = displayMode(robot, link);
+  const selectTopic = (topic) => {
+    onSelectTopic(topic);
+    setStage(topic.name);
+  };
+  const toggleWatch = (name) => setWatched((all) => (all.includes(name) ? all.filter((n) => n !== name) : [...all, name]));
   return (
     <div>
       <div className="flex items-center justify-between gap-4 px-8 pt-5">
@@ -1541,7 +1621,17 @@ function RobotView({
           className="relative aspect-[16/9] overflow-hidden rounded-2xl border border-line xl:aspect-[16/11]"
           style={{ background: stageBg(0.14) }}
         >
-          <LiveView base={API_BASE_URL} error={live.error} imageStats={live.imageStats} payloads={live.payloads} robot={robot} selectedTopic={selectedTopic} stale={live.stale} />
+          <LiveView
+            active={stage}
+            base={API_BASE_URL}
+            error={live.error}
+            imageStats={live.imageStats}
+            onActive={setStage}
+            payloads={live.payloads}
+            robot={robot}
+            selectedTopic={selectedTopic}
+            stale={live.stale}
+          />
         </div>
 
         <div className="min-w-0 animate-enter">
@@ -1571,7 +1661,13 @@ function RobotView({
                       ? "Reconnecting…"
                       : "Connecting…"
                     : "Not connected"}
-                <span className="font-normal text-muted"> · {robot.mode}</span>
+                <span
+                  className={mode.level === "danger" ? "font-semibold text-danger" : mode.level === "warn" ? "font-normal text-warn" : "font-normal text-muted"}
+                  data-testid="robot-mode"
+                >
+                  {" "}
+                  · {mode.text}
+                </span>
               </p>
               {robot.status === "connected" && robot.discovery && (
                 <p className="mt-1 text-[13px] text-muted">
@@ -1623,11 +1719,15 @@ function RobotView({
             Topics
           </h2>
           <TopicList
-            onSelectTopic={onSelectTopic}
+            onSelectTopic={selectTopic}
+            onToggleWatch={robot.status === "connected" ? toggleWatch : undefined}
             payloads={live.payloads}
+            pinned={new Set([...ALWAYS_WATCHED, ...(onStage ? [onStage.name] : [])])}
             selectedTopic={selectedTopic}
+            streamed={new Set([...topics, ...images])}
             topicErrors={live.topicErrors}
             topics={listed.length ? listed.filter((t) => !["/rosout", "/parameter_events"].includes(t.name)) : robot.topics}
+            watched={watched}
           />
 
           <h3 className="mt-8 text-[15px] font-bold">Capabilities</h3>
@@ -1912,29 +2012,39 @@ function DrivePad({ robot, onPress, onRelease, onStop, onGripper, pressed, power
   );
 }
 
-const TOPIC_ERROR = { unknown_topic: "not on the car", use_mjpeg: "camera view only", watch_failed: "cannot be watched" };
+const TOPIC_ERROR = {
+  unknown_topic: "not on the car",
+  use_mjpeg: "camera view only",
+  watch_failed: "cannot be watched",
+  too_many: "too many topics watched",
+};
+const TOPIC_COLUMNS = "grid-cols-[28px_minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)]";
 
-/* Spotify's tracklist: the selected topic plays its bars instead of its number. */
-function TopicList({ topics, selectedTopic, onSelectTopic, payloads = {}, topicErrors = {} }) {
+/* Spotify's tracklist: the selected topic plays its bars instead of its number. A row shows live values
+   only while it is streamed (R26): the link topics and the one on stage always are; any other row has a
+   watch toggle. Clicking a row opens it in the Live view. */
+function TopicList({ topics, selectedTopic, onSelectTopic, payloads = {}, topicErrors = {}, streamed = new Set(), pinned = new Set(), watched = [], onToggleWatch }) {
   return (
     <div className="mt-4">
-      <div
-        aria-hidden="true"
-        className="grid grid-cols-[28px_minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)] gap-4 border-b border-line px-4 pb-2 text-[13px] font-medium text-muted"
-      >
-        <span>#</span>
-        <span>Topic</span>
-        <span>Type</span>
-        <span>Live</span>
+      <div aria-hidden="true" className="grid grid-cols-[minmax(0,1fr)_76px] gap-2 border-b border-line pb-2 pr-2 text-[13px] font-medium text-muted">
+        <span className={`grid ${TOPIC_COLUMNS} gap-4 px-4`}>
+          <span>#</span>
+          <span>Topic</span>
+          <span>Type</span>
+          <span>Live</span>
+        </span>
+        <span className="text-center">Watch</span>
       </div>
       <ol className="mt-2 grid gap-0.5">
         {topics.map((topic, i) => {
           const active = selectedTopic?.name === topic.name;
+          const live = streamed.has(topic.name);
+          const isWatched = watched.includes(topic.name);
           return (
-            <li key={topic.name}>
+            <li className="grid grid-cols-[minmax(0,1fr)_76px] items-center gap-2 pr-2" key={topic.name}>
               <button
                 aria-pressed={active}
-                className={`grid w-full grid-cols-[28px_minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)] items-center gap-4 rounded-md px-4 py-3 text-left transition-colors ${
+                className={`grid w-full ${TOPIC_COLUMNS} items-center gap-4 rounded-md px-4 py-3 text-left transition-colors ${
                   active ? "bg-raised" : "hover:bg-card"
                 }`}
                 onClick={() => onSelectTopic(topic)}
@@ -1951,11 +2061,35 @@ function TopicList({ topics, selectedTopic, onSelectTopic, payloads = {}, topicE
                 </span>
                 <span className="truncate font-mono text-[13px] text-muted" translate="no">
                   {topic.kind && <span className="mr-2 text-faint">{topic.kind}</span>}
-                  {payloads[topic.name]?.hz != null && <span className="mr-2">{Number(payloads[topic.name].hz).toFixed(1)} Hz</span>}
-                  {topicErrors[topic.name] && <span className="text-warn">{TOPIC_ERROR[topicErrors[topic.name]] || topicErrors[topic.name]}</span>}
-                  {topic.kind === "value" && payloads[topic.name] && <span className="text-ink">{compactValue(payloads[topic.name].data)}</span>}
+                  {live && payloads[topic.name]?.hz != null && <span className="mr-2">{Number(payloads[topic.name].hz).toFixed(1)} Hz</span>}
+                  {live && topicErrors[topic.name] && <span className="text-warn">{TOPIC_ERROR[topicErrors[topic.name]] || topicErrors[topic.name]}</span>}
+                  {live && topic.kind === "value" && payloads[topic.name] && <span className="text-ink">{compactValue(payloads[topic.name].data)}</span>}
                 </span>
               </button>
+              {topic.kind === "image" ? (
+                <span className="text-center text-[12px] text-faint" title="Camera topics stream in the Live view">
+                  view
+                </span>
+              ) : pinned.has(topic.name) ? (
+                <span className="text-center text-[12px] font-medium text-live" title="Always streamed while this page is open">
+                  live
+                </span>
+              ) : (
+                onToggleWatch && (
+                  <button
+                    aria-label={`Watch ${topic.name}`}
+                    aria-pressed={isWatched}
+                    className={`min-h-8 rounded-full border px-2 text-[12px] font-medium transition-colors ${
+                      isWatched ? "border-coral text-coral" : "border-line text-muted hover:text-ink"
+                    }`}
+                    onClick={() => onToggleWatch(topic.name)}
+                    title={isWatched ? "Stop streaming this topic" : "Stream this topic's live values"}
+                    type="button"
+                  >
+                    {isWatched ? "watching" : "watch"}
+                  </button>
+                )
+              )}
             </li>
           );
         })}
@@ -2067,9 +2201,12 @@ function CommandView({ robots, messages, onSend }) {
  * A floating transport for the connected robot, so it can be driven from any page.
  */
 
-function DriveDock({ robot, onPress, onRelease, onStop, onGripper, onOpen, pressed }) {
+function DriveDock({ robot, link = null, onPress, onRelease, onStop, onGripper, onOpen, pressed }) {
   const gripper = robot.controls.filter((c) => c.action.startsWith("gripper"));
   const order = ["left", "backward", "stop", "forward", "right"];
+  /* Home has no banner, so the dock carries the stop's outcome: never "stopped" before the car confirms */
+  const stop = stopUnconfirmed(robot, link) ? displayMode({ ...robot, stopping: { seq: -Infinity } }, link) : robot.stopping ? displayMode(robot, link) : null;
+  const STOP_TEXT = { danger: "text-danger font-semibold", warn: "text-warn", ok: "text-live", muted: "text-muted" };
   return (
     <section
       aria-label={`Driving ${robot.name}`}
@@ -2079,8 +2216,8 @@ function DriveDock({ robot, onPress, onRelease, onStop, onGripper, onOpen, press
         <ModelThumb className="rounded-full" preset={robot.preset} size={44} />
         <span className="min-w-0">
           <span className="block max-w-[14ch] truncate text-[14px] font-semibold text-live">{robot.name}</span>
-          <span className="block whitespace-nowrap text-[13px] text-muted">
-            {robot.lastCommand ? `Last: ${robot.lastCommand.replaceAll("_", " ")}` : "Ready to drive"}
+          <span className={`block whitespace-nowrap text-[13px] ${stop ? STOP_TEXT[stop.level] : "text-muted"}`} role={stop?.level === "danger" ? "alert" : undefined}>
+            {stop ? stop.text : robot.lastCommand ? `Last: ${robot.lastCommand.replaceAll("_", " ")}` : "Ready to drive"}
           </span>
         </span>
       </button>

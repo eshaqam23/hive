@@ -25,7 +25,7 @@ describe("CameraPanel", () => {
     const { rerender } = render(<CameraPanel base="http://h/api" robot={robot} stats={stats} topic={topic} />);
     const img = await screen.findByRole("img");
     expect(img.getAttribute("src")).toContain("/robots/camera.mjpg?ip=10.0.0.5&domain_id=42&topic=%2Fcam");
-    expect(screen.getByText("14.5 fps · 0.12 MB/s · 640×480")).toBeTruthy();
+    expect(screen.getByText("14.5 fps · 0.12 MB/s from car · 640×480")).toBeTruthy(); // raw rate the car sends (final audit #8)
     expect(screen.queryByText("Stale")).toBeNull();
     rerender(<CameraPanel base="http://h/api" robot={robot} stale stats={stats} topic={topic} />);
     expect(screen.getByText("Stale")).toBeTruthy();

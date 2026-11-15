@@ -53,12 +53,50 @@ describe("useLiveStream", () => {
     expect(src.closed).toBe(true);
   });
 
-  it("does not open when disabled or not connected or no topics", () => {
+  it("does not open when disabled or not connected", () => {
     setEventSourceFactory((url) => new FakeSource(url));
     renderHook(() => useLiveStream({ base: "b", robot, topics: ["/scan"], enabled: false }));
     renderHook(() => useLiveStream({ base: "b", robot: { ...robot, status: "offline" }, topics: ["/scan"], enabled: true }));
-    renderHook(() => useLiveStream({ base: "b", robot, topics: [], enabled: true }));
     expect(FakeSource.instances).toHaveLength(0);
+  });
+
+  it("opens with no topics at all, so the page still gets link events (R27)", () => {
+    setEventSourceFactory((url) => new FakeSource(url));
+    const { result } = renderHook(() => useLiveStream({ base: "b", robot, topics: [], enabled: true }));
+    expect(FakeSource.instances).toHaveLength(1);
+    expect(FakeSource.instances[0].url).toMatch(/topics=$/);
+    act(() => FakeSource.instances[0].emit("link", { stop: "idle", seq: 3 }));
+    expect(result.current.link.seq).toBe(3);
+  });
+
+  it("reopens exactly one stream when the watched set changes, keeping the link and still-wanted data (R26)", () => {
+    setEventSourceFactory((url) => new FakeSource(url));
+    const { result, rerender } = renderHook((props) => useLiveStream({ base: "b", robot, enabled: true, ...props }), {
+      initialProps: { topics: ["/ros_data", "/scan"] },
+    });
+    const first = FakeSource.instances[0];
+    act(() => {
+      first.emit("link", { stop: "confirmed", seq: 7 });
+      first.emit("data", { topic: "/ros_data", data: { data: "0,1,0,1" } });
+      first.emit("data", { topic: "/scan", data: {} });
+    });
+    rerender({ topics: ["/ros_data", "/tf"] });
+    const live = FakeSource.instances.filter((s) => !s.closed);
+    expect(first.closed).toBe(true);
+    expect(live).toHaveLength(1);
+    expect(live[0].url).toContain(encodeURIComponent("/ros_data,/tf"));
+    expect(result.current.link.seq).toBe(7);
+    expect(Object.keys(result.current.payloads)).toEqual(["/ros_data"]);
+  });
+
+  it("starts empty again for another robot", () => {
+    setEventSourceFactory((url) => new FakeSource(url));
+    const { result, rerender } = renderHook((props) => useLiveStream({ base: "b", topics: ["/a"], enabled: true, ...props }), {
+      initialProps: { robot },
+    });
+    act(() => FakeSource.instances[0].emit("link", { stop: "unconfirmed", seq: 9 }));
+    rerender({ robot: { ...robot, host: "10.0.0.2" } });
+    expect(result.current.link).toBeNull();
   });
 });
 
@@ -121,6 +159,16 @@ describe("useLiveStream resilience", () => {
     expect(result.current.stale["/tf"]).toBeUndefined();
     act(() => src.listeners.data({ data: "not json" }));
     expect(Object.keys(result.current.payloads)).toHaveLength(0);
+  });
+
+  it("keeps the newest link by seq even if an older one arrives later on the stream", () => {
+    setEventSourceFactory((url) => new FakeSource(url));
+    const { result } = renderHook(() => useLiveStream({ base: "b", robot, topics: [], enabled: true }));
+    act(() => {
+      FakeSource.instances[0].emit("link", { stop: "pending", seq: 20 });
+      FakeSource.instances[0].emit("link", { stop: "confirmed", seq: 12 });
+    });
+    expect(result.current.link).toEqual({ stop: "pending", seq: 20 });
   });
 
   it("opens a stream for image stats alone", () => {

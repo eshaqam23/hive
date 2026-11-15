@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { liveListTopics, resolvePanel, stageTopics, VIEWERS } from "./registry.js";
+import { resolvePanel, stageTopics, VIEWERS } from "./registry.js";
 
 const t = (name, kind, type = "x/Y") => ({ name, kind, type });
 
@@ -33,12 +33,5 @@ describe("stageTopics", () => {
   });
   it("keeps raw when no compressed twin", () => {
     expect(stageTopics([t("/cam", "image")]).map((x) => x.name)).toEqual(["/cam"]);
-  });
-});
-
-describe("liveListTopics", () => {
-  it("drops images and noise topics", () => {
-    const out = liveListTopics([t("/cam", "image"), t("/rosout", "generic"), t("/parameter_events", "generic"), t("/v", "value")]);
-    expect(out.map((x) => x.name)).toEqual(["/v"]);
   });
 });

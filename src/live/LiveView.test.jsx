@@ -50,6 +50,17 @@ describe("LiveView", () => {
     expect(screen.getByText("2.50 MB/s from car")).toBeTruthy();
   });
 
+  it("lets the page own the active tab, so the page knows what is on stage (R26)", () => {
+    const onActive = vi.fn();
+    const { rerender } = render(<LiveView active="/scan" onActive={onActive} robot={robot()} />);
+    expect(screen.getByTestId("lidar")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "Camera" }));
+    expect(onActive).toHaveBeenCalledWith("/cam/image_raw");
+    expect(screen.getByTestId("lidar")).toBeTruthy(); // nothing changes until the page says so
+    rerender(<LiveView active="3D model" onActive={onActive} robot={robot()} />);
+    expect(screen.getByTestId("model")).toBeTruthy();
+  });
+
   it("passes the stale flag and shows the interrupted-stream state", () => {
     render(<LiveView error="Live stream interrupted, reconnecting…" robot={robot()} stale={{ "/cam/image_raw": true }} />);
     expect(screen.getByTestId("camera").textContent).toContain("stale");

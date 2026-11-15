@@ -31,9 +31,3 @@ export function stageTopics(topics) {
   );
   return [...staged.filter((t) => t.kind === "image"), ...staged.filter((t) => t.kind !== "image")];
 }
-
-const HIDDEN = new Set(["/rosout", "/parameter_events"]);
-
-export function liveListTopics(topics) {
-  return topics.filter((t) => t.kind !== "image" && !HIDDEN.has(t.name));
-}

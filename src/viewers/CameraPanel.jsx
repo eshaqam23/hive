@@ -8,7 +8,7 @@ export const statsLine = (stats) =>
   stats
     ? [
         stats.hz != null ? `${Number(stats.hz).toFixed(1)} fps` : null,
-        stats.bytes_per_s != null ? `${(stats.bytes_per_s / 1e6).toFixed(2)} MB/s` : null,
+        stats.bytes_per_s != null ? `${(stats.bytes_per_s / 1e6).toFixed(2)} MB/s from car` : null,
         stats.width && stats.height ? `${stats.width}×${stats.height}` : null,
       ]
         .filter(Boolean)
