@@ -185,7 +185,7 @@ def test_a_worker_killed_mid_drive_is_replaced_by_one_that_stops_the_car(mock_co
         assert any("x: 0.25" in m["msg"] for m in robot_log(mock_copy) if m["pid"] == old)
         os.killpg(old, signal.SIGKILL)
         worker.process.wait(timeout=5)
-        killed_at = time.time()
+        killed_at = time.monotonic()
         worker.start()
         assert worker.take_replaced() is True
         assert worker.take_replaced() is False  # reported once

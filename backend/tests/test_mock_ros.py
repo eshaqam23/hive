@@ -235,7 +235,7 @@ def test_a_message_is_stamped_when_it_is_published_not_when_the_log_write_finish
         return slow()
 
     monkeypatch.setattr(rclpy, "_visible", stalled)
-    t0 = time.time()
+    t0 = time.monotonic()
     pub.publish(Twist())
     logged = [json.loads(line) for line in (tmp / "robots" / "10.0.0.1_7.jsonl").read_text().splitlines()]
     assert logged and logged[-1]["t"] - t0 < 0.1

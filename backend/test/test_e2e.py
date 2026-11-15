@@ -29,17 +29,17 @@ def call(path, body=None, method=None, origin=ORIGIN, timeout=25):
     req.add_header("Content-Type", "application/json")
     if origin:
         req.add_header("Origin", origin)
-    t0 = time.time()
+    t0 = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, json.loads(r.read() or b"{}"), time.time() - t0, dict(r.headers)
+            return r.status, json.loads(r.read() or b"{}"), time.monotonic() - t0, dict(r.headers)
     except urllib.error.HTTPError as e:
         raw = e.read()
         try:
             payload = json.loads(raw or b"{}")
         except ValueError:
             payload = {"raw": raw.decode(errors="replace")}
-        return e.code, payload, time.time() - t0, dict(e.headers)
+        return e.code, payload, time.monotonic() - t0, dict(e.headers)
 
 
 def received(robot):
@@ -121,7 +121,7 @@ def t_hold_and_deadman():
     for _ in range(8):                         # 2 s of keepalives
         time.sleep(0.25)
         call("/robots/drive/keepalive", CAR)
-    t_quiet = time.time()
+    t_quiet = time.monotonic()
     time.sleep(3.0)                            # client vanishes: no keepalive, no stop
     msgs = [m for m in received(CAR) if m["topic"] == "/cmd_vel"]
     moves = [m for m in msgs if moving(m["msg"])]
@@ -136,7 +136,7 @@ def t_stream_rate_and_latency():
     """A connected robot's worker is already running: a press reaches the robot at once, and the
     stream runs at the worker's 10 Hz."""
     reset()
-    t_press = time.time()
+    t_press = time.monotonic()
     s, _, dt, _ = call("/robots/drive", {**CAR, "action": "forward"})
     for _ in range(8):
         time.sleep(0.25)
@@ -180,7 +180,7 @@ def t_release_stops():
     reset()
     call("/robots/drive", {**CAR, "action": "left"})
     time.sleep(1.6)
-    t_rel = time.time()
+    t_rel = time.monotonic()
     call("/robots/drive", {**CAR, "action": "stop"})
     time.sleep(1.5)
     msgs = [m for m in received(CAR) if m["topic"] == "/cmd_vel"]
@@ -228,8 +228,8 @@ def zero_twists(robot):
 def link_after_stop(robot, want, limit=1.0):
     """Stop, then poll keepalive until link.stop == want (or the limit passes). Returns the last link."""
     call("/robots/drive", {**robot, "action": "stop"})
-    t0, link = time.time(), {}
-    while time.time() - t0 < limit:
+    t0, link = time.monotonic(), {}
+    while time.monotonic() - t0 < limit:
         s, d, _, _ = call("/robots/drive/keepalive", robot)
         link = d.get("link") or {}
         if link.get("stop") == want:
@@ -315,10 +315,10 @@ def t_other_publishers():
     robots.json (cached 30 ms, plus drive-mount lag) and polls for up to 2 s instead of reading once."""
     restore = set_mock_robot("192.168.1.20:42", extra_cmd_vel_publishers=1)
     try:
-        s, d, end = 0, {}, time.time() + 2.0
+        s, d, end = 0, {}, time.monotonic() + 2.0
         while True:
             s, d, _, _ = call("/robots/connect", CAR)
-            if (s == 200 and d.get("other_publishers") == 1) or time.time() >= end:
+            if (s == 200 and d.get("other_publishers") == 1) or time.monotonic() >= end:
                 break
             time.sleep(0.1)
     finally:
@@ -420,7 +420,7 @@ class Stream:
                         if i < 0:
                             buf = buf[-len(PART_HEAD):]
                             break
-                        self.parts.append(time.time())
+                        self.parts.append(time.monotonic())
                         buf = buf[i + len(PART_HEAD):]
             event = None
             for raw in self.resp:
@@ -434,10 +434,10 @@ class Stream:
 
     def wait(self, pred, seconds):
         """Collect events until pred(event, data) is true: returns (matching event or None, all seen)."""
-        seen, end = [], time.time() + seconds
-        while time.time() < end:
+        seen, end = [], time.monotonic() + seconds
+        while time.monotonic() < end:
             try:
-                ev = self.events.get(timeout=max(0.01, end - time.time()))
+                ev = self.events.get(timeout=max(0.01, end - time.monotonic()))
             except queue.Empty:
                 break
             seen.append(ev)
@@ -493,12 +493,12 @@ def t_unwatch_on_disconnect():
     s.wait(lambda e, d: e == "data", 3)
     made = [e for e in subs_events(LIDAR) if e["topic"] == "/scan" and e["event"] == "create"]
     s.close()
-    t0, destroyed = time.time(), []
-    while time.time() - t0 < 2 and not destroyed:
+    t0, destroyed = time.monotonic(), []
+    while time.monotonic() - t0 < 2 and not destroyed:
         time.sleep(0.05)
         destroyed = [e for e in subs_events(LIDAR) if e["topic"] == "/scan" and e["event"] == "destroy"]
     check("closing the stream destroys the worker subscription within 2 s", bool(made) and bool(destroyed),
-          f"created={len(made)} destroyed={len(destroyed)} after {time.time() - t0:.2f}s")
+          f"created={len(made)} destroyed={len(destroyed)} after {time.monotonic() - t0:.2f}s")
 
 
 def t_unwatch_on_instant_disconnect():
@@ -511,8 +511,8 @@ def t_unwatch_on_instant_disconnect():
         raw.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, __import__("struct").pack("ii", 1, 0))  # close sends RST
         raw.sendall(f"GET /api/robots/stream?ip={LIDAR['ip']}&domain_id={LIDAR['domain_id']}&topics=/scan HTTP/1.0\r\nOrigin: {ORIGIN}\r\n\r\n".encode())
         raw.close()
-    t0, ev = time.time(), []
-    while time.time() - t0 < 3:
+    t0, ev = time.monotonic(), []
+    while time.monotonic() - t0 < 3:
         time.sleep(0.1)
         ev = [e["event"] for e in subs_events(LIDAR) if e["topic"] == "/scan"]
         if ev and ev.count("create") == ev.count("destroy"):
@@ -533,15 +533,15 @@ def t_stale_on_drop():
         robots = json.loads(original)
         robots[key]["online"] = False
         write_robots(json.dumps(robots))
-        t0 = last_data[0] = time.time()
+        t0 = last_data[0] = time.monotonic()
 
         def stale_scan(e, d):  # note when the last scan came: stale is defined from it (no data for 2 s)
             if e == "data" and d.get("topic") == "/scan":
-                last_data[0] = time.time()
+                last_data[0] = time.monotonic()
             return e == "status" and d.get("stale") is True and d.get("topic") == "/scan"
 
         stale, _ = s.wait(stale_scan, 5)
-        now = time.time()
+        now = time.monotonic()
         dt, gap = now - t0, now - last_data[0]
         write_robots(original)
         back, _ = s.wait(lambda e, d: e == "status" and d.get("stale") is False, 3)
@@ -896,18 +896,18 @@ def t_camera_lazy_retry_is_bounded():
     try:
         s, d, dt_connect, _ = call("/robots/connect", CAR)
         time.sleep(5.3)  # the lazy re-try is limited to once per 5 s
-        t0 = time.time()
+        t0 = time.monotonic()
         first = Stream(f"/robots/camera.mjpg?{q}")
-        took = time.time() - t0
+        took = time.monotonic() - t0
         status = first.status
         first.close()
         results_ = []
 
         def concurrent():
             time.sleep(5.3)
-            t = time.time()
+            t = time.monotonic()
             st = Stream(f"/robots/camera.mjpg?{q}")
-            results_.append((st.status, time.time() - t))
+            results_.append((st.status, time.monotonic() - t))
             st.close()
 
         threads = [threading.Thread(target=concurrent) for _ in range(3)]

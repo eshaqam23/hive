@@ -12,7 +12,7 @@ as DDS would scope it. `mock_ros/robots.json` defines three robots:
 | lidar car | 192.168.1.31 | 43 | powered off |
 | camera only | 192.168.1.44 | 44 | on, but nothing listens on /cmd_vel |
 
-Every message a robot receives is written to `mock_ros/robots/<ip>_<domain>.jsonl` with a timestamp,
+Every message a robot receives is written to `mock_ros/robots/<ip>_<domain>.jsonl` with a timestamp (`t`, CLOCK_MONOTONIC seconds, the same clock in every process: WSL2 steps its wall clock by about a second every 30 s, so tests time with `time.monotonic()`),
 so tests check what the robot actually got. Put a number in `mock_ros/jitter` (seconds) to randomise
 discovery time like real DDS. `robots.json` is re-read on every call, so setting a robot's `online` to
 `false` while Hive is running simulates it dropping off the network.

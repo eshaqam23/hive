@@ -53,8 +53,11 @@ def _visible():
 
 
 def _log(key, topic, msg, t=None):
-    """t is when the message was sent; a slow drive-mount open or write must not make it look later."""
-    stamp = time.time() if t is None else t
+    """t is when the message was sent, on CLOCK_MONOTONIC: one clock for every process on the machine, so
+    tests compare it with their own time.monotonic(). Not the wall clock: WSL2 steps that by about a second
+    every 30 s or so, which would make a message look early or late. A slow drive-mount open or write must
+    not move it either, so publish() takes it before touching any file."""
+    stamp = time.monotonic() if t is None else t
     with open(os.path.join(ROOT, "robots", f"{key.replace(':', '_')}.jsonl"), "a") as f:
         f.write(json.dumps({"t": stamp, "topic": topic, "msg": msg, "pid": os.getpid()}) + "\n")
 
@@ -74,7 +77,7 @@ class Publisher:
         self.node, self.msg_type, self.topic = node, msg_type, topic
 
     def publish(self, msg):
-        sent = time.time()  # stamped before any file access, which can stall on a Windows drive mounted in WSL
+        sent = time.monotonic()  # before any file access, which can stall on a Windows drive mounted in WSL
         for key, robot in _visible():
             if robot.get("subscribers", {}).get(self.topic, 0):
                 _log(key, self.topic, msg._yaml(), sent)
