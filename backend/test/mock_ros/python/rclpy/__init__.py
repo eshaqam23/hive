@@ -27,14 +27,16 @@ ROBOTS_TTL = 0.03  # seconds a parsed robots.json is reused
 
 def _robots():
     """robots.json as it is now, re-read at most every ROBOTS_TTL: the worker asks several times per tick,
-    and every read of a Windows drive mounted in WSL costs milliseconds that would show up as drive jitter."""
+    and every read of a Windows drive mounted in WSL costs milliseconds that would show up as drive jitter.
+    A file caught mid-rewrite (missing, or half-written: os.replace is not atomic on a drive mount) keeps
+    the last good copy, so a robot never vanishes because a test is changing another setting."""
     global _robots_cache
     if time.monotonic() - _robots_cache[0] > ROBOTS_TTL:
         try:
             with open(os.path.join(ROOT, "robots.json")) as f:
                 _robots_cache = (time.monotonic(), json.load(f))
-        except FileNotFoundError:
-            _robots_cache = (time.monotonic(), {})
+        except (OSError, ValueError):
+            _robots_cache = (time.monotonic(), _robots_cache[1])
     return _robots_cache[1]
 
 

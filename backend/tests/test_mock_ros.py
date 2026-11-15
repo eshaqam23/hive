@@ -188,6 +188,41 @@ def test_set_parameters_logged_and_gated_by_param_runtime(tmp_path, ip, ok):
     rclpy.shutdown()
 
 
+def _set_and_get(node, rclpy, name, value):
+    from rcl_interfaces.msg import Parameter, ParameterValue
+    from rcl_interfaces.srv import GetParameters, SetParameters
+    setter = node.create_client(SetParameters, "/camera/camera/set_parameters")
+    req = SetParameters.Request()
+    req.parameters = [Parameter(name=name, value=ParameterValue.of(value))]
+    ok = setter.call_async(req).result().results[0].successful
+    getter = node.create_client(GetParameters, "/camera/camera/get_parameters")
+    get = GetParameters.Request()
+    get.names = [name]
+    return ok, getter.call_async(get).result().values[0].python()
+
+
+def test_get_parameters_reads_back_a_set_and_param_revert_answers_success_but_keeps_the_default(mock):
+    rclpy, node, tmp = mock
+    assert _set_and_get(node, rclpy, "rgb_camera.color_profile", "424x240x15") == (True, "424x240x15")
+    robots = json.loads((tmp / "robots.json").read_text())
+    robots["10.0.0.1:7"]["param_revert"] = True
+    (tmp / "robots.json").write_text(json.dumps(robots))
+    time.sleep(0.05)  # past the mock's robots.json cache
+    assert _set_and_get(node, rclpy, "rgb_camera.color_profile", "424x240x6") == (True, "640x480x30")
+
+
+def test_a_robots_json_that_cannot_be_read_keeps_the_last_good_copy(mock):
+    rclpy, node, tmp = mock
+    from rclpy import _robots
+    assert "10.0.0.1:7" in _robots()
+    (tmp / "robots.json").write_text('{"10.0.0.1:7": {"onl')  # caught half-written
+    time.sleep(0.05)
+    assert "10.0.0.1:7" in _robots()
+    (tmp / "robots.json").unlink()  # caught between unlink and rename on a drive mount
+    time.sleep(0.05)
+    assert "10.0.0.1:7" in _robots()
+
+
 def test_trigger_service_and_graph(mock):
     rclpy, node, _ = mock
     from std_srvs.srv import Trigger

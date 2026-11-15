@@ -311,19 +311,18 @@ def t_no_gripper():
 
 
 def t_other_publishers():
-    path = f"{MOCK}/robots.json"
-    original = open(path).read()
-    robots = json.loads(original)
-    robots["192.168.1.20:42"]["extra_cmd_vel_publishers"] = 1
-    def write_atomic(text):  # workers re-read robots.json constantly: never leave it half-written
-        open(path + ".tmp", "w").write(text)
-        os.replace(path + ".tmp", path)
-
+    """Connect reports the graph at that instant, so the check waits for the worker's mock to see the new
+    robots.json (cached 30 ms, plus drive-mount lag) and polls for up to 2 s instead of reading once."""
+    restore = set_mock_robot("192.168.1.20:42", extra_cmd_vel_publishers=1)
     try:
-        write_atomic(json.dumps(robots))
-        s, d, _, _ = call("/robots/connect", CAR)
+        s, d, end = 0, {}, time.time() + 2.0
+        while True:
+            s, d, _, _ = call("/robots/connect", CAR)
+            if (s == 200 and d.get("other_publishers") == 1) or time.time() >= end:
+                break
+            time.sleep(0.1)
     finally:
-        write_atomic(original)
+        restore()
     check("connect reports another publisher on /cmd_vel", s == 200 and d.get("other_publishers") == 1 and any("publish" in w for w in d.get("warnings", [])),
           f"HTTP {s} other_publishers={d.get('other_publishers')} warnings={d.get('warnings')}")
 
@@ -533,14 +532,14 @@ def t_stale_on_drop():
         s.wait(lambda e, d: e == "data", 3)
         robots = json.loads(original)
         robots[key]["online"] = False
-        open(path, "w").write(json.dumps(robots))
+        write_robots(json.dumps(robots))
         t0 = time.time()
         stale, _ = s.wait(lambda e, d: e == "status" and d.get("stale") is True and d.get("topic") == "/scan", 3.5)
         dt = time.time() - t0
-        open(path, "w").write(original)
+        write_robots(original)
         back, _ = s.wait(lambda e, d: e == "status" and d.get("stale") is False, 3)
     finally:
-        open(path, "w").write(original)
+        write_robots(original)
         s.close()
     check("a dropped robot makes the stream report stale within 3 s, and recovery clears it",
           stale is not None and dt <= 3.0 and back is not None, f"stale after {dt:.2f}s, recovered={back is not None}")
@@ -728,6 +727,10 @@ def t_sse_image_stats_while_mjpeg_open():
     check("image_stats arrives while MJPEG is open, with rate, bandwidth and size, and no frames",
           bool(ev) and d.get("hz", 0) > 0 and d.get("bytes_per_s", 0) > 0 and d.get("width") and d.get("height") and not frames,
           f"HTTP {s.status} {d}")
+    # the mock camera sends 640x480 rgb8 at 30 Hz (about 27.6 MB/s raw); its solid-colour JPEG is a few KB
+    check("image_stats reports the raw rate from the car, not the JPEG size on the laptop",
+          bool(ev) and d.get("bytes_per_s", 0) > 5e6 and 5 <= d.get("hz", 0) <= 40 and 0 < d.get("shown_hz", 0) <= 16,
+          f"bytes_per_s={d.get('bytes_per_s')} hz={d.get('hz')} shown_hz={d.get('shown_hz')}")
 
 
 def param_log(robot):
@@ -735,20 +738,31 @@ def param_log(robot):
     return [json.loads(l) for l in open(path) if l.strip()] if os.path.exists(path) else []
 
 
-def set_mock_robot(robot_key, **fields):
-    """Change one robot's mock config; returns a function that restores the original file."""
+def write_robots(text):
+    """Workers re-read robots.json constantly: never leave it half-written (the mock also keeps its last
+    good copy if it catches the file mid-replace on a drive mount, where os.replace is not atomic)."""
     path = f"{MOCK}/robots.json"
-    original = open(path).read()
+    with open(path + ".tmp", "w") as f:
+        f.write(text)
+    os.replace(path + ".tmp", path)
+
+
+SETTLE = 0.3  # the worker's mock re-reads robots.json at most every 30 ms, and a drive mount can lag
+
+
+def set_mock_robot(robot_key, **fields):
+    """Change one robot's mock config and let it settle; returns a function that restores the original."""
+    original = open(f"{MOCK}/robots.json").read()
     robots = json.loads(original)
     robots[robot_key].update(fields)
+    write_robots(json.dumps(robots))
+    time.sleep(SETTLE)
 
-    def write_atomic(text):
-        open(path + ".tmp", "w").write(text)
-        os.replace(path + ".tmp", path)
+    def restore():
+        write_robots(original)
+        time.sleep(SETTLE)
 
-    write_atomic(json.dumps(robots))
-    time.sleep(0.3)  # the worker's mock re-reads robots.json at most every 30 ms, and a drive mount can lag
-    return lambda: write_atomic(original)
+    return restore
 
 
 def t_camera_tuned_on_connect():
@@ -821,9 +835,13 @@ def t_camera_appearing_after_connect_is_tuned_on_stream():
     restore = set_mock_robot("192.168.1.20:42", params={})
     try:
         s, d, _, _ = call("/robots/connect", CAR)
+        early = Stream(f"/robots/camera.mjpg?{q}")  # no node answered yet, but the car publishes a RealSense topic
+        early_status = early.status
+        early.close()
     finally:
         restore()
-    none_at_connect = s == 200 and d.get("camera") is None
+    cam0 = d.get("camera") or {}
+    unresolved_at_connect = s == 200 and cam0.get("applied") is False and cam0.get("node") is None and early_status == 409
     reset()
     restore = set_mock_robot("192.168.1.20:42", param_runtime=False)  # the camera node shows up, but refuses
     try:
@@ -838,9 +856,9 @@ def t_camera_appearing_after_connect_is_tuned_on_stream():
     ok_stream = Stream(f"/robots/camera.mjpg?{q}")  # still gated: the last attempt was a refusal, not a miss
     gated_again = ok_stream.status
     ok_stream.close()
-    check("a camera node that appears after connect is tuned on the first MJPEG request, and the gate applies if refused",
-          none_at_connect and status == 409 and err.get("code") == "camera_untuned" and gated_again == 409,
-          f"camera at connect={d.get('camera')!r} first mjpeg={status} {err.get('code')} later={gated_again}")
+    check("a RealSense topic with no camera node yet is gated (fail closed); the node is tuned on a later MJPEG request, and the gate applies if refused",
+          unresolved_at_connect and status == 409 and err.get("code") == "camera_untuned" and gated_again == 409,
+          f"camera at connect={d.get('camera')!r} mjpeg then={early_status} first mjpeg={status} {err.get('code')} later={gated_again}")
     call("/robots/disconnect", CAR)  # a stale refusal must not outlive the worker
     reset()
     time.sleep(5.3)
@@ -885,13 +903,36 @@ def t_camera_lazy_retry_is_bounded():
         threads = [threading.Thread(target=concurrent) for _ in range(3)]
         [th.start() for th in threads]
         [th.join() for th in threads]
+        forced = Stream(f"/robots/camera.mjpg?{q}&force_full=1")
+        time.sleep(1.0)
+        forced_frames = len(forced.parts)
+        forced.close()
     finally:
         restore()
-    tuned_logged = [p for p in param_log(CAR)]
-    check("a camera node that never answers delays an MJPEG request by at most ~3 s, concurrent requests share one retry",
-          s == 200 and d.get("camera") is None and status == 200 and took < 3.5
-          and all(st == 200 and t < 3.5 for st, t in results_) and len(results_) == 3,
-          f"connect HTTP {s} in {dt_connect:.1f}s camera={d.get('camera')!r}; first mjpeg {status} in {took:.2f}s; concurrent={results_}")
+    cam = d.get("camera") or {}
+    check("a camera node that never answers fails closed: MJPEG is gated (409) within ~3 s, concurrent requests share one retry, force_full still streams",
+          s == 200 and cam.get("applied") is False and cam.get("node") is None and status == 409 and took < 3.5
+          and all(st == 409 and t < 3.5 for st, t in results_) and len(results_) == 3 and forced_frames >= 3,
+          f"connect HTTP {s} in {dt_connect:.1f}s camera={cam}; first mjpeg {status} in {took:.2f}s; concurrent={results_}; forced frames={forced_frames}")
+    call("/robots/connect", CAR)
+
+
+def t_camera_readback_mismatch_blocks_stream():
+    """R30: a camera that answers success but keeps its old profile is not 'applied', and the gate applies."""
+    q = f"ip={CAR['ip']}&domain_id={CAR['domain_id']}&topic={IMAGE_TOPIC}"
+    restore = set_mock_robot("192.168.1.20:42", param_revert=True)
+    try:
+        s, d, _, _ = call("/robots/connect", CAR)
+        blocked = Stream(f"/robots/camera.mjpg?{q}")
+        status, err = blocked.status, blocked.error or {}
+        blocked.close()
+    finally:
+        restore()
+    cam = d.get("camera") or {}
+    check("a camera whose read-back does not match the request is reported unapplied and gates MJPEG",
+          s == 200 and cam.get("applied") is False and cam.get("node") == "/camera/camera" and "640x480x30" in str(cam.get("reason"))
+          and status == 409 and err.get("code") == "camera_untuned",
+          f"connect HTTP {s} camera={cam} mjpeg={status} {err.get('code')}")
     call("/robots/connect", CAR)
 
 
@@ -907,7 +948,7 @@ if __name__ == "__main__":
                t_sse_link_only, t_sse_many_topics, t_link_seq_and_route,
                t_sse_image_stats_while_mjpeg_open,
                t_camera_tuned_on_connect, t_camera_quality_change, t_camera_reapplied_on_reconnect, t_camera_refused_blocks_stream,
-               t_camera_appearing_after_connect_is_tuned_on_stream, t_camera_lazy_retry_is_bounded]:
+               t_camera_appearing_after_connect_is_tuned_on_stream, t_camera_lazy_retry_is_bounded, t_camera_readback_mismatch_blocks_stream]:
         if only and fn.__name__ not in only:
             continue
         try:
