@@ -417,7 +417,8 @@ def apply_camera(worker: RobotWorker, quality: str, depth: bool, *, lazy: bool =
 
 def retry_camera(worker: RobotWorker) -> None:
     """A RealSense node that joined the graph after connect (or a tuning attempt that got no answer) is
-    tuned on first use, at most once per CAMERA_RETRY_SECONDS, with the remembered choice."""
+    tuned on first use, at most once per CAMERA_RETRY_SECONDS, with the remembered choice. An attempt that
+    still gets no answer keeps its unresolved result (applied false), so the MJPEG gate stays on (R30)."""
     def unresolved() -> bool:
         camera = worker.camera
         return camera is None or (camera.get("applied") is False and camera.get("node") is None)
@@ -432,8 +433,6 @@ def retry_camera(worker: RobotWorker) -> None:
             return
         quality, depth = CAMERA_WANT.get((worker.peer, worker.domain_id), DEFAULT_CAMERA)
         apply_camera(worker, quality, depth, lazy=True)
-        if unresolved():  # still no answer: treat the camera as unknown, so nothing gates the stream
-            worker.camera = None
 
 
 def get_worker(peer: str, domain_id: int) -> RobotWorker:

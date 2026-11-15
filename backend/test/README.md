@@ -41,10 +41,11 @@ The mock also supports what the live-data features need. Robots in `robots.json`
 | `publishes` | `{topic: {type, hz, width?, height?}}`: LaserScan or Image streams, delivered inside `spin_once` (at most one message per subscription per call, newest due wins). LaserScan has 360 ranges and `frame_id` is the robot IP; Image is a solid colour derived from the IP. |
 | `echo_ros_data` | Every `/cmd_vel` Twist the robot receives produces a `/ros_data` String line (`lp,ld,rp,rd`, wheelbase 0.2032, 0.5 m/s is 255). A robot with `line_prefix` (gripper car, `"D"`) prefixes it `D,`. |
 | `services` | `{name: srv type}`, e.g. `/gripper/grab` as `std_srvs/srv/Trigger`. |
-| `params`, `param_runtime` | Declared parameters per node. A node in `params` gets `set_parameters` and `get_parameters` services. Setting a parameter fails unless `param_runtime` is true. Image size does not change when a camera parameter is set. |
+| `params`, `param_runtime`, `param_revert`, `param_silent` | Declared parameters per node. A node in `params` gets `set_parameters`, `get_parameters` and `list_parameters` services. Setting a parameter fails unless `param_runtime` is true. With `param_revert` a set answers success but the node keeps its default (what `get_parameters` then reports), like a camera that quietly rejects a profile. With `param_silent` the parameter services never answer. Image size does not change when a camera parameter is set. |
 | `extra_cmd_vel_publishers` | Added to `count_publishers("/cmd_vel")`, to simulate another controller. |
+| (file reads) | `robots.json` is re-read at most every 30 ms. A file caught mid-rewrite (missing or half-written) keeps the last good copy, so tests write it atomically and wait about 0.3 s for a change to settle. |
 
-Extra robots: `192.168.1.51:48` is a second LiDAR car (same as :45, for cross-talk checks). `192.168.1.50:45` is a LiDAR car (`/scan`, `ros_data` echo) and `192.168.1.60:46` is a
+Extra robots: `192.168.1.70:49` is a camera car with a dozen non-image topics (camera_info, metadata, extrinsics, tf, like the real camera car), for the stream topic cap. `192.168.1.51:48` is a second LiDAR car (same as :45, for cross-talk checks). `192.168.1.50:45` is a LiDAR car (`/scan`, `ros_data` echo) and `192.168.1.60:46` is a
 gripper car (Trigger services, `/gripper/position`, prefixed `ros_data`). `192.168.1.44:44` publishes
 no `ros_data`.
 

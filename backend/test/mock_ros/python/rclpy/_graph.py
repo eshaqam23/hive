@@ -210,6 +210,9 @@ def _set_parameters(key, robot, name, req):
             ok, reason = False, "parameter cannot be set while the node is running"
         elif p.name not in declared:
             ok, reason = False, "parameter not declared"
+        elif robot.get("param_revert"):  # answers success, then the camera falls back to its default
+            ok, reason = True, ""
+            _param_state.get((key, node), {}).pop(p.name, None)
         else:
             ok, reason = True, ""
             _param_state.setdefault((key, node), {})[p.name] = p.value.python()
