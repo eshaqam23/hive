@@ -43,6 +43,7 @@ class QwenSettings:
         provider=os.environ.get("QWEN_PROVIDER", "vllm").lower(),
         top_k = os.environ.get("QWEN_TOP_K", "20")
         return cls(
+            provider=provider,
             base_url=os.environ.get("QWEN_BASE_URL", ""),
             model=os.environ.get("QWEN_MODEL", "Qwen/Qwen3-8B"),
             api_key=os.environ.get("QWEN_API_KEY", ""),
