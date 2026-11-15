@@ -73,7 +73,7 @@ DISCOVERY_SPIN_SECONDS = 2.5     # how long a new worker listens for the robot b
 WORKER_START_SECONDS = 15
 MAX_COMMAND_LENGTH = 500
 MAX_BODY_BYTES = 64 * 1024
-MAX_STREAM_TOPICS = 8
+MAX_STREAM_TOPICS = 32  # per stream and per kind (data, image stats); more are reported as too_many, never refused
 STREAM_WATCH_TIMEOUT = 5.0
 RATE_CAPS = {"image": 15.0, "scan": 10.0, "value": 5.0, "generic": 5.0}  # Hz per payload kind, converter side
 HUB = streams.StreamHub(
@@ -184,6 +184,14 @@ class RobotWorker:
         self.camera: dict[str, Any] | None = None  # newest camera tuning result; None when no RealSense node
         self.camera_tried_at = 0.0  # monotonic time of the last tuning attempt
         self.camera_lock = threading.Lock()  # one lazy re-try at a time per robot
+        self.replaced = False  # a worker that died on its own was replaced and has not been reported yet
+
+    def take_replaced(self) -> bool:
+        """True once after a start replaced a worker that had died (crash, kill): the new worker sent the
+        robot a stop on startup, and the page should say so."""
+        with self.replies_lock:
+            replaced, self.replaced = self.replaced, False
+        return replaced
 
     def on_link(self, link: dict[str, Any]) -> None:
         self.link = link
@@ -196,9 +204,12 @@ class RobotWorker:
         return self.process is not None and self.process.poll() is None
 
     def start(self) -> None:
+        """Start the worker process if it is not running. Every new worker stops the robot on startup (R29),
+        so one that replaces a crashed worker also stops a car the old one left moving."""
         with self.start_lock:
             if self.is_running():
                 return
+            died = self.process is not None  # stop() clears process; still set means it died by itself
             self.link = None  # a new worker must not show the old one's state
             self.camera, self.camera_tried_at = None, 0.0  # nor the old camera result: it would gate or ungate MJPEG wrongly
             require_ros()
@@ -231,6 +242,9 @@ class RobotWorker:
                 self._end(process)
                 raise
             self.process = process
+            if died:
+                with self.replies_lock:
+                    self.replaced = True
             threading.Thread(target=self._read_replies, args=(process,), daemon=True).start()
 
     def _wait_until_ready(self, process: subprocess.Popen[str]) -> None:
@@ -507,6 +521,7 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
             "/api/robots/command": self.handle_command,
             "/api/robots/disconnect": self.handle_disconnect,
             "/api/robots/camera": self.handle_camera,
+            "/api/robots/link": self.handle_link,
         }
         try:
             if not self.origin_allowed():
@@ -547,7 +562,8 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
                 "stop the other controller before driving."
             )
         quality, depth = CAMERA_WANT.get((peer, domain_id), DEFAULT_CAMERA)
-        return {"ok": True, **found, "warnings": warnings, "camera": apply_camera(worker, quality, depth)}
+        camera = apply_camera(worker, quality, depth)
+        return {"ok": True, **found, "warnings": warnings, "camera": camera, "worker_replaced": worker.take_replaced()}
 
     def handle_camera(self, body: dict, peer: str, domain_id: int) -> dict:
         """Pick the colour quality (and depth) of the robot's RealSense; the choice is re-applied on reconnect."""
@@ -564,10 +580,21 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
         return {"ok": True, "camera": camera}
 
     def handle_status(self, body: dict, peer: str, domain_id: int) -> dict:
-        found = get_worker(peer, domain_id).discover(with_topics=False)
+        """Still there? Also restarts a worker that died (it stops the robot on startup and the reply says so),
+        and carries the newest link, so a page without a live stream (Home) learns how the last stop went."""
+        worker = get_worker(peer, domain_id)
+        found = worker.discover(with_topics=False)
         if not found["nodes"]:
             raise ApiError(502, f"Lost contact: no ROS 2 nodes answered at {peer} on domain {domain_id}.", nodes=[], code="lost_contact")
-        return {"ok": True, "nodes": found["nodes"]}
+        return {"ok": True, "nodes": found["nodes"], "link": worker.link, "worker_replaced": worker.take_replaced()}
+
+    def handle_link(self, body: dict, peer: str, domain_id: int) -> dict:
+        """The newest link the worker reported (it reports at once on a change, else every 0.5 s). No worker
+        round trip, so the page can follow a stop's confirmation cheaply where it has no live stream."""
+        worker = existing_worker(peer, domain_id)
+        if worker is None:
+            raise ApiError(502, "The backend is not connected to this robot.", code="worker_gone")
+        return {"ok": True, "link": worker.link}
 
     def handle_control(self, body: dict, peer: str, domain_id: int) -> dict:
         """The gripper, and one-shot drive actions (a drive action without keepalives runs until the
@@ -652,19 +679,23 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
 
     def handle_stream(self, url: Any) -> None:
         """SSE for data topics, MJPEG for one image topic. The viewer is registered before the headers go
-        out, so a worker that refuses the watch becomes an HTTP error and leaves no viewer behind."""
+        out, so a worker that refuses an MJPEG watch becomes an HTTP error and leaves no viewer behind.
+        An SSE stream always opens once the worker runs, even with no data topic at all: it carries the
+        link (R27), and each topic it cannot stream is reported as a status event instead of failing the
+        whole stream (R21). Past MAX_STREAM_TOPICS the extra topics are reported as too_many."""
         mjpeg = url.path.endswith(".mjpg")
         try:
             query = {k: v[0] for k, v in parse_qs(url.query).items()}
             peer, domain_id = validate_peer(query.get("ip")), validate_domain_id(query.get("domain_id"))
-            names = [query.get("topic", "")] if mjpeg else [t for t in query.get("topics", "").split(",") if t]
-            shown = [] if mjpeg else [t for t in query.get("images", "").split(",") if t]
-            if not (names or shown) or len(names) > MAX_STREAM_TOPICS or len(shown) > MAX_STREAM_TOPICS or any(not t.startswith("/") for t in names + shown):
+            names = [query.get("topic", "")] if mjpeg else list(dict.fromkeys(t for t in query.get("topics", "").split(",") if t))
+            shown = [] if mjpeg else list(dict.fromkeys(t for t in query.get("images", "").split(",") if t))
+            if any(not t.startswith("/") for t in names + shown):
                 raise ApiError(400, "Name the topic(s) to stream, each starting with /.", code="bad_topics")
+            problems: list[tuple[str, str]] = [(t, "too_many") for t in names[MAX_STREAM_TOPICS:] + shown[MAX_STREAM_TOPICS:]]
+            names, shown = names[:MAX_STREAM_TOPICS], shown[:MAX_STREAM_TOPICS]
             worker = existing_worker(peer, domain_id)
             if worker is None:
                 raise ApiError(502, "The ROS 2 worker for this robot is not running. Connect first.", code="worker_gone")
-            problems: list[tuple[str, str]] = []  # SSE only: topics skipped, reported as status events
             if mjpeg:
                 for name in names:
                     kind = worker.topic_kinds.get(name)
@@ -683,11 +714,7 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
                         problems.append((name, "use_mjpeg"))
                     else:
                         valid.append(name)
-                shown = [t for t in dict.fromkeys(shown) if worker.topic_kinds.get(t) == "image"]
-                if not valid and not shown:
-                    if any(code == "unknown_topic" for _, code in problems):
-                        raise ApiError(404, f"The robot has no topic {problems[0][0]}.", code="unknown_topic")
-                    raise ApiError(400, f"{problems[0][0]} is an image topic; use camera.mjpg.", code="use_mjpeg")
+                shown = [t for t in shown if worker.topic_kinds.get(t) == "image"]
             key = (peer, domain_id)
             if mjpeg:
                 retry_camera(worker)
@@ -705,9 +732,6 @@ class HiveRequestHandler(BaseHTTPRequestHandler):
                 problems += [(topic, "watch_failed") for topic, _ in failed]
                 if not mjpeg:
                     viewer.image_topics = tuple(shown)
-                    if not viewer.topics and not shown:
-                        HUB.unsubscribe(viewer)
-                        raise ApiError(502, "Could not start watching any of the topics.", code="watch_failed")
             except ApiError:
                 raise
             except Exception as error:  # noqa: BLE001
@@ -861,6 +885,7 @@ class RobotWorkerLoop:
         self.drove, self.saw_motion = False, False  # a zero line confirms a stop only after motion was seen
         self.reporting, self.other_publishers = False, 0
         self.link_sent: tuple[tuple, float] = ((), 0.0)
+        self.link_seq = 0  # newest link's seq (R28)
         self.action = "stop"
         self.last_keepalive = 0.0
         self.deadman_tripped = False
@@ -930,6 +955,13 @@ class RobotWorkerLoop:
             self.publish_twist("stop")
         return state
 
+    def next_link_seq(self) -> int:
+        """A number that grows with every link, also across worker restarts on this machine: microseconds
+        of the system-wide monotonic clock (shared by every process since boot), bumped by one if two links
+        fall in the same microsecond. The page keeps the link with the highest seq from any route (R28)."""
+        self.link_seq = max(self.link_seq + 1, time.monotonic_ns() // 1000)
+        return self.link_seq
+
     def link_state(self, now: float) -> dict[str, Any]:
         last = self.last_line
         return {
@@ -938,6 +970,7 @@ class RobotWorkerLoop:
             "stop": self.stop_state(now),
             "reporting": self.reporting,
             "other_publishers": self.other_publishers,
+            "seq": self.next_link_seq(),
         }
 
     def emit_link(self, now: float) -> None:
@@ -1237,7 +1270,19 @@ class RobotWorkerLoop:
         except Exception:  # noqa: BLE001
             self.log(f"final stop failed:\n{traceback.format_exc()}")
 
+    def startup_stop(self) -> None:
+        """R29: a new worker stops the robot before it handles anything. If it replaces one that crashed
+        mid-drive, the car may still be running the old command (the camera and LiDAR cars have no command
+        timeout). DDS has not found the robot yet, so the first zero Twists go nowhere; the stop confirmer
+        resends every 200 ms for 5 s, which covers discovery, until the car's ros_data echo confirms it."""
+        try:
+            self.stop_driving()
+            self.log("startup: sent the robot a stop")
+        except Exception:  # noqa: BLE001 - the worker must still start; the deadman and later stops remain
+            self.log(f"startup stop failed:\n{traceback.format_exc()}")
+
     def run(self) -> None:
+        self.startup_stop()
         threading.Thread(target=self.read_stdin, daemon=True).start()
         write_line({"ready": True})
         try:

@@ -20,6 +20,7 @@ LIDAR = {"ip": "192.168.1.50", "domain_id": 45}     # /cmd_vel listener, /scan, 
 POS = {"ip": "192.168.1.61", "domain_id": 47}       # /gripper/position subscriber only
 LIDAR2 = {"ip": "192.168.1.51", "domain_id": 48}    # a second LiDAR car, for cross-talk checks
 GRIP = {"ip": "192.168.1.60", "domain_id": 46}      # Trigger gripper services, prefixed /ros_data echo
+MANY = {"ip": "192.168.1.70", "domain_id": 49}      # a camera car with a dozen non-image topics, like the real one
 
 
 def call(path, body=None, method=None, origin=ORIGIN, timeout=25):
@@ -587,20 +588,92 @@ def t_drive_tick_under_load():
 def t_sse_rejects_image():
     call("/robots/connect", CAR)
     s = Stream(f"/robots/stream?ip={CAR['ip']}&domain_id={CAR['domain_id']}&topics={IMAGE_TOPIC}")
-    check("SSE refuses an image topic with 400 use_mjpeg", s.status == 400 and (s.error or {}).get("code") == "use_mjpeg",
-          f"HTTP {s.status} {s.error}")
-    s.close()
+    try:
+        ev, seen = s.wait(lambda e, d: e == "status" and d.get("topic") == IMAGE_TOPIC, 3)
+    finally:
+        s.close()
+    frames = [d for e, d in seen if e == "data"]
+    check("SSE never streams an image topic: it reports use_mjpeg and keeps the stream open for link events",
+          s.status == 200 and ev is not None and ev[1].get("error") == "use_mjpeg" and not frames
+          and any(e == "link" for e, _ in seen), f"HTTP {s.status} events={[e for e, _ in seen]} status={ev}")
+
+
+def t_sse_link_only():
+    """A page that watches no data topic still gets link events, the initial one and every later one (R27)."""
+    call("/robots/connect", LIDAR)
+    s = Stream(f"/robots/stream?ip={LIDAR['ip']}&domain_id={LIDAR['domain_id']}&topics=")
+    try:
+        first, _ = s.wait(lambda e, d: e == "link", 3)
+        before = (first[1] if first else {}).get("seq", 0)
+        call("/robots/drive", {**LIDAR, "action": "stop"})
+        later, seen = s.wait(lambda e, d: e == "link" and d.get("seq", 0) > before and d.get("stop") in ("pending", "confirmed"), 3)
+    finally:
+        s.close()
+    check("a stream with no data topics opens and carries the link, including updates after a stop",
+          s.status == 200 and first is not None and later is not None and not any(e == "data" for e, _ in seen),
+          f"HTTP {s.status} first={first} later={later}")
+
+
+def t_link_seq_and_route():
+    """R28: links from every route carry a growing seq; /robots/link and /robots/status return the newest."""
+    call("/robots/connect", LIDAR)
+    seqs = []
+    s1, d1, _, _ = call("/robots/drive", {**LIDAR, "action": "forward"})
+    seqs.append((d1.get("link") or {}).get("seq"))
+    time.sleep(0.2)
+    _, d2, _, _ = call("/robots/drive/keepalive", LIDAR)
+    seqs.append((d2.get("link") or {}).get("seq"))
+    _, d3, _, _ = call("/robots/drive", {**LIDAR, "action": "stop"})
+    seqs.append((d3.get("link") or {}).get("seq"))
+    time.sleep(0.6)
+    s4, d4, _, _ = call("/robots/link", LIDAR)
+    seqs.append((d4.get("link") or {}).get("seq"))
+    s5, d5, _, _ = call("/robots/status", LIDAR)
+    s6, d6, _, _ = call("/robots/link", {"ip": "192.168.1.99", "domain_id": 49})
+    ok = (all(isinstance(s, int) for s in seqs) and seqs == sorted(seqs) and len(set(seqs)) == 4
+          and s4 == 200 and (d4.get("link") or {}).get("stop") == "confirmed"
+          and s5 == 200 and (d5.get("link") or {}).get("seq", 0) >= seqs[-1] and d5.get("worker_replaced") is False
+          and s6 == 502 and d6.get("code") == "worker_gone")
+    check("link seq grows across drive, keepalive, stop and /robots/link; status carries the newest link", ok,
+          f"seqs={seqs} link={d4.get('link')} status={s5} {d5.get('link')} replaced={d5.get('worker_replaced')} unknown robot={s6} {d6.get('code')}")
+
+
+def t_sse_many_topics():
+    """The real camera car has 9+ non-image topics: the stream must open for all of them (final audit #1)."""
+    s0, found, _, _ = call("/robots/connect", MANY)
+    names = [t["name"] for t in found.get("topics", []) if t.get("kind") != "image"]
+    q = f"ip={MANY['ip']}&domain_id={MANY['domain_id']}"
+    s = Stream(f"/robots/stream?{q}&topics={','.join(names)}")
+    try:
+        link, seen = s.wait(lambda e, d: e == "link", 4)
+        _, more = s.wait(lambda e, d: False, 0.5)
+    finally:
+        s.close()
+    errors = {d["topic"]: d["error"] for e, d in seen + more if e == "status" and "error" in d}
+    check("a car with 12 non-image topics streams all of them on one connection and carries the link",
+          s0 == 200 and len(names) >= 12 and s.status == 200 and link is not None
+          and set(errors.values()) <= {"watch_failed"} and "/ros_data" not in errors and "/esp_data" not in errors,
+          f"connect HTTP {s0} topics={len(names)} stream HTTP {s.status} link={link is not None} errors={errors}")
+    fakes = [f"/nope{i}" for i in range(25)]
+    big = Stream(f"/robots/stream?{q}&topics={','.join(names[:12] + fakes)}")
+    try:
+        _, seen = big.wait(lambda e, d: e == "status" and d.get("topic") == fakes[-1], 5)
+    finally:
+        big.close()
+    over = sorted(d["topic"] for e, d in seen if e == "status" and d.get("error") == "too_many")
+    check("past 32 topics the extra ones are reported as too_many and the stream still opens",
+          big.status == 200 and over == sorted(fakes[-5:]), f"HTTP {big.status} too_many={over}")
 
 
 def t_stream_route_errors():
     call("/robots/connect", CAR)
     q = f"ip={CAR['ip']}&domain_id={CAR['domain_id']}"
-    cases = {
-        "unknown topic": (f"/robots/stream?{q}&topics=/nope", 404, "unknown_topic"),
+    cases = {  # an unknown SSE topic is a status event on an open stream (t_sse_mixed_topics), not an HTTP error
         "non-image on MJPEG": (f"/robots/camera.mjpg?{q}&topic=/cmd_vel", 400, "use_sse"),
         "unknown MJPEG topic": (f"/robots/camera.mjpg?{q}&topic=/nope", 404, "unknown_topic"),
         "no worker": ("/robots/stream?ip=192.168.1.99&domain_id=49&topics=/scan", 502, "worker_gone"),
-        "no topics": (f"/robots/stream?{q}&topics=", 400, None),
+        "no MJPEG topic": (f"/robots/camera.mjpg?{q}&topic=", 400, "bad_topics"),
+        "topic without a slash": (f"/robots/stream?{q}&topics=scan", 400, "bad_topics"),
         "bad ip": ("/robots/stream?ip=bad%20ip&domain_id=1&topics=/scan", 400, None),
         "bad domain": (f"/robots/stream?ip={CAR['ip']}&domain_id=999&topics=/scan", 400, None),
     }
@@ -630,8 +703,14 @@ def t_sse_mixed_topics():
     check("a mixed topic list streams the valid topics and reports each bad one as a status error", ok,
           f"HTTP {s.status} errors={errors}")
     s2 = Stream(f"/robots/stream?{q}&topics=/nope,{IMAGE_TOPIC}")
-    check("a list with no valid topic is refused with 404", s2.status == 404, f"HTTP {s2.status} {s2.error}")
-    s2.close()
+    try:
+        _, seen2 = s2.wait(lambda e, d: e == "status" and d.get("topic") == IMAGE_TOPIC, 3)
+    finally:
+        s2.close()
+    errors2 = {d["topic"]: d["error"] for e, d in seen2 if e == "status" and "error" in d}
+    check("a list with no valid topic still opens (200), reports each topic, and is not retried as an error",
+          s2.status == 200 and errors2 == {"/nope": "unknown_topic", IMAGE_TOPIC: "use_mjpeg"},
+          f"HTTP {s2.status} errors={errors2}")
 
 
 def t_sse_image_stats_while_mjpeg_open():
@@ -825,6 +904,7 @@ if __name__ == "__main__":
                t_stop_ignores_bad_power, t_bool_gripper_has_no_position, t_position_gripper_first_command, t_tap_not_falsely_confirmed,
                t_sse_scan, t_mjpeg_frames, t_unwatch_on_disconnect, t_unwatch_on_instant_disconnect, t_stale_on_drop, t_no_cross_talk_streams,
                t_drive_tick_under_load, t_sse_rejects_image, t_stream_route_errors, t_sse_mixed_topics,
+               t_sse_link_only, t_sse_many_topics, t_link_seq_and_route,
                t_sse_image_stats_while_mjpeg_open,
                t_camera_tuned_on_connect, t_camera_quality_change, t_camera_reapplied_on_reconnect, t_camera_refused_blocks_stream,
                t_camera_appearing_after_connect_is_tuned_on_stream, t_camera_lazy_retry_is_bounded]:

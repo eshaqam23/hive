@@ -108,3 +108,90 @@ def test_stale_zero_line_does_not_confirm_a_new_stop(mock_copy):
     code = STALE_SCRIPT.replace("BACKEND_DIR", repr(BACKEND))
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=worker_env(mock_copy), timeout=20)
     assert json.loads(out.stdout.strip().splitlines()[-1]) == ["pending", "confirmed"], out.stderr
+
+
+SEQ_SCRIPT = """
+import json, sys
+sys.path.insert(0, BACKEND_DIR)
+import server
+
+loop = server.RobotWorkerLoop()
+print(json.dumps([loop.link_state(0.0)["seq"] for _ in range(3)]))
+"""
+
+
+def test_link_seq_grows_within_a_worker_and_across_workers(mock_copy):
+    """R28: every link carries a seq; a newer link always has a higher one, even from a restarted worker,
+    so the page can keep the newest link whatever route it came by."""
+    code = SEQ_SCRIPT.replace("BACKEND_DIR", repr(BACKEND))
+    runs = []
+    for _ in range(2):
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=worker_env(mock_copy), timeout=20)
+        runs.append(json.loads(out.stdout.strip().splitlines()[-1]))
+    first, second = runs
+    assert all(isinstance(s, int) for s in first + second)
+    assert first == sorted(set(first)) and second == sorted(set(second))
+    assert second[0] > first[-1]
+
+
+def read_until(proc, pred, seconds):
+    """Worker stdout lines (as dicts) until pred(line) holds or the time is up."""
+    import select
+    seen, end = [], time.monotonic() + seconds
+    while time.monotonic() < end:
+        ready, _, _ = select.select([proc.stdout], [], [], 0.1)
+        if not ready:
+            continue
+        line = json.loads(proc.stdout.readline())
+        seen.append(line)
+        if pred(line):
+            return line, seen
+    return None, seen
+
+
+def test_a_new_worker_stops_the_robot_before_any_request(mock_copy):
+    """R29: a fresh worker publishes the stop burst on start, and keeps resending until the car confirms."""
+    proc = subprocess.Popen(
+        [sys.executable, os.path.join(BACKEND, "server.py"), "--robot-worker"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=worker_env(mock_copy),
+    )
+    try:
+        confirmed, seen = read_until(proc, lambda l: (l.get("link") or {}).get("stop") == "confirmed", 4)
+        zeros = [m for m in robot_log(mock_copy) if m["topic"] == "/cmd_vel"]
+        assert seen[0].get("ready") is True
+        assert zeros and all("x: 0.0" in m["msg"] and "z: 0.0" in m["msg"] for m in zeros), zeros
+        assert confirmed is not None, seen  # the mock car echoes the zero Twist on /ros_data
+        assert not any("id" in l for l in seen)  # no request was ever sent
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=5)
+
+
+def test_a_worker_killed_mid_drive_is_replaced_by_one_that_stops_the_car(mock_copy, monkeypatch):
+    """Final audit #4: a hard crash (SIGKILL) sends no stop; the replacement worker must, and say so once."""
+    import signal
+
+    import server
+
+    monkeypatch.setattr(server, "ROS_SETUP", os.path.join(mock_copy, "setup.bash"))
+    worker = server.RobotWorker("192.168.1.50", 45)
+    try:
+        worker.start()
+        assert worker.take_replaced() is False  # a first start replaces nothing
+        worker.discover(with_topics=False)
+        worker.request("drive", timeout=5, action="forward", power=0.5)
+        time.sleep(0.4)
+        old = worker.process.pid
+        assert any("x: 0.25" in m["msg"] for m in robot_log(mock_copy) if m["pid"] == old)
+        os.killpg(old, signal.SIGKILL)
+        worker.process.wait(timeout=5)
+        killed_at = time.time()
+        worker.start()
+        assert worker.take_replaced() is True
+        assert worker.take_replaced() is False  # reported once
+        time.sleep(2.0)
+        new = [m for m in robot_log(mock_copy) if m["topic"] == "/cmd_vel" and m["t"] > killed_at]
+        assert new and all(m["pid"] != old for m in new)
+        assert all("x: 0.0" in m["msg"] and "z: 0.0" in m["msg"] for m in new), new
+    finally:
+        worker.stop()

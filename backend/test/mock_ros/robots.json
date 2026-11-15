@@ -118,6 +118,40 @@
     "echo_ros_data": true,
     "extra_cmd_vel_publishers": 0
   },
+  "192.168.1.70:49": {
+    "online": true,
+    "nodes": [
+      "/camera/camera",
+      "/motor_commands",
+      "/robot_state_publisher"
+    ],
+    "topics": {
+      "/cmd_vel": "geometry_msgs/msg/Twist",
+      "/esp_data": "std_msgs/msg/String",
+      "/camera/camera/color/camera_info": "sensor_msgs/msg/CameraInfo",
+      "/camera/camera/color/metadata": "realsense2_camera_msgs/msg/Metadata",
+      "/camera/camera/depth/camera_info": "sensor_msgs/msg/CameraInfo",
+      "/camera/camera/depth/metadata": "realsense2_camera_msgs/msg/Metadata",
+      "/camera/camera/extrinsics/depth_to_color": "realsense2_camera_msgs/msg/Extrinsics",
+      "/tf_static": "tf2_msgs/msg/TFMessage",
+      "/tf": "tf2_msgs/msg/TFMessage",
+      "/diagnostics": "diagnostic_msgs/msg/DiagnosticArray",
+      "/joint_states": "sensor_msgs/msg/JointState"
+    },
+    "subscribers": {
+      "/cmd_vel": 1
+    },
+    "publishes": {
+      "/camera/camera/color/image_raw": {
+        "type": "sensor_msgs/msg/Image",
+        "hz": 15,
+        "width": 424,
+        "height": 240
+      }
+    },
+    "echo_ros_data": true,
+    "extra_cmd_vel_publishers": 0
+  },
   "192.168.1.51:48": {
     "online": true,
     "nodes": [

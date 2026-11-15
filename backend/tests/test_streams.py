@@ -307,6 +307,65 @@ def test_image_stats_sse_emits_rate_size_and_stale_without_frames():
 def test_image_stats_counts_frames_even_without_viewers():
     hub, _ = hub_with_log()
     hub.publish(KEY, sized_image("/cam", 10))
-    hub.publish(KEY, sized_image("/cam", 20))
-    assert hub.image_stats(KEY, "/cam") == (2, 30, 640, 480)
+    hub.publish(KEY, {**sized_image("/cam", 20), "bytes_per_s": 9000, "hz": 30.0})
+    assert hub.image_stats(KEY, "/cam") == {"frames": 2, "bytes": 30, "width": 640, "height": 480, "bytes_per_s": 9000, "hz": 30.0}
     assert hub.image_stats(KEY, "/other") is None
+
+
+# ---- link events for every viewer, raw camera rate (final audit #8, #9) ------------------------------
+def test_link_reaches_a_viewer_with_no_data_topics():
+    hub, log = hub_with_log()
+    bare = hub.subscribe(KEY, [])
+    other = hub.subscribe(("10.0.0.2", 7), [])
+    hub.publish_link(KEY, {"stop": "pending", "seq": 3})
+    assert bare.get(0) == {"event": "link", "data": {"stop": "pending", "seq": 3}}
+    assert other.get(0) is None
+    assert log == []  # nothing to watch: the worker is never asked
+    hub.unsubscribe(bare)
+    hub.publish_link(KEY, {"stop": "confirmed", "seq": 4})
+    assert bare.get(0) is None  # a viewer that left gets nothing more
+
+
+def test_link_reaches_a_viewer_whose_topics_all_failed():
+    def on_first(key, topic):
+        raise RuntimeError("no such message package")
+
+    hub = streams.StreamHub(on_first=on_first)
+    errors = []
+    viewer = hub.subscribe(KEY, ["/a", "/b"], errors=errors)
+    assert viewer.topics == () and len(errors) == 2
+    hub.publish_link(KEY, {"stop": "idle", "seq": 1})
+    assert viewer.get(0)["event"] == "link"
+
+
+def test_a_failed_subscription_leaves_no_link_viewer_behind():
+    def on_first(key, topic):
+        raise RuntimeError("worker said no")
+
+    hub = streams.StreamHub(on_first=on_first)
+    with pytest.raises(RuntimeError):
+        hub.subscribe(KEY, ["/a"])
+    hub.publish_link(KEY, {"stop": "idle"})
+    assert hub.link_viewer_count(KEY) == 0
+
+
+def raw_image(topic, jpeg_size, bytes_per_s, hz, width=640, height=480):
+    return {**sized_image(topic, jpeg_size, width, height), "bytes_per_s": bytes_per_s, "hz": hz}
+
+
+def test_image_stats_report_the_raw_rate_from_the_car_not_the_jpeg_size():
+    hub, _ = hub_with_log()
+    v = hub.subscribe(KEY, [])
+    v.image_topics = ("/cam",)
+    sink, clock, state = Sink(), Clock(), {"step": 0}
+
+    def gone():
+        state["step"] += 1
+        clock.t = state["step"] * 0.25
+        hub.publish(KEY, raw_image("/cam", 1000, 4_600_000, 14.8))
+        return state["step"] > 8
+
+    streams.serve_sse(sink, hub, v, alive=lambda: True, client_gone=gone, clock=clock, poll=0)
+    stats = [d for e, d in sink.events() if e == "image_stats"]
+    assert stats and all(s["bytes_per_s"] == 4_600_000 and s["hz"] == 14.8 for s in stats)
+    assert all(s["shown_hz"] == pytest.approx(4.0, rel=0.3) for s in stats)  # frames that reached the laptop
