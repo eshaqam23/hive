@@ -18,7 +18,7 @@ The current version has a React front end and a small Python backend. The first 
 - Gripper open/close buttons for the Gripper RC Car preset
 - Command log that sends text to each connected robot on `/hive/command`
 - Hold-to-drive with keyboard (W A S D / arrows, Space to stop) and a backend deadman
-- Live data from each car, in a Live view next to the 3D model: camera image, LiDAR scan plot, and a live topic list (rate and latest value per topic, click a row to open it)
+- Live data from each car, in a Live view next to the 3D model: camera image, LiDAR scan plot, and a topic list. A car page streams only what is on screen: the topic in the Live view, `/ros_data` and `/esp_data`, and the rows you switch on with **watch** (any other row shows its name and type only, so opening a page never pulls every topic over Wi-Fi). Click a row to open it in the Live view.
 - Power slider (20 to 100%, default 50%) that scales driving and turning together
 - Stop confirmation: after a stop Hive checks the car's own `ros_data` echo and shows a red banner if the car may still be moving
 - Camera quality picker (Low, Medium, High) and the measured MB/s coming from the car, so three cars can share campus Wi-Fi
@@ -118,18 +118,18 @@ unique per robot), so several robots can all use `/cmd_vel` without hearing each
 | Stop / release | Publishes a zero `Twist` at once and ends the stream |
 | Gripper | Publishes `std_msgs/msg/Bool` on `/gripper_open` (`true` opens), waiting up to 4 s for a listener |
 | Command log | Publishes `std_msgs/msg/String` on `/hive/command`, waiting up to 4 s for a listener |
-| Status (every 20 s) | Reads the worker's live ROS graph; a robot with no nodes is marked Lost contact |
+| Status (every 10 s) | Reads the worker's live ROS graph; a robot with no nodes is marked Lost contact. The reply also carries the newest stop confirmation, so Home cards stay current |
 
 Velocities scale with the power slider (20 to 100%, default 50%): at 50% forward and backward are `linear.x = ±0.25` and rotation is `angular.z = ±2.5`; 100% is wheel speed 0.5 m/s (the car's full throttle). The power is sent with each drive command and clamped server-side.
 
 ### Safety
 
-- **Hold to drive.** `/cmd_vel` streams at 10 Hz (reliable, KeepLast(1), so a Wi-Fi stall never replays old commands) only while a control (button, or W A S D / arrows) is held. Releasing it, pressing Stop or Space, the window losing focus, or the tab closing all stop the robot. A stop is sent as a burst of 5 zero messages over about 200 ms, and Hive then watches the car's `ros_data` echo and keeps resending until a zero line comes back.
+- **Hold to drive.** `/cmd_vel` streams at 10 Hz (reliable, KeepLast(1), so a Wi-Fi stall never replays old commands) only while a control (button, or W A S D / arrows) is held. Releasing it, pressing Stop or Space, the window losing focus, or the tab closing all stop the robot. A stop is sent as a burst of 5 zero messages over about 200 ms, and Hive then watches the car's `ros_data` echo and keeps resending the stop every 200 ms for up to 5 s until a zero line comes back. The mode line says "Stopped" only once the car confirms; until then it says "Stopping…", and a stop the car never confirms shows "Stop not confirmed" in red on the drive pad, the dock and the robot's Home card.
 - **Deadman.** While driving, the page sends a keepalive every 250 ms. If keepalives stop for 1 s (browser crash, closed laptop, dropped Wi-Fi), the worker stops the robot itself.
 - **Commands stay in order.** The page numbers its drive and gripper commands; one that arrives after a newer one (a slow request on a busy network) is rejected with `409` instead of being applied, so a late drive command can never undo a stop. Driving and the gripper are ordered separately.
-- **Hive does not give up on a connection.** If Connect fails, or a connected robot stops answering (checked every 10 s, and on every drive and keepalive), Hive keeps retrying (after 1, 2, 3, then every 5 s) until the robot answers again or you press Disconnect. Driving stops while it reconnects; press the control again once it is back. Only problems retrying cannot fix (a bad address, ROS 2 not installed) stop the retries. A worker that crashes is restarted by the backend on the next command.
+- **Hive does not give up on a connection.** If Connect fails, or a connected robot stops answering (checked every 10 s, and on every drive and keepalive), Hive keeps retrying (after 1, 2, 3, then every 5 s) until the robot answers again or you press Disconnect. Driving stops while it reconnects; press the control again once it is back. Only problems retrying cannot fix (a bad address, ROS 2 not installed) stop the retries. A worker that crashes is restarted by the backend on the next command. Every new worker sends the car a stop before anything else, so a crash mid-drive cannot leave the car running; the page then says "Reconnected — stop sent".
 - **The Activity panel on each robot's page shows exactly what Hive did:** every request (connect, status, drive with its command number, gripper, disconnect), how long it took, what came back, the backend's error code and message, each release with its keepalive count, and each reconnect attempt. The backend terminal also logs every drive, stop, deadman stop and worker crash.
-- **Disconnect stops the robot** before letting it go. Stopping the backend (Ctrl+C) stops every robot it is driving, and a worker whose backend dies (even `kill -9`) stops its robot before it exits.
+- **Disconnect stops the robot** before letting it go. Stopping the backend (Ctrl+C) stops every robot it is driving, and a worker whose backend dies (even `kill -9`) stops its robot before it exits. If a backend is left running after its terminal is gone (port 8787 already in use), stop it with `wsl pkill -f backend/server.py` on Windows or `pkill -f backend/server.py` on Ubuntu; its workers stop their robots as they exit.
 - **Only Hive can call the backend.** Requests from other web origins are refused (set `HIVE_ALLOWED_ORIGINS` to change the list), so another website open in your browser cannot drive a robot.
 
 ## What each robot needs

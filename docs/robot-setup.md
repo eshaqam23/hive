@@ -132,5 +132,5 @@ Run with the wheels off the ground first. For each car (camera, LiDAR, gripper):
 | --- | --- |
 | Connect: "no nodes answered" | Domain in Hive matches the Pi's `ROS_DOMAIN_ID`; the Pi's `ufw` rule matches the laptop's current IP and this domain's range; the Hyper-V rule covers the range and the car's IP. |
 | Works, then stops after a reconnect to Wi-Fi | The laptop's IP changed; see "A changed laptop IP breaks the Pi rule". |
-| Camera panel blocked | The car refused a runtime camera profile change; the panel offers an explicit full-size override that may disrupt driving. |
+| Camera panel blocked | The camera was not confirmed at a low-bandwidth size: it refused the profile change, reported a different profile when read back, or its node did not answer (Hive fails closed when the car publishes a RealSense topic). The panel shows the reason and offers an explicit full-size override that may disrupt driving. Reconnect, or pick a quality again, to retry tuning. |
 | `ros2` command hangs in WSL | Run `ros2 daemon start` once. |
