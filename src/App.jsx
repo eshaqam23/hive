@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import ExecutiveView from "./executive/ExecutiveView.jsx";
 
 const API_BASE_URL = import.meta.env.VITE_HIVE_API_URL || "http://127.0.0.1:8787/api";
 const FLEET_STORAGE_KEY = "hive:fleet:manual-rc-v1";
@@ -154,7 +155,7 @@ async function postApi(path, payload) {
 
 export default function App() {
   const [robots, setRobots] = useState(loadFleet);
-  const [view, setView] = useState("fleet");
+  const [view, setView] = useState("command");
   const [selectedRobotId, setSelectedRobotId] = useState(robots[0]?.id);
   const [selectedTopic, setSelectedTopic] = useState(null);
   const [messages, setMessages] = useState([
@@ -303,7 +304,7 @@ export default function App() {
           />
         )}
 
-        {view === "command" && <CommandView robots={robots} messages={messages} onSend={sendCommand} />}
+        {view === "command" && <ExecutiveView />}
       </main>
     </div>
   );
