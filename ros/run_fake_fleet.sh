@@ -12,5 +12,15 @@ if [ -n "${ROS_DOMAIN_ID:-}" ] && [ "$ROS_DOMAIN_ID" != "77" ]; then
 fi
 export ROS_DOMAIN_ID=77
 export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+# Cyclone DDS, whatever the shell says. Under Fast DDS (the Jazzy default, which a non-interactive
+# shell such as `npm run hive` gets) rosbridge answers every /hive/fleet_control call with
+# "Service ... does not exist", although `ros2 service call` reaches it. Domain 77 is separate
+# from the cars', so this need not match the RMW the car backend pins for them.
+if [ -e "$(ros2 pkg prefix rmw_cyclonedds_cpp 2>/dev/null)/lib/librmw_cyclonedds_cpp.so" ]; then
+  export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+else
+  echo "run_fake_fleet: rmw_cyclonedds_cpp not installed (apt install ros-jazzy-rmw-cyclonedds-cpp);" \
+    "using ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}, where rosbridge may not reach /hive/fleet_control" >&2
+fi
 exec ros2 launch hive_fake_robots fake_fleet.launch.py \
   hive_backend_dir:="${HIVE_BACKEND_DIR:-$HERE/../backend}" time_scale:="${HIVE_SIM_TIME_SCALE:-1.0}"
