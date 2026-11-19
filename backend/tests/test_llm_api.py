@@ -110,6 +110,9 @@ def test_no_response_this_api_can_produce_contains_a_key():
             c.post("/api/exec/llm/providers/groq/test", json={}).text,
             c.post("/api/exec/llm/providers/gemini/test").text,  # 401 echoing the key
             c.post("/api/exec/llm/providers/nope/test").text,  # 404
+            c.get("/api/exec/llm/providers/groq/models").text,
+            c.get("/api/exec/llm/providers/gemini/models").text,  # 401 echoing the key
+            c.get("/api/exec/llm/providers/nope/models").text,  # 404
             c.get("/api/exec/llm/templates").text,
             # validation failures, each carrying a key in the request
             post(c, {k: v for k, v in GROQ.items() if k != "model"}, KEY).text,  # missing field
@@ -302,6 +305,46 @@ def test_an_unreachable_provider_is_an_answer_not_a_server_error():
 def test_testing_an_unknown_provider_is_a_404():
     with make_client() as c:
         assert c.post("/api/exec/llm/providers/nope/test").status_code == 404
+
+
+# ---------------------------------------------------------------- the model list
+def test_models_lists_what_the_provider_serves_with_the_stored_key():
+    mock = ScriptedQwen([])
+    seen = []
+
+    def handler(request):
+        seen.append((request.url.path, request.headers.get("authorization")))
+        return mock.handler(request)
+
+    with make_client(handler) as c:
+        post(c, GROQ, KEY)
+        before = c.get("/api/exec/events").json()["timeline"]
+        response = c.get("/api/exec/llm/providers/groq/models")
+        after = c.get("/api/exec/events").json()["timeline"]
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "models": [MOCK_MODEL], "error": ""}
+    assert seen == [("/v1/models", f"Bearer {KEY}")]  # one listing call, no chat
+    assert after == before
+
+
+def test_a_provider_without_a_models_endpoint_is_an_answer_with_its_own_words():
+    def handler(request):
+        auth = request.headers.get("authorization", "")
+        return httpx.Response(404, json={"error": {"message": f"no such route (sent {auth})"}})
+
+    with make_client(handler) as c:
+        post(c, GROQ, KEY)
+        response = c.get("/api/exec/llm/providers/groq/models")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False and body["models"] == []
+    assert body["error"] == "HTTP 404: no such route (sent Bearer …4f2a)"
+    assert KEY not in response.text
+
+
+def test_models_of_an_unknown_provider_is_a_404():
+    with make_client() as c:
+        assert c.get("/api/exec/llm/providers/nope/models").status_code == 404
 
 
 # ---------------------------------------------------------------- templates

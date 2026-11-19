@@ -20,7 +20,9 @@ A file that does not parse is reported and never overwritten: a write answers
 
 The test button probes one row as stored (or with a model typed but not yet
 saved). It is not routed through the planner, not cached and not written to
-the mission log.
+the mission log. The models route asks the same row's models endpoint only, for
+the pickers' suggestions; a provider without one answers ok false with its own
+words, never a server error.
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
-from .probe import probe_provider
+from .probe import ModelsUnsupported, list_models, probe_provider
 from .providers import (ENV_ROW_ID, ROLES, ProviderRow, ProviderStore, ProviderStoreError, Sampling, load_store,
                         store_path)
 from .router import NotConfigured, Router
@@ -45,6 +47,9 @@ __all__ = ["PREFIX", "ProbeIn", "ProviderIn", "install"]
 PREFIX = "/api/exec/llm"
 
 MAX_KEY_LEN = 4096
+
+#: A picker suggestion list; hosted routers serve a few hundred ids.
+MAX_MODELS = 1000
 
 ENV_NOTE = ("No provider store exists yet, so the executive role uses the read-only row built from QWEN_* "
             "env. The first save creates the store and from then on QWEN_* is not read: bind the executive "
@@ -187,9 +192,7 @@ def build_router(llm: Router) -> APIRouter:
                     raise HTTPException(404, f"cannot bind {role}: {exc.args[0]}") from None
             return saved(store)
 
-    # -- the test button -----------------------------------------------------------------
-    @api.post("/providers/{provider_id}/test")
-    async def test_provider(provider_id: str, body: Optional[ProbeIn] = None) -> dict:
+    def stored(provider_id: str) -> tuple[ProviderStore, ProviderRow]:
         try:
             store = llm.store()
         except NotConfigured as exc:
@@ -197,6 +200,24 @@ def build_router(llm: Router) -> APIRouter:
         row = store.row(provider_id)
         if row is None:
             raise HTTPException(404, f"no provider {provider_id!r}")
+        return store, row
+
+    # -- the model list ------------------------------------------------------------------
+    @api.get("/providers/{provider_id}/models")
+    async def provider_models(provider_id: str) -> dict:
+        """What the provider's models endpoint serves, for the pickers. A failure is an answer:
+        the pickers fall back to free text, so ``ok`` false is not an error status."""
+        store, row = stored(provider_id)
+        try:
+            served = await list_models(row, store.api_key(provider_id) or "", transport=llm.transport)
+        except ModelsUnsupported as exc:
+            return {"ok": False, "models": [], "error": str(exc)}
+        return {"ok": True, "models": served[:MAX_MODELS], "error": ""}
+
+    # -- the test button -----------------------------------------------------------------
+    @api.post("/providers/{provider_id}/test")
+    async def test_provider(provider_id: str, body: Optional[ProbeIn] = None) -> dict:
+        store, row = stored(provider_id)
         model = body.model.strip() if body is not None else ""
         if model:
             try:
