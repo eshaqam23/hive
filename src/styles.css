@@ -55,6 +55,8 @@
   --shadow-float: 0 8px 28px rgb(0 0 0 / 0.42), 0 0 0 1px rgb(222 220 209 / 0.06);
   --shadow-card: 0 4px 14px rgb(0 0 0 / 0.28);
   --shadow-paper: 0 1px 2px rgb(20 20 19 / 0.06), 0 4px 16px rgb(20 20 19 / 0.06);
+  /* a plan waiting for the operator: the coral edge glows */
+  --shadow-glow: 0 0 0 1px rgb(217 119 87 / 0.55), 0 0 22px rgb(217 119 87 / 0.22);
 
   --ease-ui: cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-enter: cubic-bezier(0.22, 1, 0.36, 1);
@@ -63,6 +65,16 @@
   --animate-signal: signal 1.1s ease-in-out infinite alternate;
   --animate-spin-slow: spin 0.9s linear infinite;
   --animate-fade: fade 260ms var(--ease-ui) both;
+  --animate-shimmer: shimmer 1.8s linear infinite;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
 }
 
 @keyframes enter {
@@ -419,6 +431,20 @@
     transform: none;
   }
 
+  /* the live planner line: text that shimmers while the Executive thinks */
+  .shimmer-text {
+    animation: var(--animate-shimmer);
+    background: linear-gradient(90deg, var(--color-faint) 0%, var(--color-ink) 50%, var(--color-faint) 100%) 0 0 / 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  /* a thin bar that sweeps while a card waits for the planner */
+  .shimmer-bar {
+    animation: var(--animate-shimmer);
+    background: linear-gradient(90deg, transparent 0%, var(--color-coral) 50%, transparent 100%) 0 0 / 200% 100%;
+  }
+
   .skip-link {
     background: var(--color-coral);
     border-radius: 9999px;
@@ -453,5 +479,9 @@
   .stop:hover,
   .group:hover .model img {
     transform: none !important;
+  }
+  .shimmer-text {
+    background: none;
+    color: var(--color-ink);
   }
 }
