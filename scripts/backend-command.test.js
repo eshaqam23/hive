@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { backendCommand, launchPlan, serviceCommand, toWslPath, withWslEnv, wslSignals } from "./backend-command.mjs";
+import { backendCommand, launchPlan, serviceCommand, toWslPath, withWslEnv, withWslPaths, wslSignals } from "./backend-command.mjs";
 
 describe("toWslPath", () => {
   it("lower-cases the drive letter and converts backslashes", () => {
@@ -173,5 +173,26 @@ describe("withWslEnv", () => {
     const env = { PYTHONUNBUFFERED: "1", HIVE_GATEWAY: "fake", HIVE_SIM_TIME_SCALE: "" };
     expect(withWslEnv(undefined, env)).toBe("PYTHONUNBUFFERED:HIVE_GATEWAY");
     expect(withWslEnv("", {})).toBe("");
+  });
+  it("carries HIVE_ROS_SETUP so the car backend can run against the mock ROS", () => {
+    expect(withWslEnv(undefined, { HIVE_ROS_SETUP: "/mnt/c/hive/backend/test/mock_ros/setup.bash" })).toBe("HIVE_ROS_SETUP");
+  });
+});
+
+describe("withWslPaths", () => {
+  it("turns a Windows HIVE_ROS_SETUP into its WSL path (Git Bash hands node C:/...)", () => {
+    expect(withWslPaths({ HIVE_ROS_SETUP: "C:/dev/hive/backend/test/mock_ros/setup.bash" }).HIVE_ROS_SETUP).toBe("/mnt/c/dev/hive/backend/test/mock_ros/setup.bash");
+    expect(withWslPaths({ HIVE_ROS_SETUP: "C:\\dev\\hive\\setup.bash" }).HIVE_ROS_SETUP).toBe("/mnt/c/dev/hive/setup.bash");
+  });
+  it("leaves WSL, relative and unset values alone and does not touch the input", () => {
+    expect(withWslPaths({ HIVE_ROS_SETUP: "/opt/ros/jazzy/setup.bash" }).HIVE_ROS_SETUP).toBe("/opt/ros/jazzy/setup.bash");
+    expect(withWslPaths({ HIVE_ROS_SETUP: "backend/test/mock_ros/setup.bash" }).HIVE_ROS_SETUP).toBe("backend/test/mock_ros/setup.bash");
+    const env = { HIVE_GATEWAY: "fake" };
+    const out = withWslPaths(env);
+    expect(out).toEqual({ HIVE_GATEWAY: "fake" });
+    expect(out).not.toBe(env);
+    const win = { HIVE_ROS_SETUP: "C:/x/setup.bash" };
+    withWslPaths(win);
+    expect(win.HIVE_ROS_SETUP).toBe("C:/x/setup.bash");
   });
 });

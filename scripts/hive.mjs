@@ -6,7 +6,7 @@
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { backendCommand, launchPlan, serviceCommand, withWslEnv, wslSignals } from "./backend-command.mjs";
+import { backendCommand, launchPlan, serviceCommand, withWslEnv, withWslPaths, wslSignals } from "./backend-command.mjs";
 import { busyPorts, portInUseMessage, waitForPort } from "./ports.mjs";
 import { pipePrefixed } from "./prefix.mjs";
 import { shutdownAll } from "./shutdown.mjs";
@@ -23,8 +23,10 @@ if (plan.error) {
 }
 
 // Unbuffered so banners and logs appear at once through the pipes. HIVE_GATEWAY is set so the
-// Executive gets the launcher's default. WSLENV carries these variables across into WSL on Windows.
-const env = { ...process.env, PYTHONUNBUFFERED: "1", HIVE_GATEWAY: plan.gateway };
+// Executive gets the launcher's default. WSLENV carries these variables across into WSL on Windows,
+// with paths such as HIVE_ROS_SETUP turned into WSL paths first.
+const baseEnv = { ...process.env, PYTHONUNBUFFERED: "1", HIVE_GATEWAY: plan.gateway };
+const env = isWin ? withWslPaths(baseEnv) : baseEnv;
 if (isWin) env.WSLENV = withWslEnv(process.env.WSLENV, env);
 
 const procs = {}; // name -> { name, step, child, pidfile, failed, closed }

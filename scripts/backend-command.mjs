@@ -81,12 +81,22 @@ export function launchPlan({ argv = [], env = {} }) {
 // Variables that must reach the WSL side (WSLENV lists them; plain names, no path translation).
 // Only the ones set in env: WSL turns a listed but unset variable into an empty string, which
 // float("") and friends then reject.
-const WSL_VARS = ["PYTHONUNBUFFERED", "HIVE_GATEWAY", "HIVE_PROVIDERS_FILE", "HIVE_SIM_TIME_SCALE", "HIVE_EXEC_PYTHON"];
+const WSL_VARS = ["PYTHONUNBUFFERED", "HIVE_GATEWAY", "HIVE_PROVIDERS_FILE", "HIVE_SIM_TIME_SCALE", "HIVE_EXEC_PYTHON", "HIVE_ROS_SETUP"];
 export function withWslEnv(existing, env) {
   const parts = (existing || "").split(":").filter(Boolean);
   const names = new Set(parts.map((p) => p.split("/")[0]));
   const add = WSL_VARS.filter((v) => !names.has(v) && env[v] != null && env[v] !== "");
   return [...parts, ...add].join(":");
+}
+
+// Variables holding a path that a WSL process reads. A Windows path (C:\... or the C:/... that Git
+// Bash hands node for $PWD) becomes its /mnt/<drive> form; WSL and relative paths stay as they are
+// (the backend runs from the repo root). Returns a new env.
+const WSL_PATH_VARS = ["HIVE_ROS_SETUP"];
+export function withWslPaths(env) {
+  const out = { ...env };
+  for (const v of WSL_PATH_VARS) if (out[v]) out[v] = toWslPath(out[v]);
+  return out;
 }
 
 const EXEC_PYTHON = "~/.venvs/hive-exec/bin/python";
