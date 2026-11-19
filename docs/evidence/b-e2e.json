@@ -1,5 +1,5 @@
 {
-  "checked_at": "2026-11-11T17:01:10",
+  "checked_at": "2026-11-19T13:25:15",
   "planner": "baseline",
   "results": [
     {
@@ -7,13 +7,13 @@
       "expected": "completed",
       "final": "completed",
       "pass": true,
-      "run_id": "run-ef1ac1fb",
+      "run_id": "run-4ebd2c13",
       "revisions": [
         {
           "rev": 1,
           "kind": "initial",
           "scope": "observation_stage",
-          "planner": "Baseline (templates, not Qwen)",
+          "planner": "Baseline (no LLM)",
           "status": "finished",
           "tasks": [
             "t1:camera_01:inspect_area",
@@ -24,7 +24,7 @@
           "rev": 2,
           "kind": "continuation",
           "scope": "full",
-          "planner": "Baseline (templates, not Qwen)",
+          "planner": "Baseline (no LLM)",
           "status": "finished",
           "tasks": [
             "t1:gripper_01:navigate_to",
@@ -36,37 +36,37 @@
       ],
       "attempts": [
         {
-          "attempt": "1.t1.a1-dc47",
+          "attempt": "1.t1.a1-0d5b",
           "robot": "camera_01",
           "skill": "inspect_area",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t2.a1-7a18",
+          "attempt": "1.t2.a1-0d08",
           "robot": "lidar_01",
           "skill": "scan_route",
           "status": "succeeded"
         },
         {
-          "attempt": "2.t1.a1-cef6",
+          "attempt": "2.t1.a1-077f",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "2.t2.a1-5d3d",
+          "attempt": "2.t2.a1-9308",
           "robot": "gripper_01",
           "skill": "pick_object",
           "status": "succeeded"
         },
         {
-          "attempt": "2.t3.a1-e6d3",
+          "attempt": "2.t3.a1-e28e",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "2.t4.a1-4752",
+          "attempt": "2.t4.a1-58cc",
           "robot": "gripper_01",
           "skill": "place_object",
           "status": "succeeded"
@@ -97,13 +97,13 @@
       "expected": "completed",
       "final": "completed",
       "pass": true,
-      "run_id": "run-8c3df1b8",
+      "run_id": "run-daf8523e",
       "revisions": [
         {
           "rev": 1,
           "kind": "initial",
           "scope": "full",
-          "planner": "Baseline (templates, not Qwen)",
+          "planner": "Baseline (no LLM)",
           "status": "finished",
           "tasks": [
             "t1:gripper_01:navigate_to",
@@ -115,25 +115,25 @@
       ],
       "attempts": [
         {
-          "attempt": "1.t1.a1-3051",
+          "attempt": "1.t1.a1-c7c9",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t2.a1-0630",
+          "attempt": "1.t2.a1-c613",
           "robot": "gripper_01",
           "skill": "pick_object",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t3.a1-11e5",
+          "attempt": "1.t3.a1-4655",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t4.a1-10c6",
+          "attempt": "1.t4.a1-a914",
           "robot": "gripper_01",
           "skill": "place_object",
           "status": "succeeded"
@@ -162,13 +162,13 @@
       "expected": "completed",
       "final": "completed",
       "pass": true,
-      "run_id": "run-f71a7a83",
+      "run_id": "run-c24adcd2",
       "revisions": [
         {
           "rev": 1,
           "kind": "initial",
           "scope": "full",
-          "planner": "Baseline (templates, not Qwen)",
+          "planner": "Baseline (no LLM)",
           "status": "finished",
           "tasks": [
             "t1:camera_01:capture_image"
@@ -177,7 +177,7 @@
       ],
       "attempts": [
         {
-          "attempt": "1.t1.a1-293a",
+          "attempt": "1.t1.a1-9dc1",
           "robot": "camera_01",
           "skill": "capture_image",
           "status": "succeeded"
@@ -206,7 +206,7 @@
       "expected": "clarification",
       "final": "clarification",
       "pass": true,
-      "run_id": "run-7df6b2e6",
+      "run_id": "run-4f25bd70",
       "revisions": [],
       "attempts": [],
       "robots_dispatched": [],
@@ -227,13 +227,13 @@
       "expected": "completed",
       "final": "completed",
       "pass": true,
-      "run_id": "run-c5ff827e",
+      "run_id": "run-3e948381",
       "revisions": [
         {
           "rev": 1,
           "kind": "initial",
           "scope": "full",
-          "planner": "Baseline (templates, not Qwen)",
+          "planner": "Baseline (no LLM)",
           "status": "finished",
           "tasks": [
             "t1:gripper_01:navigate_to",
@@ -246,7 +246,7 @@
           "rev": 2,
           "kind": "recovery",
           "scope": "full",
-          "planner": "Baseline (templates, not Qwen)",
+          "planner": "Baseline (no LLM)",
           "status": "finished",
           "tasks": [
             "t1:gripper_01:navigate_to",
@@ -256,31 +256,31 @@
       ],
       "attempts": [
         {
-          "attempt": "1.t1.a1-8edf",
+          "attempt": "1.t1.a1-7497",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t2.a1-6dbb",
+          "attempt": "1.t2.a1-80e0",
           "robot": "gripper_01",
           "skill": "pick_object",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t3.a1-537b",
+          "attempt": "1.t3.a1-e8f6",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "failed"
         },
         {
-          "attempt": "2.t1.a1-2bb5",
+          "attempt": "2.t1.a1-09c1",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "2.t2.a1-72ca",
+          "attempt": "2.t2.a1-ed6b",
           "robot": "gripper_01",
           "skill": "place_object",
           "status": "succeeded"
@@ -309,13 +309,13 @@
       "expected": "blocked",
       "final": "blocked",
       "pass": true,
-      "run_id": "run-f1d811fc",
+      "run_id": "run-d351cb77",
       "revisions": [
         {
           "rev": 1,
           "kind": "initial",
           "scope": "full",
-          "planner": "Baseline (templates, not Qwen)",
+          "planner": "Baseline (no LLM)",
           "status": "finished",
           "tasks": [
             "t1:gripper_01:navigate_to",
@@ -327,13 +327,13 @@
       ],
       "attempts": [
         {
-          "attempt": "1.t1.a1-0175",
+          "attempt": "1.t1.a1-0a81",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t2.a1-9769",
+          "attempt": "1.t2.a1-56bc",
           "robot": "gripper_01",
           "skill": "pick_object",
           "status": "succeeded"
@@ -364,13 +364,13 @@
       "expected": "canceled",
       "final": "canceled",
       "pass": true,
-      "run_id": "run-6f7706e9",
+      "run_id": "run-c1ed4aee",
       "revisions": [
         {
           "rev": 1,
           "kind": "initial",
           "scope": "full",
-          "planner": "Baseline (templates, not Qwen)",
+          "planner": "Baseline (no LLM)",
           "status": "executing",
           "tasks": [
             "t1:gripper_01:navigate_to",
@@ -382,7 +382,7 @@
       ],
       "attempts": [
         {
-          "attempt": "1.t1.a1-0e67",
+          "attempt": "1.t1.a1-b9b6",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "canceled"
@@ -407,17 +407,76 @@
       }
     },
     {
+      "story": "stop one task; others keep running; recovery proposed",
+      "expected": "awaiting_approval",
+      "final": "awaiting_approval",
+      "pass": true,
+      "run_id": "run-b1b3db01",
+      "revisions": [
+        {
+          "rev": 1,
+          "kind": "initial",
+          "scope": "observation_stage",
+          "planner": "Baseline (no LLM)",
+          "status": "finished",
+          "tasks": [
+            "t1:camera_01:inspect_area",
+            "t2:lidar_01:scan_route"
+          ]
+        },
+        {
+          "rev": 2,
+          "kind": "recovery",
+          "scope": "observation_stage",
+          "planner": "Baseline (no LLM)",
+          "status": "awaiting_approval",
+          "tasks": [
+            "t1:lidar_01:scan_route"
+          ]
+        }
+      ],
+      "attempts": [
+        {
+          "attempt": "1.t1.a1-339d",
+          "robot": "camera_01",
+          "skill": "inspect_area",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "1.t2.a1-3e3b",
+          "robot": "lidar_01",
+          "skill": "scan_route",
+          "status": "canceled"
+        }
+      ],
+      "robots_dispatched": [
+        "camera_01",
+        "lidar_01"
+      ],
+      "outcome": null,
+      "carried": {},
+      "events_received": 7,
+      "notes": "t2 right after stop: canceling; scan confirmed canceled while camera was accepted; camera finished succeeded; command files: ['runs/run-b1b3db01/agent_commands/camera_01/t1-r1-a1.json', 'runs/run-b1b3db01/agent_commands/lidar_01/t2-r1-a1.json']",
+      "gateway": {
+        "kind": "synapse",
+        "label": "AgenticROS / Corebrum Synapse",
+        "verified_transport": true,
+        "connected": true,
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 2 round trip(s) this run"
+      }
+    },
+    {
       "story": "uncertain place blocks without retry",
       "expected": "blocked",
       "final": "blocked",
       "pass": true,
-      "run_id": "run-7b37c96c",
+      "run_id": "run-b3a09f1f",
       "revisions": [
         {
           "rev": 1,
           "kind": "initial",
           "scope": "full",
-          "planner": "Baseline (templates, not Qwen)",
+          "planner": "Baseline (no LLM)",
           "status": "finished",
           "tasks": [
             "t1:gripper_01:navigate_to",
@@ -429,25 +488,25 @@
       ],
       "attempts": [
         {
-          "attempt": "1.t1.a1-38ed",
+          "attempt": "1.t1.a1-bbd1",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t2.a1-50e3",
+          "attempt": "1.t2.a1-604a",
           "robot": "gripper_01",
           "skill": "pick_object",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t3.a1-68b7",
+          "attempt": "1.t3.a1-8f17",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t4.a1-5685",
+          "attempt": "1.t4.a1-8507",
           "robot": "gripper_01",
           "skill": "place_object",
           "status": "uncertain"
