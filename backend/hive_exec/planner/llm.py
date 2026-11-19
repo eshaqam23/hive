@@ -91,8 +91,10 @@ class LLMPlanner(Planner):
         out.update(configured=True, provider=row.id, provider_label=row.label or row.id, provider_kind=row.kind,
                    model=row.model, endpoint=row.base_url, fallbacks=[c.row.id for c in chain[1:]],
                    settings=settings_record(row))
+        # The probe must be of this exact row: an edited URL or model is unproven until probed again.
         out["live_enabled"] = bool(p and p.get("ok") and p.get("provider_id") == row.id
-                                   and p.get("model") == row.model)
+                                   and p.get("model") == row.model and p.get("base_url") == row.base_url
+                                   and p.get("kind") == row.kind)
         return out
 
     # ------------------------------------------------------------- probe

@@ -16,6 +16,7 @@ from .contracts import plan_proposal_json_schema
 from .executive import ExecError, Executive
 from .gateway.base import RobotGateway
 from .planner.baseline import BaselinePlanner
+from .llm import api as llm_api
 from .llm.router import Router
 from .planner.llm import LLMPlanner
 from .sim.fake_world import KNOWN_FAULTS
@@ -93,6 +94,10 @@ def create_app(settings: Optional[ExecSettings] = None, gateway: Optional[RobotG
     app.state.executive = ex
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_methods=["*"],
                        allow_headers=["*"])
+
+    llm_planner = ex.planners.get("llm")
+    if isinstance(llm_planner, LLMPlanner):
+        llm_api.install(app, llm_planner.router)  # /api/exec/llm: provider rows, roles, test, templates
 
     @app.exception_handler(ExecError)
     async def _exec_error(_, exc: ExecError):

@@ -99,6 +99,15 @@ class Router:
         """The injected transport (tests), shared with the probe."""
         return self._transport
 
+    @property
+    def path(self) -> Optional[Union[str, Path]]:
+        """The store path this router was given (None: $HIVE_PROVIDERS_FILE, else ~/.hive)."""
+        return self._path
+
+    def invalidate(self) -> None:
+        """Drop the cached store; the next read loads the file again (the API calls this after a save)."""
+        self._fingerprint = ()
+
     # -- the store, re-read on change ------------------------------------------------------
     def store(self) -> ProviderStore:
         current = fingerprint(self._path)
