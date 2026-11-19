@@ -6,10 +6,11 @@ import { CloseIcon, GearIcon, HiveMark, MoonIcon, SunIcon } from "./icons.jsx";
 import { missionPill } from "./status.js";
 import { setTheme, useTheme } from "./theme.js";
 
+/* Mission (the chat view, where missions are sent) comes first: it is the app's main page. */
 const TABS = [
+  ["chat", "Mission"],
   ["fleet", "Fleet"],
   ["map", "Map"],
-  ["chat", "Chat"],
 ];
 
 /* The robot page is part of Fleet, so Fleet stays lit while it is open. */
@@ -38,7 +39,7 @@ function MissionPill({ mission, sim, onOpen }) {
       <button
         className="inline-flex min-h-9 min-w-0 items-center gap-2 rounded-full border border-coral/50 bg-coral/10 px-3.5 font-mono text-[13px] text-ink transition-colors hover:bg-coral/20"
         onClick={onOpen}
-        title="Open the mission in Chat"
+        title="Open the Mission tab"
         type="button"
       >
         <span aria-hidden="true" className="size-2 flex-none animate-signal rounded-full bg-coral" />
@@ -142,10 +143,15 @@ export default function Header({ view, onNavigate, live, mission, sim, models, s
   const current = tabOf(view);
   return (
     <header className="relative z-20 flex h-16 flex-none items-center gap-3 border-b border-line bg-sidebar px-4 sm:gap-5 sm:px-5">
-      <span className="flex flex-none items-center gap-2">
+      <button
+        aria-label="HIVE: open the Mission tab"
+        className="flex flex-none items-center gap-2 rounded-lg"
+        onClick={() => onNavigate("chat")}
+        type="button"
+      >
         <HiveMark className="text-coral" size={26} />
         <span className="hidden font-display text-[22px] leading-none tracking-title sm:inline">HIVE</span>
-      </span>
+      </button>
 
       <nav aria-label="Views" className="flex flex-none items-center gap-1">
         {TABS.map(([id, label]) => (

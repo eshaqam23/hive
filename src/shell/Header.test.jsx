@@ -16,14 +16,23 @@ const header = (props = {}) =>
   render(<Header live={healthy} mission={null} models={null} onCloseStop={vi.fn()} onNavigate={vi.fn()} onStopAll={vi.fn()} sim stop={null} view="fleet" {...props} />);
 
 describe("Header", () => {
-  it("has the Fleet | Map | Chat tabs, with Fleet lit on the robot page", () => {
+  it("has the Mission | Fleet | Map tabs, with Fleet lit on the robot page", () => {
     const onNavigate = vi.fn();
     header({ view: "robot", onNavigate });
     const nav = screen.getByRole("navigation", { name: "Views" });
-    expect(within(nav).getAllByRole("button").map((b) => b.textContent)).toEqual(["Fleet", "Map", "Chat"]);
+    expect(within(nav).getAllByRole("button").map((b) => b.textContent)).toEqual(["Mission", "Fleet", "Map"]);
     expect(within(nav).getByRole("button", { name: "Fleet" }).getAttribute("aria-current")).toBe("page");
     fireEvent.click(within(nav).getByRole("button", { name: "Map" }));
     expect(onNavigate).toHaveBeenCalledWith("map");
+  });
+
+  it("lights Mission on the chat view, and the HIVE mark opens it too", () => {
+    const onNavigate = vi.fn();
+    header({ view: "chat", onNavigate });
+    const nav = screen.getByRole("navigation", { name: "Views" });
+    expect(within(nav).getByRole("button", { name: "Mission" }).getAttribute("aria-current")).toBe("page");
+    fireEvent.click(screen.getByRole("button", { name: "HIVE: open the Mission tab" }));
+    expect(onNavigate).toHaveBeenCalledWith("chat");
   });
 
   it("shows the LIVE dot green when both backends are healthy, amber naming what is down otherwise", () => {
@@ -38,12 +47,12 @@ describe("Header", () => {
     expect(screen.getByText("car backend offline (npm run backend)")).toBeTruthy();
   });
 
-  it("shows a mission pill with revision and elapsed time, tagged SIM, that opens Chat", () => {
+  it("shows a mission pill with revision and elapsed time, tagged SIM, that opens the Mission tab", () => {
     const onNavigate = vi.fn();
     header({ mission: { status: "executing", active_revision: 2, created_at: Date.now() / 1000 - 65 }, onNavigate });
     expect(screen.getByTestId("mission-pill").textContent).toMatch(/^mission running · rev 2 · 01:0[56]$/);
     expect(screen.getByText("SIM")).toBeTruthy();
-    fireEvent.click(screen.getByTitle("Open the mission in Chat"));
+    fireEvent.click(screen.getByTitle("Open the Mission tab"));
     expect(onNavigate).toHaveBeenCalledWith("chat");
   });
 

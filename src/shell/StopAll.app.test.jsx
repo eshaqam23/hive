@@ -84,6 +84,12 @@ afterEach(() => {
   setEventSourceFactory(null);
 });
 
+// The app opens on the Mission tab; these tests connect the car from its Fleet card first.
+function renderOnFleet() {
+  render(<App />);
+  fireEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Fleet" }));
+}
+
 const card = () => screen.getByRole("button", { name: "Open Rover" }).closest("article");
 const stopCalls = () => server.calls.filter((c) => c.path === "/robots/drive" && c.body.action === "stop");
 const cancelCalls = () => server.calls.filter((c) => c.exec && c.path === "/cancel");
@@ -95,7 +101,7 @@ async function connectRover() {
 
 describe("STOP ALL", () => {
   it("sends the car stop and the mission cancel in the same click, and the car's stop lands while the Executive hangs", async () => {
-    render(<App />);
+    renderOnFleet();
     await connectRover();
     expect((await screen.findByTestId("mission-pill")).textContent).toMatch(/^mission running · rev 1 · 01:4\d$/);
 
@@ -119,7 +125,7 @@ describe("STOP ALL", () => {
 
   it("still stops the cars when the Executive is offline, and says the cancel failed", async () => {
     server.execDown = true;
-    render(<App />);
+    renderOnFleet();
     await connectRover();
     await waitFor(() => expect(screen.getByRole("status", { name: /^LIVE:/ }).getAttribute("title")).toMatch(/Executive offline/));
 
@@ -133,7 +139,7 @@ describe("STOP ALL", () => {
 
   it("does not call the Executive when it reports no mission, and says when no car is connected", async () => {
     server.mission = null;
-    render(<App />);
+    renderOnFleet();
     await waitFor(() => expect(server.calls.some((c) => c.exec && c.path === "/state")).toBe(true));
     await waitFor(() => expect(screen.getByRole("status", { name: /^LIVE:/ }).getAttribute("title")).toBe("Car backend and Executive healthy"));
 
@@ -150,7 +156,7 @@ describe("STOP ALL", () => {
 
   it("treats the Executive's 'No active mission.' as nothing to cancel", async () => {
     server.cancel = () => reply(404, { ok: false, error: "No active mission.", detail: null });
-    render(<App />);
+    renderOnFleet();
     await screen.findByTestId("mission-pill");
     fireEvent.click(screen.getByRole("button", { name: "STOP ALL" }));
     const results = screen.getByRole("status", { name: "STOP ALL results" });

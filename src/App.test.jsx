@@ -93,8 +93,16 @@ afterEach(() => {
   FakeSource.instances = [];
 });
 
-async function openAndConnect() {
+const views = () => screen.getByRole("navigation", { name: "Views" });
+
+// The app opens on the Mission tab; the car tests start from the Fleet cards.
+function renderOnFleet() {
   render(<App />);
+  fireEvent.click(within(views()).getByRole("button", { name: "Fleet" }));
+}
+
+async function openAndConnect() {
+  renderOnFleet();
   fireEvent.click(screen.getByRole("button", { name: "Open Rover" }));
   fireEvent.click(screen.getByRole("button", { name: "Connect Rover" }));
   await screen.findByText(/Found 1 node and 6 topics/);
@@ -102,6 +110,15 @@ async function openAndConnect() {
 
 const mode = () => screen.getByTestId("robot-mode").textContent;
 const emitLink = (link) => act(() => liveSources()[0].emit("link", { reporting: true, other_publishers: 0, ...link }));
+
+describe("App landing", () => {
+  it("opens on the Mission tab, where missions are sent", async () => {
+    render(<App />);
+    expect(within(views()).getByRole("button", { name: "Mission" }).getAttribute("aria-current")).toBe("page");
+    expect(await screen.findByRole("heading", { name: "What should the fleet do?" })).toBeTruthy(); // once the Executive's state arrives
+    expect(screen.queryByRole("button", { name: "Open Rover" })).toBeNull();
+  });
+});
 
 describe("App car page", () => {
   it("streams only the stage topic and the link topics on one EventSource; a watch toggle reopens it (R26)", async () => {
@@ -161,7 +178,7 @@ describe("App car page", () => {
 
 describe("App Home", () => {
   it("a car whose stop is not confirmed gets a danger badge on its Home card, from the link poll (#5)", async () => {
-    render(<App />);
+    renderOnFleet();
     const card = screen.getByRole("button", { name: "Open Rover" }).closest("article");
     fireEvent.click(within(card).getByRole("button", { name: "Connect Rover" }));
     await waitFor(() => expect(within(card).getByText("Live")).toBeTruthy());
@@ -186,7 +203,7 @@ describe("App change address", () => {
   const homeCard = (name) => screen.getByRole("button", { name: `Open ${name}` }).closest("article");
 
   it("changes an offline car's IP and domain from its Home card, keeps it, and Connect uses the new address", async () => {
-    render(<App />);
+    renderOnFleet();
     fireEvent.click(within(homeCard("Rover")).getByRole("button", { name: "Change address of Rover" }));
     expect(within(dialog()).getByLabelText("Robot IP address").value).toBe("10.0.0.5");
     expect(within(dialog()).getByLabelText("ROS domain ID").value).toBe("43");
@@ -214,7 +231,7 @@ describe("App change address", () => {
         { id: "r2", name: "Grip", preset: "gripperRcCar", host: "10.0.0.6", domainId: 44 },
       ]),
     );
-    render(<App />);
+    renderOnFleet();
     fireEvent.click(within(homeCard("Rover")).getByRole("button", { name: "Change address of Rover" }));
     fill("10.0.0.5", 44);
     save();

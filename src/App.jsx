@@ -239,7 +239,7 @@ function useBackendHealth() {
 
 export default function App() {
   const [robots, setRobots] = useState(loadFleet);
-  const [view, setView] = useState("fleet");
+  const [view, setView] = useState("chat"); // the Mission tab is the main page
   const [selectedRobotId, setSelectedRobotId] = useState(robots[0]?.id);
   const [selectedTopic, setSelectedTopic] = useState(null);
   const [addingPreset, setAddingPreset] = useState(null);
