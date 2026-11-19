@@ -54,6 +54,9 @@ Design: `docs/superpowers/specs/2026-11-13-hive-live-data-design.md`. Setting up
 - **Windows:** `npm run hive` from PowerShell starts the backend in WSL and Vite on Windows.
   `npm run backend` starts only the backend (`--backend-only`). `HIVE_WSL_DISTRO` picks the distro.
 - **Tests:** Vitest also picks up `scripts/*.test.js`.
+- **Change address:** a car's IP address and ROS domain can be changed in place (pencil on its
+  Home card, or "Change address" on its car page), for Wi-Fi that hands out a new IP each time. A
+  connected car is stopped and disconnected at its old address first, then waits for Connect.
 - **Real-hardware results:** to be added after the checklist in `docs/robot-setup.md` is run.
 
 ---

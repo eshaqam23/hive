@@ -174,3 +174,91 @@ describe("App Home", () => {
     server.link = { stop: "confirmed", reporting: true, seq: 30 };
   });
 });
+
+describe("App change address", () => {
+  const dialog = () => screen.getByRole("dialog", { name: "Change address" });
+  const fill = (host, domain) => {
+    fireEvent.change(within(dialog()).getByLabelText("Robot IP address"), { target: { value: host } });
+    fireEvent.change(within(dialog()).getByLabelText("ROS domain ID"), { target: { value: String(domain) } });
+  };
+  const save = () => fireEvent.click(within(dialog()).getByRole("button", { name: "Save address" }));
+  const saved = () => JSON.parse(localStorage.getItem("hive:fleet:manual-rc-v1"));
+  const homeCard = (name) => screen.getByRole("button", { name: `Open ${name}` }).closest("article");
+
+  it("changes an offline car's IP and domain from its Home card, keeps it, and Connect uses the new address", async () => {
+    render(<App />);
+    fireEvent.click(within(homeCard("Rover")).getByRole("button", { name: "Change address of Rover" }));
+    expect(within(dialog()).getByLabelText("Robot IP address").value).toBe("10.0.0.5");
+    expect(within(dialog()).getByLabelText("ROS domain ID").value).toBe("43");
+    fill(" 10.0.0.9 ", 45);
+    save();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(within(homeCard("Rover")).getByText("10.0.0.9")).toBeTruthy();
+    expect(within(homeCard("Rover")).getByText("domain 45")).toBeTruthy();
+    expect(saved()[0]).toMatchObject({ host: "10.0.0.9", domainId: 45 });
+    expect(server.calls.some((c) => c.path === "/robots/disconnect")).toBe(false); // it was not connected
+    fireEvent.click(within(homeCard("Rover")).getByRole("button", { name: "Connect Rover" }));
+    await waitFor(() => expect(within(homeCard("Rover")).getByText("Live")).toBeTruthy());
+    expect(server.calls.find((c) => c.path === "/robots/connect").body).toEqual({ ip: "10.0.0.9", domain_id: 45 });
+  });
+
+  it("refuses a domain another car uses, a bad address and a bad domain, and Cancel changes nothing", () => {
+    localStorage.setItem(
+      "hive:fleet:manual-rc-v1",
+      JSON.stringify([
+        { id: "r1", name: "Rover", preset: "lidarRcCar", host: "10.0.0.5", domainId: 43 },
+        { id: "r2", name: "Grip", preset: "gripperRcCar", host: "10.0.0.6", domainId: 44 },
+      ]),
+    );
+    render(<App />);
+    fireEvent.click(within(homeCard("Rover")).getByRole("button", { name: "Change address of Rover" }));
+    fill("10.0.0.5", 44);
+    save();
+    expect(within(dialog()).getByRole("alert").textContent).toBe("Domain 44 is already used by Grip. Pick another, such as 42.");
+    fill("not an ip!", 43);
+    save();
+    expect(within(dialog()).getByRole("alert").textContent).toBe("Enter an IPv4 address or hostname, such as 192.168.1.20.");
+    fill("", 43);
+    save();
+    expect(within(dialog()).getByRole("alert").textContent).toBe("Enter an IPv4 address or hostname, such as 192.168.1.20.");
+    for (const bad of ["300", "", "4.5", "-1"]) {
+      fill("10.0.0.7", bad);
+      save();
+      expect(within(dialog()).getByRole("alert").textContent).toBe("The ROS domain ID is a whole number from 0 to 232.");
+    }
+    fireEvent.click(within(dialog()).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(within(homeCard("Rover")).getByText("10.0.0.5")).toBeTruthy();
+    expect(saved()[0]).toMatchObject({ host: "10.0.0.5", domainId: 43 });
+  });
+
+  it("a connected car is stopped and disconnected at its old address before the new one is used", async () => {
+    await openAndConnect();
+    fireEvent.click(screen.getByRole("button", { name: "Change address of Rover" }));
+    expect(within(dialog()).getByText(/stops and disconnects Rover/)).toBeTruthy();
+    fill("10.0.0.9", 43);
+    save();
+    await waitFor(() => expect(server.calls.some((c) => c.path === "/robots/disconnect")).toBe(true));
+    expect(server.calls.filter((c) => c.path === "/robots/disconnect").map((c) => c.body)).toEqual([{ ip: "10.0.0.5", domain_id: 43 }]);
+    expect(screen.getByText("Not connected")).toBeTruthy();
+    expect(screen.getByText("10.0.0.9")).toBeTruthy();
+    expect(screen.getByText(/Address changed from 10\.0\.0\.5 \(domain 43\) to 10\.0\.0\.9 \(domain 43\)/)).toBeTruthy();
+    expect(liveSources()).toHaveLength(0);
+    expect(saved()[0]).toMatchObject({ host: "10.0.0.9", domainId: 43, status: "offline" });
+  });
+
+  it("saving the same address leaves a connected car alone, drive keys do nothing while it is open, and Escape closes it", async () => {
+    await openAndConnect();
+    fireEvent.click(screen.getByRole("button", { name: "Change address of Rover" }));
+    save();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Change address of Rover" }));
+    fireEvent.keyDown(window, { key: "w" });
+    fireEvent.keyUp(window, { key: "w" });
+    expect(server.calls.some((c) => c.path === "/robots/drive")).toBe(false);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(server.calls.some((c) => c.path === "/robots/disconnect")).toBe(false);
+    expect(screen.getByText(/Found 1 node and 6 topics/)).toBeTruthy();
+  });
+});

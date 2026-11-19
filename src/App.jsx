@@ -119,6 +119,11 @@ const TrashIcon = (p) => (
     <path d="M4.5 6.5h15M9.5 6.5V4.5h5v2M6.5 6.5l.8 12.6a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12.6M10 10.5v6M14 10.5v6" />
   </Icon>
 );
+const PencilIcon = (p) => (
+  <Icon {...p}>
+    <path d="M4.5 19.5h4l10.3-10.3a2 2 0 0 0 0-2.8l-1.2-1.2a2 2 0 0 0-2.8 0L4.5 15.5v4ZM13.5 6.5l4 4" />
+  </Icon>
+);
 const ChevronLeftIcon = (p) => (
   <Icon {...p}>
     <path d="M14.5 6 8.5 12l6 6" />
@@ -456,6 +461,7 @@ export default function App() {
   const [selectedTopic, setSelectedTopic] = useState(null);
   const [addingPreset, setAddingPreset] = useState(null);
   const [removingRobotId, setRemovingRobotId] = useState(null);
+  const [editingRobotId, setEditingRobotId] = useState(null);
   const [pressed, setPressed] = useState(null);
   const [power, setPower] = useState(0.5);
   const powerRef = useRef(0.5);
@@ -547,6 +553,28 @@ export default function App() {
     }
     setRobots((current) => current.filter((r) => r.id !== robot.id));
     if (view === "robot" && selectedRobot?.id === robot.id) setView("home");
+  }
+
+  /* A car's IP changes with the Wi-Fi lease, so its address and domain can be changed in place. A car
+     that may be live is stopped and disconnected at its OLD address first (the backend's worker is
+     keyed by address), then waits offline: the operator presses Connect to use the new one. */
+  function changeAddress(robot, { host, domainId }) {
+    setEditingRobotId(null);
+    const current = robotsRef.current.find((r) => r.id === robot.id);
+    if (!current || (current.host === host && current.domainId === domainId)) return;
+    const live = current.status === "connected" || current.status === "connecting";
+    stopRetrying(current.id);
+    if (driveRef.current.robotId === current.id) endDriveLocally();
+    window.clearTimeout(followRef.current[current.id]);
+    if (live) robotApi(current, "/robots/disconnect", target(current)).catch(() => {});
+    setLinks((all) => (all[current.id] ? { ...all, [current.id]: null } : all));
+    updateRobot(current.id, { host, domainId, status: "offline", reconnecting: false, mode: "Idle", lastError: "", warnings: [] });
+    logActivity(
+      current.id,
+      "info",
+      `Address changed from ${current.host || "no address"} (domain ${current.domainId}) to ${host} (domain ${domainId}).` +
+        (live ? " Hive stopped and disconnected it at the old address; press Connect to use the new one." : ""),
+    );
   }
 
   /* ---------------------------------------------------------------- activity log */
@@ -887,7 +915,7 @@ export default function App() {
   useEffect(() => {
     function onKeyDown(event) {
       if (event.defaultPrevented || event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
-      if (addingPreset !== null || removingRobotId !== null) return;
+      if (addingPreset !== null || removingRobotId !== null || editingRobotId !== null) return;
       const robot = selectedRobot;
       if (!robot || robot.status !== "connected") return;
       const el = event.target instanceof Element ? event.target : null;
@@ -918,8 +946,10 @@ export default function App() {
     onConnect: connectRobot,
     onDisconnect: disconnectRobot,
     onRemove: (robot) => setRemovingRobotId(robot.id),
+    onEdit: (robot) => setEditingRobotId(robot.id),
   };
   const robotToRemove = robots.find((robot) => robot.id === removingRobotId);
+  const robotToEdit = robots.find((robot) => robot.id === editingRobotId);
   const driveActions = (robot) => ({
     onPress: (action) => pressDrive(robot, action),
     onRelease: (action) => releaseDrive(robot, action),
@@ -1009,6 +1039,16 @@ export default function App() {
 
       {robotToRemove && (
         <RemoveRobotDialog onClose={() => setRemovingRobotId(null)} onConfirm={() => removeRobot(robotToRemove)} robot={robotToRemove} />
+      )}
+
+      {robotToEdit && (
+        <ChangeAddressDialog
+          onClose={() => setEditingRobotId(null)}
+          onSave={(address) => changeAddress(robotToEdit, address)}
+          robot={robotToEdit}
+          suggestedDomainId={nextDomainId(robots)}
+          takenDomains={Object.fromEntries(robots.filter((r) => r.id !== robotToEdit.id).map((r) => [r.domainId, r.name]))}
+        />
       )}
     </div>
   );
@@ -1303,7 +1343,7 @@ function LibraryList({ robots, selectedRobotId, onOpen, onAdd, className = "" })
 
 /* ================================================================== home */
 
-function HomeView({ robots, links = {}, messages, onAdd, onOpen, setView, onConnect, onDisconnect, onRemove }) {
+function HomeView({ robots, links = {}, messages, onAdd, onOpen, setView, onConnect, onDisconnect, onRemove, onEdit }) {
   const live = robots.filter((robot) => robot.status === "connected").length;
   const domains = robots.map((robot) => robot.domainId).filter(Number.isInteger);
   const domainRange = domains.length
@@ -1369,6 +1409,7 @@ function HomeView({ robots, links = {}, messages, onAdd, onOpen, setView, onConn
                 link={links[robot.id] ?? null}
                 onConnect={onConnect}
                 onDisconnect={onDisconnect}
+                onEdit={onEdit}
                 onOpen={onOpen}
                 onRemove={onRemove}
                 robot={robot}
@@ -1397,7 +1438,7 @@ function HomeView({ robots, links = {}, messages, onAdd, onOpen, setView, onConn
 
 /* A robot's card: its car's 3D model with its information. The card opens the robot; the play button
    (Spotify) connects it. */
-function RobotCard({ robot, link = null, onOpen, onConnect, onDisconnect, onRemove }) {
+function RobotCard({ robot, link = null, onOpen, onConnect, onDisconnect, onRemove, onEdit }) {
   const preset = PRESET_ROBOTS[robot.preset];
   const live = robot.status === "connected";
   const danger = stopUnconfirmed(robot, link);
@@ -1433,6 +1474,18 @@ function RobotCard({ robot, link = null, onOpen, onConnect, onDisconnect, onRemo
           type="button"
         >
           <TrashIcon size={17} />
+        </button>
+        <button
+          aria-label={`Change address of ${robot.name}`}
+          className="ctl reveal pointer-events-auto absolute right-14 top-3 z-10 size-9 bg-panel/80 backdrop-blur hover:text-ink"
+          onClick={(event) => {
+            event.stopPropagation();
+            onEdit(robot);
+          }}
+          title="Change IP address or domain"
+          type="button"
+        >
+          <PencilIcon size={17} />
         </button>
         <PlayButton
           className="reveal pointer-events-auto absolute bottom-3 right-3 z-10"
@@ -1562,6 +1615,7 @@ function RobotView({
   onConnect,
   onDisconnect,
   onRemove,
+  onEdit,
   onPress,
   onRelease,
   onStop,
@@ -1606,14 +1660,25 @@ function RobotView({
           <ChevronLeftIcon size={18} />
           Home
         </button>
-        <button
-          className="inline-flex min-h-11 items-center gap-1.5 rounded-lg pl-3 text-[14px] font-medium text-muted transition-colors hover:text-danger"
-          onClick={() => onRemove(robot)}
-          type="button"
-        >
-          <TrashIcon size={17} />
-          Remove robot
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            aria-label={`Change address of ${robot.name}`}
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-lg px-3 text-[14px] font-medium text-muted transition-colors hover:text-ink"
+            onClick={() => onEdit(robot)}
+            type="button"
+          >
+            <PencilIcon size={17} />
+            Change address
+          </button>
+          <button
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-lg pl-3 text-[14px] font-medium text-muted transition-colors hover:text-danger"
+            onClick={() => onRemove(robot)}
+            type="button"
+          >
+            <TrashIcon size={17} />
+            Remove robot
+          </button>
+        </div>
       </div>
 
       <header className="grid items-center gap-8 px-8 pb-8 pt-2 xl:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)]">
@@ -2545,6 +2610,142 @@ function RemoveRobotDialog({ robot, onConfirm, onClose }) {
             Remove robot
           </button>
         </div>
+      </section>
+    </div>
+  );
+}
+
+const HOST_RE = /^[A-Za-z0-9_.:-]+$/;
+const HOST_HINT = "Enter an IPv4 address or hostname, such as 192.168.1.20.";
+
+/* Change a car's IP address and ROS domain in place (its IP changes with every Wi-Fi lease). Checked
+   here, not by the browser, so every bad value gets the same plain message. */
+function ChangeAddressDialog({ robot, onSave, onClose, suggestedDomainId, takenDomains = {} }) {
+  const [form, setForm] = useState({ host: robot.host || "", domainId: String(robot.domainId) });
+  const [error, setError] = useState(null); // { field: "host" | "domainId", text }
+  const hostRef = useRef(null);
+  const domainRef = useRef(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const live = robot.status === "connected" || robot.status === "connecting";
+
+  /* focus starts in the IP field with its text selected, so a new address can be typed straight over it */
+  useEffect(() => {
+    const opener = document.activeElement;
+    hostRef.current?.focus();
+    hostRef.current?.select();
+    const onKey = (e) => {
+      if (e.key === "Escape") onCloseRef.current();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+    };
+  }, []);
+
+  function update(event) {
+    const { name, value } = event.target;
+    setForm((current) => ({ ...current, [name]: value }));
+    setError(null);
+  }
+
+  function fail(field, text) {
+    setError({ field, text });
+    (field === "host" ? hostRef : domainRef).current?.focus();
+  }
+
+  function submit(event) {
+    event.preventDefault();
+    const host = form.host.trim();
+    const domainText = form.domainId.trim();
+    if (!HOST_RE.test(host)) return fail("host", HOST_HINT);
+    if (!/^\d+$/.test(domainText) || !validDomain(Number(domainText))) {
+      return fail("domainId", "The ROS domain ID is a whole number from 0 to 232.");
+    }
+    const domainId = Number(domainText);
+    // one robot per ROS domain: two robots on one domain would share topic names like /cmd_vel
+    const owner = takenDomains[domainId];
+    if (owner) return fail("domainId", `Domain ${domainId} is already used by ${owner}. Pick another, such as ${suggestedDomainId}.`);
+    onSave({ host, domainId });
+  }
+
+  const invalid = (field) => (error?.field === field ? { "aria-invalid": true, "aria-describedby": "address-error" } : {});
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center overscroll-contain bg-sidebar/75 p-6 backdrop-blur-sm"
+      onMouseDown={onClose}
+    >
+      <section
+        aria-labelledby="change-address-title"
+        aria-modal="true"
+        className="w-full max-w-[460px] animate-enter rounded-2xl border border-line-strong bg-card p-6 shadow-float"
+        onMouseDown={(e) => e.stopPropagation()}
+        role="dialog"
+      >
+        <div className="flex items-center gap-4">
+          <ModelThumb preset={robot.preset} size={56} />
+          <div className="min-w-0">
+            <p className="truncate text-[14px] font-semibold text-muted">{robot.name}</p>
+            <h2 className="font-display text-[28px] leading-tight tracking-title" id="change-address-title">
+              Change address
+            </h2>
+          </div>
+        </div>
+        <p className="mt-4 text-[15px] leading-relaxed text-muted">
+          {live
+            ? `Saving a new address stops and disconnects ${robot.name} at its old address first. Press Connect afterwards to use the new one.`
+            : "Use this when the car's IP address changes, for example after it rejoins the Wi-Fi."}
+        </p>
+        <form className="mt-5 grid gap-3.5 sm:grid-cols-2" noValidate onSubmit={submit}>
+          <label className="grid gap-1.5 text-[13px] font-medium text-muted">
+            Robot IP address
+            <input
+              {...invalid("host")}
+              autoCapitalize="off"
+              autoComplete="off"
+              className={`field font-mono ${error?.field === "host" ? "border-danger" : ""}`}
+              inputMode="url"
+              name="host"
+              onChange={update}
+              placeholder="192.168.1.20…"
+              ref={hostRef}
+              spellCheck={false}
+              translate="no"
+              value={form.host}
+            />
+          </label>
+          <label className="grid gap-1.5 text-[13px] font-medium text-muted">
+            ROS domain ID
+            <input
+              {...invalid("domainId")}
+              autoComplete="off"
+              className={`field font-mono ${error?.field === "domainId" ? "border-danger" : ""}`}
+              inputMode="numeric"
+              max="232"
+              min="0"
+              name="domainId"
+              onChange={update}
+              ref={domainRef}
+              type="number"
+              value={form.domainId}
+            />
+          </label>
+          {error && (
+            <p className="text-[13px] font-medium text-danger sm:col-span-2" id="address-error" role="alert">
+              {error.text}
+            </p>
+          )}
+          <div className="mt-2 flex flex-wrap justify-end gap-3 sm:col-span-2">
+            <button className="btn btn-secondary" onClick={onClose} type="button">
+              Cancel
+            </button>
+            <button className="btn btn-primary" type="submit">
+              Save address
+            </button>
+          </div>
+        </form>
       </section>
     </div>
   );
