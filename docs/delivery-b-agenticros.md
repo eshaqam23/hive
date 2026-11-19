@@ -86,7 +86,24 @@ HIVE_CORE_PATCH=1 bash bridge/scripts/build-core.sh  # @corebrum/core at the pin
 HIVE_SIM_TIME_SCALE=0.25 bash ros/run_fake_fleet.sh  # terminal 1: action servers + rosbridge :9090
 node bridge/check.mjs                              # compatibility check
 node bridge/server.mjs                             # terminal 2: bridge :8790
+node bridge/origin-check.mjs                       # localhost hardening check (5 checks)
 ```
+
+## Localhost hardening
+
+- `ros/run_fake_fleet.sh` always runs on `ROS_DOMAIN_ID=77` with `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`.
+  It ignores an inherited `ROS_DOMAIN_ID` (a WSL `~/.bashrc` exporting the car domain 42 is common)
+  and says so on stderr, so the fake fleet never joins a real car's domain.
+- Both WebSocket servers refuse any handshake that carries an `Origin` header (HTTP 403). Browsers
+  always send one and no CORS check applies to WebSockets, so otherwise any web page could drive
+  the fleet through 127.0.0.1. The Executive gateway and `@corebrum/core` send no `Origin`.
+  The bridge does this itself; rosbridge 2.7.1 accepts every Origin, so the launch file runs it as
+  `rosbridge_local`, the stock server with `check_origin` replaced, plus `rosapi`, with the same
+  settings as `rosbridge_websocket_launch.xml`.
+- The bridge accepts only `camera_01`, `lidar_01` and `gripper_01` as `robot_id`, because the id
+  becomes part of the ROS action name. Any other id gets `accepted_for_delivery: false`.
+- There is no token. Any local process can still connect, as it can reach the fleet over DDS on
+  domain 77 anyway.
 
 Then on Windows (WSL2 forwards localhost) or Ubuntu:
 
