@@ -3,7 +3,7 @@ export const EXEC_API_URL = import.meta.env.VITE_HIVE_EXEC_URL || "http://127.0.
 export async function execGet(path) {
   const response = await fetch(`${EXEC_API_URL}${path}`);
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || data.detail || `Request failed with status ${response.status}`);
+  if (!response.ok) throw new Error(errorText(data, response.status));
   return data;
 }
 
@@ -14,13 +14,19 @@ export async function execPost(path, payload = {}) {
     body: JSON.stringify(payload),
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const detail = Array.isArray(data.detail)
-      ? data.detail.map((d) => d.message || d.msg || JSON.stringify(d)).join("; ")
-      : data.detail;
-    throw new Error([data.error, detail].filter(Boolean).join(" — ") || `Request failed (${response.status})`);
-  }
+  if (!response.ok) throw new Error(errorText(data, response.status));
   return data;
+}
+
+/* The server's own error text: ExecError {error, detail}, FastAPI {detail: string}, or a 422's list
+   of field errors. An object detail (the 503's {missing}) is already named in `error`. */
+export function errorText(data, status) {
+  const d = data?.detail;
+  let detail = null;
+  if (Array.isArray(d)) detail = d.map((x) => x?.message || x?.msg || JSON.stringify(x)).join("; ");
+  else if (typeof d === "string") detail = d;
+  else if (d && typeof d === "object" && !data?.error) detail = JSON.stringify(d);
+  return [data?.error, detail].filter(Boolean).join(" — ") || `Request failed (${status})`;
 }
 
 // One-line agent command, e.g. inspect_area(area_id="work_area", object_query="red_block").
