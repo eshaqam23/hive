@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import httpx
+from pydantic import ValidationError
 
 from ..contracts import plan_proposal_json_schema
 from .providers import ProviderRow, key_hint
@@ -34,6 +35,15 @@ def planning_schema() -> dict:
     return schema
 
 
+def schema_errors(exc: ValidationError) -> list:
+    """``loc: msg`` for the first 12 errors. Never the input value."""
+    out = []
+    for e in exc.errors()[:12]:
+        loc = ".".join(str(p) for p in e.get("loc", ()))
+        out.append(f"{loc}: {e.get('msg')}")
+    return out
+
+
 def chat_path(kind: str) -> str:
     return "/api/chat" if kind == "ollama" else "/chat/completions"
 
@@ -44,11 +54,14 @@ def models_path(kind: str) -> str:
 
 def chat_body(row: ProviderRow, system: str, user: str, schema: Optional[dict], *,
               probe: bool = False, max_tokens: Optional[int] = None) -> dict:
-    """One chat request for this row. ``schema=None`` asks for free text (probe ping)."""
+    """One chat request for this row. ``schema=None`` asks for free text (probe ping).
+
+    An empty ``system`` sends the user message alone.
+    """
     s = row.sampling
     temperature = 0 if probe else s.temperature
     limit = max_tokens or (PROBE_MAX_TOKENS if probe else s.max_tokens)
-    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": user}]
 
     if row.kind == "ollama":
         options: dict[str, Any] = {"temperature": temperature, "top_p": s.top_p}
