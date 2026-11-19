@@ -92,6 +92,52 @@
     color-scheme: dark;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+
+    /* shared map — plain properties, read by the SVG and by the occupancy canvas */
+    --map-bg: #1b1a19;
+    --map-free: #45443f;
+    --map-occupied: #faf9f5;
+    --map-unknown: #2a2927;
+    --map-frontier: #6fb3c9;
+    --map-grid: rgb(222 220 209 / 0.07);
+    --map-scan: #f0b46b;
+  }
+
+  /* light theme: the same roles on warm paper; the header's toggle sets data-theme on <html> */
+  :root[data-theme="light"] {
+    color-scheme: light;
+
+    --color-sidebar: #f0eee6;
+    --color-panel: #faf9f5;
+    --color-card: #ffffff;
+    --color-raised: #f0eee6;
+    --color-hover: #e8e6dc;
+
+    --color-ink: #141413;
+    --color-muted: #3d3d3a;
+    --color-faint: #6b6a64;
+    --color-line: rgb(31 30 29 / 0.12);
+    --color-line-strong: rgb(31 30 29 / 0.24);
+
+    --color-coral: #b5583a;
+    --color-coral-hover: #a54d31;
+    --color-coral-press: #8f4129;
+    --color-coral-ink: #ffffff;
+
+    --color-live: #2e7d46;
+    --color-warn: #a8621b;
+    --color-danger: #b3372b;
+
+    --shadow-float: 0 8px 28px rgb(20 20 19 / 0.14), 0 0 0 1px rgb(31 30 29 / 0.08);
+    --shadow-card: 0 4px 14px rgb(20 20 19 / 0.08);
+
+    --map-bg: #f5f4ee;
+    --map-free: #ffffff;
+    --map-occupied: #141413;
+    --map-unknown: #e8e6dc;
+    --map-frontier: #2f7f99;
+    --map-grid: rgb(31 30 29 / 0.08);
+    --map-scan: #b8651f;
   }
 
   html,
