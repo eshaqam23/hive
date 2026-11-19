@@ -1,6 +1,4 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import RobotViewer from "./RobotViewer.jsx";
-import { PRESET_MODELS, snapshot } from "./robotModels.js";
 import LiveView from "./live/LiveView.jsx";
 import { useLiveStream } from "./live/useLiveStream.js";
 import { postCamera } from "./live/api.js";
@@ -9,174 +7,22 @@ import { connectPatch, driveBody, gripperEnabled, gripperSliderShown, keepaliveB
 import { currentTab, stageTabs } from "./live/stage.js";
 import { ALWAYS_WATCHED, watchSet } from "./live/watch.js";
 import { compactValue } from "./viewers/ValuePanel.jsx";
+import { StopIcon, SendIcon, CloseIcon, TrashIcon, PencilIcon, ChevronLeftIcon, HiveMark, SignalBars } from "./shell/icons.jsx";
+import { DRIVE_CONTROLS, PRESET_KEYS, PRESET_ROBOTS, STATUS, describe, displayStatus } from "./fleet/presets.jsx";
+import { ModelImage, ModelThumb, PageFooter, PlayButton, StatusBadge, modelAlt, stageBg } from "./fleet/parts.jsx";
+import FleetView from "./fleet/FleetView.jsx";
+import { activeMission, isSimulated } from "./fleet/execStatus.js";
+import MapView from "./map/MapView.jsx";
+import Header from "./shell/Header.jsx";
+import { liveStatus } from "./shell/status.js";
+import { runStopAll } from "./shell/stopAll.js";
+import { execPost } from "./executive/api.js";
+import { useExecutive } from "./executive/useExecutive.js";
 
 const API_BASE_URL = import.meta.env.VITE_HIVE_API_URL || "http://127.0.0.1:8787/api";
 const FLEET_STORAGE_KEY = "hive:fleet:manual-rc-v1";
 
-/* ================================================================== icons
- * Drawn here: one stroke weight, currentColor, so every state recolours them.
- * No emoji and no characters standing in for icons.
- */
-
-function Icon({ children, size = 20, filled = false, strokeWidth = 2, ...rest }) {
-  return (
-    <svg
-      aria-hidden="true"
-      fill={filled ? "currentColor" : "none"}
-      focusable="false"
-      height={size}
-      stroke={filled ? "none" : "currentColor"}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth={strokeWidth}
-      viewBox="0 0 24 24"
-      width={size}
-      {...rest}
-    >
-      {children}
-    </svg>
-  );
-}
-
-const HomeIcon = (p) => (
-  <Icon {...p}>
-    <path d="M3.5 10.5 12 3.5l8.5 7V20a.5.5 0 0 1-.5.5h-5v-6h-6v6H4a.5.5 0 0 1-.5-.5z" />
-  </Icon>
-);
-const CommandIcon = (p) => (
-  <Icon {...p}>
-    <path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v10a1.5 1.5 0 0 1-1.5 1.5H9l-5 3.5z" />
-    <path d="m8 9 2.5 2L8 13M13 13h3" />
-  </Icon>
-);
-const PlusIcon = (p) => (
-  <Icon {...p}>
-    <path d="M12 5v14M5 12h14" />
-  </Icon>
-);
-const PlayIcon = (p) => (
-  <Icon filled {...p}>
-    <path d="M8 5.3v13.4a1 1 0 0 0 1.5.86l11-6.7a1 1 0 0 0 0-1.72l-11-6.7A1 1 0 0 0 8 5.3z" />
-  </Icon>
-);
-const PauseIcon = (p) => (
-  <Icon filled {...p}>
-    <rect height="15" rx="1.2" width="4.2" x="6.2" y="4.5" />
-    <rect height="15" rx="1.2" width="4.2" x="13.6" y="4.5" />
-  </Icon>
-);
-const StopIcon = (p) => (
-  <Icon filled {...p}>
-    <rect height="12" rx="2" width="12" x="6" y="6" />
-  </Icon>
-);
-const ArrowUpIcon = (p) => (
-  <Icon {...p}>
-    <path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" />
-  </Icon>
-);
-const ArrowDownIcon = (p) => (
-  <Icon {...p}>
-    <path d="M12 5v14M18.5 12.5 12 19l-6.5-6.5" />
-  </Icon>
-);
-const RotateLeftIcon = (p) => (
-  <Icon {...p}>
-    <path d="M4.5 12a7.5 7.5 0 1 0 2.4-5.5" />
-    <path d="M4 3.5v4h4" />
-  </Icon>
-);
-const RotateRightIcon = (p) => (
-  <Icon {...p}>
-    <path d="M19.5 12a7.5 7.5 0 1 1-2.4-5.5" />
-    <path d="M20 3.5v4h-4" />
-  </Icon>
-);
-const GripperOpenIcon = (p) => (
-  <Icon {...p}>
-    <path d="M6 4v5.5a6 6 0 0 0 12 0V4" />
-    <path d="M12 15.5V20" />
-  </Icon>
-);
-const GripperCloseIcon = (p) => (
-  <Icon {...p}>
-    <path d="M9 4v5.5a3 3 0 0 0 6 0V4" />
-    <path d="M12 12.5V20" />
-  </Icon>
-);
-const SendIcon = (p) => (
-  <Icon {...p}>
-    <path d="M12 19V5M6 11l6-6 6 6" />
-  </Icon>
-);
-const CloseIcon = (p) => (
-  <Icon {...p}>
-    <path d="m6 6 12 12M18 6 6 18" />
-  </Icon>
-);
-const TrashIcon = (p) => (
-  <Icon {...p}>
-    <path d="M4.5 6.5h15M9.5 6.5V4.5h5v2M6.5 6.5l.8 12.6a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12.6M10 10.5v6M14 10.5v6" />
-  </Icon>
-);
-const PencilIcon = (p) => (
-  <Icon {...p}>
-    <path d="M4.5 19.5h4l10.3-10.3a2 2 0 0 0 0-2.8l-1.2-1.2a2 2 0 0 0-2.8 0L4.5 15.5v4ZM13.5 6.5l4 4" />
-  </Icon>
-);
-const ChevronLeftIcon = (p) => (
-  <Icon {...p}>
-    <path d="M14.5 6 8.5 12l6 6" />
-  </Icon>
-);
-const Spinner = (p) => (
-  <Icon className="animate-spin-slow" {...p}>
-    <path d="M12 3.5a8.5 8.5 0 1 1-8.5 8.5" />
-  </Icon>
-);
-
-/* The Hive mark: a hexagon cell with a cell inside it. */
-function HiveMark({ size = 28, className = "" }) {
-  return (
-    <svg aria-hidden="true" className={className} height={size} viewBox="0 0 32 32" width={size}>
-      <path
-        d="M16 1.8 28.3 8.9v14.2L16 30.2 3.7 23.1V8.9zM16 7.4 8.6 11.7v8.6l7.4 4.3 7.4-4.3v-8.6zM16 12.2l3.3 1.9v3.8L16 19.8l-3.3-1.9v-3.8z"
-        fill="currentColor"
-        fillRule="evenodd"
-      />
-    </svg>
-  );
-}
-
-/* Spotify's "now playing" bars, here meaning "connected". Static under reduced motion. */
-function SignalBars({ className = "" }) {
-  return (
-    <span aria-hidden="true" className={`flex h-3.5 items-end gap-[2px] ${className}`}>
-      {[0, 0.35, 0.7].map((delay) => (
-        <span
-          className="h-full w-[3px] origin-bottom animate-signal rounded-full bg-live"
-          key={delay}
-          style={{ animationDelay: `-${delay}s` }}
-        />
-      ))}
-    </span>
-  );
-}
-
 /* ================================================================== data */
-
-const DRIVE_CONTROLS = [
-  { action: "forward", label: "Forward", key: "W", Icon: ArrowUpIcon },
-  { action: "left", label: "Rotate left", key: "A", Icon: RotateLeftIcon },
-  { action: "stop", label: "Stop", key: "Space", Icon: StopIcon },
-  { action: "right", label: "Rotate right", key: "D", Icon: RotateRightIcon },
-  { action: "backward", label: "Backward", key: "S", Icon: ArrowDownIcon },
-];
-
-const GRIPPER_CONTROLS = [
-  { action: "gripper_open", label: "Open gripper", Icon: GripperOpenIcon },
-  { action: "gripper_close", label: "Close gripper", Icon: GripperCloseIcon },
-];
 
 const KEY_TO_ACTION = {
   w: "forward",
@@ -189,62 +35,6 @@ const KEY_TO_ACTION = {
   ArrowRight: "right",
   " ": "stop",
 };
-
-/* Each preset's 3D model is real ROS / Gazebo CAD, assembled in src/robotModels.js. */
-const PRESET_ROBOTS = {
-  cameraRcCar: {
-    label: "Camera RC Car",
-    summary: "Drives on /cmd_vel and streams a Realsense camera.",
-    capabilities: [
-      { name: "Manual drive", kind: "/cmd_vel" },
-      { name: "Realsense camera", kind: "sensor" },
-    ],
-    topics: [
-      { name: "/cmd_vel", type: "geometry_msgs/msg/Twist", viewer: "raw" },
-      { name: "/camera/camera/color/image_raw", type: "sensor_msgs/msg/Image", viewer: "raw" },
-    ],
-    controls: DRIVE_CONTROLS,
-  },
-  lidarRcCar: {
-    label: "LiDAR RC Car",
-    summary: "Drives on /cmd_vel and scans the room with an RP LiDAR.",
-    capabilities: [
-      { name: "Manual drive", kind: "/cmd_vel" },
-      { name: "RP LiDAR", kind: "2D lidar" },
-    ],
-    topics: [
-      { name: "/cmd_vel", type: "geometry_msgs/msg/Twist", viewer: "raw" },
-      { name: "/scan", type: "sensor_msgs/msg/LaserScan", viewer: "raw" },
-    ],
-    controls: DRIVE_CONTROLS,
-  },
-  gripperRcCar: {
-    label: "Gripper RC Car",
-    summary: "Drives on /cmd_vel and opens or closes a gripper on command.",
-    capabilities: [
-      { name: "Manual drive", kind: "/cmd_vel" },
-      { name: "Gripper", kind: "actuator" },
-    ],
-    topics: [
-      { name: "/cmd_vel", type: "geometry_msgs/msg/Twist", viewer: "raw" },
-      { name: "/gripper_open", type: "std_msgs/msg/Bool", viewer: "raw" },
-    ],
-    controls: [...DRIVE_CONTROLS, ...GRIPPER_CONTROLS],
-  },
-};
-
-const PRESET_KEYS = Object.keys(PRESET_ROBOTS);
-
-const STATUS = {
-  connected: { label: "Live", dot: "bg-live", text: "text-live" },
-  offline: { label: "Offline", dot: "bg-faint", text: "text-muted" },
-  connecting: { label: "Connecting…", dot: "bg-warn", text: "text-warn" },
-  reconnecting: { label: "Reconnecting…", dot: "bg-warn", text: "text-warn" },
-  failed: { label: "Connection failed", dot: "bg-danger", text: "text-danger" },
-};
-
-/* "connecting" covers both a first connect and winning back a lost connection; only the label differs */
-const displayStatus = (robot) => (robot.status === "connecting" && robot.reconnecting ? "reconnecting" : robot.status);
 
 /* ================================================================== fleet logic (unchanged behaviour) */
 
@@ -420,15 +210,6 @@ function replySummary(path, data) {
   }
 }
 
-function greeting(date = new Date()) {
-  const hour = date.getHours();
-  if (hour >= 5 && hour < 12) return "Good morning";
-  if (hour >= 12 && hour < 18) return "Good afternoon";
-  return "Good evening";
-}
-
-const describe = (robot) => robot.description || PRESET_ROBOTS[robot.preset].summary;
-
 const DRIVE_LABEL = { forward: "forward", backward: "backward", left: "rotating left", right: "rotating right" };
 
 /* The backend's health route, polled so the sidebar can say whether commands will work and whether
@@ -456,7 +237,7 @@ function useBackendHealth() {
 
 export default function App() {
   const [robots, setRobots] = useState(loadFleet);
-  const [view, setView] = useState("home");
+  const [view, setView] = useState("fleet");
   const [selectedRobotId, setSelectedRobotId] = useState(robots[0]?.id);
   const [selectedTopic, setSelectedTopic] = useState(null);
   const [addingPreset, setAddingPreset] = useState(null);
@@ -476,6 +257,8 @@ export default function App() {
   const robotsRef = useRef(robots);
   robotsRef.current = robots;
   const backend = useBackendHealth();
+  const exec = useExecutive();
+  const [stopRun, setStopRun] = useState(null); // the last STOP ALL: { id, at, cars, results }
 
   const selectedRobot = robots.find((robot) => robot.id === selectedRobotId) || robots[0];
 
@@ -552,7 +335,7 @@ export default function App() {
       postApi("/robots/disconnect", target(robot)).catch(() => {});
     }
     setRobots((current) => current.filter((r) => r.id !== robot.id));
-    if (view === "robot" && selectedRobot?.id === robot.id) setView("home");
+    if (view === "robot" && selectedRobot?.id === robot.id) setView("fleet");
   }
 
   /* A car's IP changes with the Wi-Fi lease, so its address and domain can be changed in place. The
@@ -776,7 +559,7 @@ export default function App() {
   }
 
   async function stopDrive(robot) {
-    if (!robot) return;
+    if (!robot) return { ok: false, error: "no robot" };
     const held = driveRef.current;
     if (held.robotId === robot.id && held.action) {
       const seconds = ((performance.now() - held.startedAt) / 1000).toFixed(1);
@@ -794,10 +577,30 @@ export default function App() {
         current.map((r) => (r.id === robot.id && r.stopping ? { ...r, stopping: { seq: link?.seq ?? -Infinity }, lastCommand: "stop", lastError: "" } : r)),
       );
       followLink(robot);
+      return { ok: true };
     } catch (error) {
-      if (error.data?.superseded) return; // a newer command took over
+      if (error.data?.superseded) return { ok: true, superseded: true }; // a newer command took over
       driveFailed(robot, error, "Stop failed");
+      return { ok: false, error: error.message };
     }
+  }
+
+  /* STOP ALL: live-data's own stop for every connected car, and the Executive's cancel when a mission
+     may be running (or the Executive cannot say). Both go out at once; the cars never wait on it. */
+  function stopAll() {
+    const cars = robotsRef.current.filter((robot) => robot.status === "connected");
+    const id = Date.now();
+    setStopRun({ id, at: new Date().toLocaleTimeString(), cars: cars.map((car) => ({ id: car.id, name: car.name })), results: {} });
+    const report = (key, result) =>
+      setStopRun((run) => (run?.id === id ? { ...run, results: { ...run.results, [key]: { ...run.results[key], ...result } } } : run));
+    const cancelMission = () =>
+      execPost("/cancel")
+        .then(
+          () => ({ ok: true }),
+          (error) => (/no active mission/i.test(error.message) ? { ok: true, none: true } : { ok: false, error: error.message }),
+        )
+        .finally(() => exec.refresh());
+    runStopAll({ cars, stopCar: stopDrive, cancelMission, missionActive: exec.reachable !== true || Boolean(activeMission(exec.state)), report });
   }
 
   async function sendGripper(robot, action, value) {
@@ -959,40 +762,46 @@ export default function App() {
     onStop: () => stopDrive(robot),
     onGripper: (action, value) => sendGripper(robot, action, value),
   });
-  /* the dock floats on Home only: the robot page has the full pad, and the command log's composer
+  /* the dock floats on Fleet only: the robot page has the full pad, and the command log's composer
      owns the bottom of its screen */
-  const showDock = view === "home" && selectedRobot?.status === "connected";
+  const showDock = view === "fleet" && selectedRobot?.status === "connected";
+  const mission = activeMission(exec.state);
+  const stopLines = stopRun && stopSummary(stopRun, robots, links);
 
   return (
-    <div className="flex h-dvh bg-panel">
+    <div className="flex h-dvh flex-col bg-panel">
       <a className="skip-link" href="#main">
         Skip to content
       </a>
 
-      <Sidebar
-        backend={backend}
-        onAdd={() => setAddingPreset("cameraRcCar")}
-        onOpen={openRobot}
-        robots={robots}
-        selectedRobotId={view === "robot" ? selectedRobot?.id : null}
-        setView={setView}
+      <Header
+        live={liveStatus({ backend, exec })}
+        mission={mission}
+        models={exec.state ? { defaultPlanner: exec.state.default_planner, llm: exec.state.planners?.llm } : null}
+        onCloseStop={() => setStopRun(null)}
+        onNavigate={setView}
+        onStopAll={stopAll}
+        sim={isSimulated(exec.state?.gateway ?? exec.health?.gateway)}
+        stop={stopLines && { at: stopRun.at, lines: stopLines }}
         view={view}
       />
 
-      <div className="relative flex min-w-0 flex-1 flex-col">
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         <main
           className={`min-w-0 flex-1 overflow-y-auto overscroll-contain ${showDock ? "pb-28" : ""}`}
           id="main"
           tabIndex={-1}
         >
-          {view === "home" && (
-            <HomeView
+          {view === "fleet" && (
+            <FleetView
+              backend={backend}
+              exec={exec}
               links={links}
               messages={messages}
               onAdd={setAddingPreset}
+              onChat={() => setView("chat")}
               onOpen={openRobot}
               robots={robots}
-              setView={setView}
               {...robotActions}
             />
           )}
@@ -1001,7 +810,7 @@ export default function App() {
               activity={activity[selectedRobot.id] || []}
               key={selectedRobot.id}
               link={links[selectedRobot.id] ?? null}
-              onBack={() => setView("home")}
+              onBack={() => setView("fleet")}
               onClearActivity={() => setActivity((all) => ({ ...all, [selectedRobot.id]: [] }))}
               onCamera={(settings) => setCamera(selectedRobot, settings)}
               onLink={(link) => noteLink(selectedRobot.id, link)}
@@ -1016,7 +825,15 @@ export default function App() {
             />
           )}
           {view === "robot" && !selectedRobot && <EmptyFleet onAdd={() => setAddingPreset("cameraRcCar")} />}
-          {view === "command" && <CommandView messages={messages} onSend={sendCommand} robots={robots} />}
+          {view === "map" && <MapView execState={exec.state} robots={robots} />}
+          {view === "chat" && (
+            <>
+              <p className="mx-8 mt-6 rounded-xl border border-dashed border-line-strong px-4 py-3 text-[14px] text-muted" role="note">
+                Mission chat with the Executive arrives in a later build step. Until then this is the fleet command log.
+              </p>
+              <CommandView messages={messages} onSend={sendCommand} robots={robots} />
+            </>
+          )}
         </main>
 
         {showDock && (
@@ -1057,541 +874,32 @@ export default function App() {
   );
 }
 
-/* ================================================================== CAD models */
+/* ================================================================== stop all */
 
-/* A snapshot of the preset's real CAD model, drawn by the one shared offscreen renderer
-   (robotModels.js). 720x480, so it sits in every frame without layout shift. */
-function useSnapshot(preset) {
-  const [src, setSrc] = useState(null);
-  useEffect(() => {
-    let alive = true;
-    setSrc(null);
-    snapshot(preset).then((url) => alive && setSrc(url)).catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [preset]);
-  return src;
-}
+const MISSION_LINE = {
+  none: { text: "no mission active", level: "muted" },
+  sending: { text: "cancel requested…", level: "warn" },
+  sent: { text: "cancel accepted", level: "live" },
+};
 
-function ModelImage({ preset, alt = "", className = "" }) {
-  const src = useSnapshot(preset);
-  if (!src) {
-    return <span aria-hidden="true" className={`block animate-pulse rounded-lg bg-raised/40 ${className}`} />;
-  }
-  return (
-    <img
-      alt={alt}
-      className={`animate-fade object-contain ${className}`}
-      decoding="async"
-      draggable={false}
-      height={480}
-      src={src}
-      width={720}
-    />
-  );
-}
-
-function ModelThumb({ preset, size = 48, className = "" }) {
-  return (
-    <span
-      className={`grid flex-none place-items-center overflow-hidden rounded-md ${className}`}
-      style={{ height: size, width: size, background: stageBg(0.12, "var(--color-raised)") }}
-    >
-      <ModelImage className="h-full w-full scale-125" preset={preset} />
-    </span>
-  );
-}
-
-/* the floor light behind a model: a faint coral glow on the card */
-const stageBg = (alpha = 0.16, base = "var(--color-card)") =>
-  `radial-gradient(ellipse 70% 55% at 50% 66%, rgb(217 119 87 / ${alpha}), transparent 72%), ${base}`;
-
-const modelAlt = (preset) => `CAD model: ${PRESET_MODELS[preset]?.label}`;
-
-/* ================================================================== shared pieces */
-
-function StatusBadge({ status, compact = false }) {
-  const s = STATUS[status] || STATUS.offline;
-  const label = compact && status === "failed" ? "Failed" : s.label;
-  return (
-    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap text-[14px] font-semibold ${s.text}`}>
-      {status === "connected" ? <SignalBars /> : <span className={`size-2 flex-none rounded-full ${s.dot}`} />}
-      {label}
-    </span>
-  );
-}
-
-/* Spotify's play/pause, meaning connect/disconnect. While Hive keeps trying to connect, pressing it
-   stops trying. */
-function PlayButton({ robot, onConnect, onDisconnect, size = 48, className = "" }) {
-  const connecting = robot.status === "connecting";
-  const connected = robot.status === "connected";
-  const iconSize = Math.round(size * 0.42);
-  const label = connecting
-    ? `Stop ${robot.reconnecting ? "reconnecting" : "connecting"} to ${robot.name}`
-    : connected
-      ? `Disconnect ${robot.name}`
-      : `Connect ${robot.name}`;
-  return (
-    <button
-      aria-label={label}
-      className={`play ${className}`}
-      onClick={(event) => {
-        event.stopPropagation();
-        connected || connecting ? onDisconnect(robot) : onConnect(robot);
-      }}
-      style={{ height: size, width: size }}
-      title={label}
-      type="button"
-    >
-      {connecting ? (
-        <Spinner size={iconSize} />
-      ) : connected ? (
-        <PauseIcon size={iconSize} />
-      ) : (
-        <PlayIcon size={iconSize} style={{ marginLeft: size * 0.04 }} />
-      )}
-    </button>
-  );
-}
-
-function SectionHead({ title, children }) {
-  return (
-    <div className="mb-4 flex items-end justify-between gap-4">
-      <h2 className="font-display text-[28px] leading-tight tracking-title">{title}</h2>
-      {children}
-    </div>
-  );
-}
-
-function PageFooter() {
-  return (
-    <footer className="mx-8 mt-10 border-t border-line py-8 text-[13px] text-faint">
-      <p>
-        Hive drives ROS 2 Jazzy robots over your local network. CAD: MR-Buggy3 by Rudis Laboratories (CC&nbsp;BY&nbsp;4.0, via Gazebo Fuel); Intel RealSense D435, ROBOTIS TurtleBot3 LDS-01 and OpenMANIPULATOR-X meshes (Apache&nbsp;2.0). Details in /models/CREDITS.md.
-      </p>
-    </footer>
-  );
-}
-
-/* ================================================================== sidebar (Claude) */
-
-function Sidebar({ robots, view, setView, selectedRobotId, onOpen, onAdd, backend }) {
-  const items = [
-    { id: "home", label: "Home", Icon: HomeIcon },
-    { id: "command", label: "Command log", Icon: CommandIcon },
-  ];
-  return (
-    <aside aria-label="Library" className="flex w-[296px] flex-none flex-col border-r border-line bg-sidebar">
-      <div className="flex items-center gap-2.5 px-6 pb-4 pt-5">
-        <HiveMark className="text-coral" size={28} />
-        <span className="font-display text-[24px] leading-none tracking-title">Hive</span>
-      </div>
-
-      <nav aria-label="Sections" className="grid gap-0.5 px-3">
-        {/* Claude's "New chat" row */}
-        <button
-          className="flex min-h-11 items-center gap-3 rounded-lg px-3 text-left text-[15px] font-semibold transition-colors hover:bg-card"
-          onClick={onAdd}
-          type="button"
-        >
-          <span className="grid size-7 place-items-center rounded-full bg-coral text-coral-ink">
-            <PlusIcon size={16} strokeWidth={2.4} />
-          </span>
-          Add robot
-        </button>
-        {items.map(({ id, label, Icon: NavIcon }) => {
-          const active = view === id;
-          return (
-            <button
-              aria-current={active ? "page" : undefined}
-              className={`flex min-h-11 items-center gap-3 rounded-lg px-3 text-left text-[15px] font-medium transition-colors ${
-                active ? "bg-card text-ink" : "text-muted hover:bg-card hover:text-ink"
-              }`}
-              key={id}
-              onClick={() => setView(id)}
-              type="button"
-            >
-              <span className="grid size-7 place-items-center">
-                <NavIcon size={20} />
-              </span>
-              {label}
-            </button>
-          );
-        })}
-      </nav>
-
-      <div className="mt-5 flex min-h-0 flex-1 flex-col border-t border-line pt-1">
-        <div className="flex items-center justify-between px-4 pt-4">
-          <h2 className="text-[15px] font-bold text-muted">Your robots</h2>
-          <button
-            aria-label="Add a robot"
-            className="ctl size-9 hover:bg-raised"
-            onClick={onAdd}
-            title="Add a robot"
-            type="button"
-          >
-            <PlusIcon size={18} />
-          </button>
-        </div>
-        <LibraryList className="min-h-0 flex-1" onAdd={onAdd} onOpen={onOpen} robots={robots} selectedRobotId={selectedRobotId} />
-      </div>
-
-      <BackendStatus backend={backend} />
-    </aside>
-  );
-}
-
-/* The sidebar footer: whether the backend answers, and whether ROS 2 is installed where it runs. */
-function BackendStatus({ backend }) {
-  const noRos = backend.state === "online" && backend.ros && !backend.ros.found;
-  const dot = backend.state === "offline" ? "bg-danger" : noRos || backend.state === "checking" ? "bg-warn" : "bg-live";
-  const title =
-    backend.state === "offline"
-      ? "Backend offline"
-      : backend.state === "checking"
-        ? "Checking backend…"
-        : noRos
-          ? "ROS 2 not found"
-          : "Backend online · ROS 2 ready";
-  const detail = backend.state === "offline" ? "npm run backend" : noRos ? backend.ros.setup : BACKEND_ORIGIN.replace(/^https?:\/\//, "");
-  return (
-    <div aria-live="polite" className="flex items-center gap-3 border-t border-line px-5 py-3.5">
-      <span className={`size-2 flex-none rounded-full ${dot}`} />
-      <span className="min-w-0">
-        <span className="block text-[14px] font-medium">{title}</span>
-        <span className="block truncate font-mono text-[13px] text-faint" title={detail} translate="no">
-          {detail}
-        </span>
-      </span>
-    </div>
-  );
-}
-
-function LibraryList({ robots, selectedRobotId, onOpen, onAdd, className = "" }) {
-  const [filter, setFilter] = useState("all");
-  const shown = robots.filter((robot) =>
-    filter === "all" ? true : filter === "live" ? robot.status === "connected" : robot.status !== "connected",
-  );
-  const filters = [
-    ["all", "All"],
-    ["live", "Live"],
-    ["offline", "Offline"],
-  ];
-
-  return (
-    <div className={`flex flex-col ${className}`}>
-      {robots.length > 0 && (
-        <div aria-label="Filter robots" className="flex gap-2 px-4 pt-3" role="group">
-          {filters.map(([id, label]) => (
-            <button aria-pressed={filter === id} className="chip" key={id} onClick={() => setFilter(id)} type="button">
-              {label}
-            </button>
-          ))}
-        </div>
-      )}
-
-      <div className="mt-2 min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-        {!robots.length && (
-          <div className="m-2 rounded-xl bg-card p-5">
-            <p className="font-bold">Add your first robot</p>
-            <p className="mt-1 text-[14px] text-muted">Pick a preset, enter its IP address, and Hive gives it a ROS domain.</p>
-            <button className="btn btn-primary mt-4 min-h-10 px-5 text-[14px]" onClick={onAdd} type="button">
-              Add a robot
-            </button>
-          </div>
-        )}
-
-        {robots.length > 0 && !shown.length && (
-          <p className="px-3 py-6 text-[14px] text-muted">{filter === "live" ? "No live robots." : "Every robot is live."}</p>
-        )}
-
-        <ul className="grid gap-0.5">
-          {shown.map((robot) => {
-            const active = robot.id === selectedRobotId;
-            const live = robot.status === "connected";
-            return (
-              <li key={robot.id}>
-                <button
-                  aria-current={active ? "page" : undefined}
-                  className={`flex w-full items-center gap-3 rounded-lg p-2 text-left transition-colors ${
-                    active ? "bg-raised" : "hover:bg-card"
-                  }`}
-                  onClick={() => onOpen(robot)}
-                  type="button"
-                >
-                  <ModelThumb preset={robot.preset} size={48} />
-                  <span className="min-w-0 flex-1">
-                    <span className={`block truncate text-[15px] font-semibold ${live ? "text-live" : "text-ink"}`}>
-                      {robot.name}
-                    </span>
-                    <span className="block truncate text-[13px] text-muted">
-                      {PRESET_ROBOTS[robot.preset].label} · domain {robot.domainId}
-                    </span>
-                  </span>
-                  {live && <SignalBars className="mr-1" />}
-                  {robot.status === "failed" && <span className="mr-1.5 size-2 rounded-full bg-danger" />}
-                  {robot.status === "connecting" && <Spinner className="mr-1 animate-spin-slow text-warn" size={16} />}
-                  <span className="sr-only">{STATUS[displayStatus(robot)]?.label}</span>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      </div>
-    </div>
-  );
-}
-
-/* ================================================================== home */
-
-function HomeView({ robots, links = {}, messages, onAdd, onOpen, setView, onConnect, onDisconnect, onRemove, onEdit }) {
-  const live = robots.filter((robot) => robot.status === "connected").length;
-  const domains = robots.map((robot) => robot.domainId).filter(Number.isInteger);
-  const domainRange = domains.length
-    ? Math.min(...domains) === Math.max(...domains)
-      ? `${Math.min(...domains)}`
-      : `${Math.min(...domains)}–${Math.max(...domains)}`
-    : "from 42";
-
-  return (
-    <div>
-      <section
-        className="relative overflow-hidden px-8 pb-12 pt-14"
-        style={{
-          background:
-            "radial-gradient(ellipse 70% 90% at 90% 0%, rgb(217 119 87 / 0.20), transparent 70%), linear-gradient(180deg, rgb(217 119 87 / 0.10) 0%, transparent 90%)",
-        }}
-      >
-        <div className="animate-enter">
-          <p className="text-[15px] font-medium text-muted">{greeting()}</p>
-          <h1 className="mt-3 max-w-[14ch] font-display text-[clamp(44px,5vw,80px)] leading-[1.02] tracking-display">
-            Fleet control for ROS&nbsp;2 robots
-          </h1>
-          <p className="mt-5 max-w-[62ch] text-[17px] leading-relaxed text-muted">
-            Add a robot by its IP address, connect, and drive it from this laptop.
-          </p>
-          <div className="mt-7 flex flex-wrap gap-3">
-            <button className="btn btn-primary" onClick={() => onAdd("cameraRcCar")} type="button">
-              <PlusIcon size={18} />
-              Add a robot
-            </button>
-            <button className="btn btn-secondary" onClick={() => setView("command")} type="button">
-              Send a command
-            </button>
-          </div>
-          <dl className="mt-9 flex flex-wrap gap-x-10 gap-y-4">
-            {[
-              ["Robots", robots.length],
-              ["Live now", live],
-              ["ROS domains", domainRange],
-            ].map(([label, value]) => (
-              <div key={label}>
-                <dt className="text-[13px] font-medium text-muted">{label}</dt>
-                <dd className="mt-1 font-display text-[34px] leading-none tracking-title tabular-nums">{value}</dd>
-              </div>
-            ))}
-          </dl>
-        </div>
-      </section>
-
-      <div className="space-y-14 px-8">
-        <section>
-          <SectionHead title="Your fleet">
-            {robots.length > 0 && (
-              <span className="text-[14px] text-muted">
-                {robots.length} {robots.length === 1 ? "robot" : "robots"} · {live} live
-              </span>
-            )}
-          </SectionHead>
-          <div className="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(272px,1fr))]">
-            {robots.map((robot) => (
-              <RobotCard
-                key={robot.id}
-                link={links[robot.id] ?? null}
-                onConnect={onConnect}
-                onDisconnect={onDisconnect}
-                onEdit={onEdit}
-                onOpen={onOpen}
-                onRemove={onRemove}
-                robot={robot}
-              />
-            ))}
-            <AddCard onAdd={() => onAdd("cameraRcCar")} />
-          </div>
-        </section>
-
-        <section>
-          <SectionHead title="Start from a preset" />
-          <div className="grid gap-4 sm:grid-cols-3">
-            {PRESET_KEYS.map((key) => (
-              <PresetCard key={key} onAdd={() => onAdd(key)} preset={key} />
-            ))}
-          </div>
-        </section>
-
-        <CommandCallout messages={messages} onOpen={() => setView("command")} />
-      </div>
-
-      <PageFooter />
-    </div>
-  );
-}
-
-/* A robot's card: its car's 3D model with its information. The card opens the robot; the play button
-   (Spotify) connects it. */
-function RobotCard({ robot, link = null, onOpen, onConnect, onDisconnect, onRemove, onEdit }) {
-  const preset = PRESET_ROBOTS[robot.preset];
-  const live = robot.status === "connected";
-  const danger = stopUnconfirmed(robot, link);
-  return (
-    <article
-      className={`group relative overflow-hidden rounded-2xl border bg-card transition-colors ${danger ? "border-danger" : "border-line hover:border-line-strong"}`}
-    >
-      <button aria-label={`Open ${robot.name}`} className="absolute inset-0 z-0 rounded-2xl" onClick={() => onOpen(robot)} type="button" />
-      <div className="model pointer-events-none relative aspect-[16/10]" style={{ background: stageBg(0.16) }}>
-        <ModelImage alt={modelAlt(robot.preset)} className="absolute inset-[4%] h-[92%] w-[92%]" preset={robot.preset} />
-        <span className="absolute left-3 top-3 flex flex-col items-start gap-1.5">
-          <span className="rounded-full bg-panel/80 px-2.5 py-1 backdrop-blur">
-            <StatusBadge compact status={displayStatus(robot)} />
-          </span>
-          {danger && (
-            <span
-              className="rounded-full bg-danger px-2.5 py-1 text-[13px] font-semibold text-panel"
-              role="status"
-              title="The car has not confirmed the last stop: it may still be moving"
-            >
-              Stop not confirmed
-            </span>
-          )}
-        </span>
-        <button
-          aria-label={`Remove ${robot.name}`}
-          className="ctl reveal pointer-events-auto absolute right-3 top-3 z-10 size-9 bg-panel/80 backdrop-blur hover:text-danger"
-          onClick={(event) => {
-            event.stopPropagation();
-            onRemove(robot);
-          }}
-          title={`Remove ${robot.name}`}
-          type="button"
-        >
-          <TrashIcon size={17} />
-        </button>
-        <button
-          aria-label={`Change address of ${robot.name}`}
-          className="ctl reveal pointer-events-auto absolute right-14 top-3 z-10 size-9 bg-panel/80 backdrop-blur hover:text-ink"
-          onClick={(event) => {
-            event.stopPropagation();
-            onEdit(robot);
-          }}
-          title="Change IP address or domain"
-          type="button"
-        >
-          <PencilIcon size={17} />
-        </button>
-        <PlayButton
-          className="reveal pointer-events-auto absolute bottom-3 right-3 z-10"
-          onConnect={onConnect}
-          onDisconnect={onDisconnect}
-          robot={robot}
-          size={44}
-        />
-      </div>
-      <div className="pointer-events-none relative border-t border-line p-4">
-        <div className="flex items-baseline justify-between gap-3">
-          <h3 className={`truncate text-[17px] font-semibold ${live ? "text-live" : "text-ink"}`}>{robot.name}</h3>
-          <span className="flex-none text-[13px] text-faint">{preset.label}</span>
-        </div>
-        <p className="mt-1 truncate text-[14px] text-muted">{describe(robot)}</p>
-        <div className="mt-3 flex flex-wrap gap-x-3 font-mono text-[13px] text-faint">
-          <span translate="no">{robot.host || "no address"}</span>
-          <span>domain {robot.domainId}</span>
-        </div>
-      </div>
-    </article>
-  );
-}
-
-function AddCard({ onAdd }) {
-  return (
-    <button
-      className="group grid min-h-[260px] place-items-center rounded-2xl border border-dashed border-line-strong text-center transition-colors hover:border-faint hover:bg-card/50"
-      onClick={onAdd}
-      type="button"
-    >
-      <span>
-        <span className="mx-auto grid size-12 place-items-center rounded-full bg-raised text-ink transition-colors group-hover:bg-coral group-hover:text-coral-ink">
-          <PlusIcon size={22} />
-        </span>
-        <span className="mt-3 block text-[16px] font-semibold">Add a robot</span>
-        <span className="mt-1 block text-[14px] text-muted">Its CAD model appears here</span>
-      </span>
-    </button>
-  );
-}
-
-/* A preset's card: the model it adds, and what it carries. */
-function PresetCard({ preset, onAdd }) {
-  const p = PRESET_ROBOTS[preset];
-  return (
-    <button
-      aria-label={`Add ${p.label}`}
-      className="group overflow-hidden rounded-2xl border border-line bg-card text-left transition-colors hover:border-line-strong"
-      onClick={onAdd}
-      type="button"
-    >
-      <span className="model relative block aspect-[16/11]" style={{ background: stageBg(0.18) }}>
-        <ModelImage alt={modelAlt(preset)} className="absolute inset-[4%] h-[92%] w-[92%]" preset={preset} />
-        <span className="play reveal absolute bottom-3 right-3 size-11" aria-hidden="true">
-          <PlusIcon size={20} />
-        </span>
-      </span>
-      <span className="block border-t border-line p-4">
-        <span className="block text-[17px] font-semibold">{p.label}</span>
-        <span className="mt-1 line-clamp-2 block text-[14px] leading-snug text-muted">{p.summary}</span>
-      </span>
-    </button>
-  );
-}
-
-/* Claude's full-bleed coral callout, showing the real log rather than a picture of one. */
-function CommandCallout({ messages, onOpen }) {
-  const recent = messages.slice(-2);
-  return (
-    <section className="grid items-center gap-8 overflow-hidden rounded-2xl bg-coral p-7 text-coral-ink md:grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)] md:p-10">
-      <div>
-        <h2 className="font-display text-[clamp(30px,3.4vw,46px)] leading-[1.05] tracking-display">
-          A command log for the whole fleet
-        </h2>
-        <p className="mt-3 max-w-[42ch] text-[17px] font-medium leading-relaxed">
-          Write an instruction once and Hive sends it to every connected robot.
-        </p>
-        <button className="btn mt-6 bg-sidebar text-ink hover:bg-raised" onClick={onOpen} type="button">
-          Send a command
-        </button>
-      </div>
-      <div className="rounded-xl bg-cream p-5 text-cream-ink shadow-paper">
-        <p className="text-[13px] font-medium text-cream-muted">Latest in the log</p>
-        <div className="mt-3 space-y-3">
-          {recent.map((m, i) => (
-            <div className={m.role === "operator" ? "flex justify-end" : "flex gap-2.5"} key={`${i}-${m.text}`}>
-              {m.role === "agent" && <HiveMark className="mt-0.5 flex-none text-coral-press" size={18} />}
-              <p
-                className={
-                  m.role === "operator"
-                    ? "max-w-[85%] rounded-2xl rounded-br-md bg-cream-3 px-3.5 py-2 text-[15px]"
-                    : "line-clamp-3 whitespace-pre-line text-[15px] leading-relaxed"
-                }
-              >
-                {m.text}
-              </p>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
+/* The STOP ALL popover's lines: each car's report, then its live stop state once the stop went out. */
+function stopSummary(run, robots, links) {
+  const cars = run.cars.length
+    ? run.cars.map(({ id, name }) => {
+        const result = run.results[id] ?? { state: "sending" };
+        const robot = robots.find((r) => r.id === id);
+        const line = { key: id, label: robot?.name ?? name };
+        if (result.state === "sending") return { ...line, text: "sending stop…", level: "warn" };
+        if (result.state === "failed") return { ...line, text: `stop failed: ${result.error}`, level: "danger" };
+        if (result.state === "superseded") return { ...line, text: "a newer command took over", level: "warn" };
+        const mode = displayMode(robot, links[id] ?? null);
+        return { ...line, text: mode.text || "stop sent", level: mode.level };
+      })
+    : [{ key: "cars", label: "Cars", text: "No connected cars", level: "muted" }];
+  const mission = run.results.mission ?? { state: "sending" };
+  const missionLine =
+    mission.state === "failed" ? { text: `cancel failed: ${mission.error}`, level: "danger" } : (MISSION_LINE[mission.state] ?? MISSION_LINE.sending);
+  return [...cars, { key: "mission", label: "Executive mission", ...missionLine }];
 }
 
 function EmptyFleet({ onAdd }) {
@@ -1661,7 +969,7 @@ function RobotView({
           type="button"
         >
           <ChevronLeftIcon size={18} />
-          Home
+          Fleet
         </button>
         <div className="flex items-center gap-2">
           <button
