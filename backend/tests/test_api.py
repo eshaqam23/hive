@@ -27,7 +27,7 @@ def test_http_known_story_and_export():
     with _client() as c:
         s = c.get("/api/exec/state").json()
         assert s["gateway"]["kind"] == "fake" and s["gateway"]["verified_transport"] is False
-        assert s["planners"]["qwen"]["live_enabled"] is False
+        assert s["planners"]["llm"]["live_enabled"] is False and "qwen" not in s["planners"]
         c.post("/api/exec/reset", json={"scenario": "known"})
         s = c.post("/api/exec/missions", json={"command": DEMO, "planner": "baseline"}).json()
         rev = s["mission"]["revisions"][-1]
@@ -45,9 +45,11 @@ def test_http_known_story_and_export():
 
 def test_http_qwen_unavailable_is_visible():
     with _client() as c:
-        s = c.post("/api/exec/missions", json={"command": DEMO, "planner": "qwen"}).json()
+        s = c.post("/api/exec/missions", json={"command": DEMO, "planner": "qwen"}).json()  # alias of "llm"
         assert s["mission"]["status"] == "planner_error"
         assert s["mission"]["revisions"] == []
+        assert s["mission"]["planner_kind"] == "llm"
+        assert "not configured" in s["mission"]["outcome"]["reason"]
 
 
 def test_http_rejects_unknown_fields_and_faults():

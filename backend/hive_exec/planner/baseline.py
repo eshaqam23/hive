@@ -1,8 +1,8 @@
 """Baseline planner: fixed delivery/inspection/scan templates.
 
-Development aid only. Every proposal it makes is labeled "Baseline" and it is
-never substituted for Qwen automatically. It reads the same observed-world
-context as Qwen (no simulator truth).
+Development aid only. Every proposal it makes is labeled "Baseline (no LLM)" and
+it is never substituted for the LLM planner automatically. It reads the same
+observed-world context as the LLM (no simulator truth).
 """
 
 from __future__ import annotations
@@ -152,14 +152,17 @@ def plan_for_goals(goals: list[dict], ctx: PlanningContext) -> PlanProposal:
               tasks=tasks)
 
 
+BASELINE_LABEL = "Baseline (no LLM)"
+
+
 class BaselinePlanner(Planner):
     kind = "baseline"
 
     def status(self) -> dict:
-        return {"kind": "baseline", "label": "Baseline (templates, not Qwen)", "live_enabled": True}
+        return {"kind": "baseline", "label": BASELINE_LABEL, "live_enabled": True}
 
     async def propose(self, ctx: PlanningContext, repair_feedback=None, previous_output=None) -> PlannerOutput:
-        record = PlannerRecord(kind="baseline", label="Baseline (templates, not Qwen)", latency_ms=0.0)
+        record = PlannerRecord(kind="baseline", label=BASELINE_LABEL, latency_ms=0.0)
         if ctx.canonical_goals and ctx.phase in ("continuation", "recovery"):
             goals = ctx.canonical_goals
         else:

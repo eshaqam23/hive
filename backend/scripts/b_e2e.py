@@ -5,7 +5,7 @@ Prerequisites (Ubuntu 24.04/WSL): ros/run_fake_fleet.sh and node bridge/server.m
     cd backend && .venv/Scripts/python scripts/b_e2e.py [--bridge ws://127.0.0.1:8790] [--planner baseline]
 
 Planner provenance is recorded per revision. With --planner baseline this verifies the
-transport path only, NOT live Qwen.
+transport path only, NOT a live LLM.
 """
 
 from __future__ import annotations
@@ -23,7 +23,8 @@ from hive_exec.config import ExecSettings  # noqa: E402
 from hive_exec.executive import Executive  # noqa: E402
 from hive_exec.gateway.synapse import SynapseGateway  # noqa: E402
 from hive_exec.planner.baseline import BaselinePlanner  # noqa: E402
-from hive_exec.planner.qwen import QwenPlanner  # noqa: E402
+from hive_exec.llm.router import Router  # noqa: E402
+from hive_exec.planner.llm import LLMPlanner  # noqa: E402
 
 DEMO = ("Find the red block in the work area, check the pickup corridor, "
         "and bring the block to the drop-off area.")
@@ -136,12 +137,12 @@ async def story_uncertain(ex):
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bridge", default=ExecSettings.from_env().bridge_url)
-    ap.add_argument("--planner", choices=["baseline", "qwen"], default="baseline")
+    ap.add_argument("--planner", choices=["baseline", "llm", "qwen"], default="baseline")  # qwen = llm
     ap.add_argument("--out", default=str(Path(__file__).resolve().parents[2] / "docs" / "evidence" / "b-e2e.json"))
     args = ap.parse_args()
     settings = ExecSettings.from_env()
     gw = SynapseGateway(args.bridge)
-    planners = {"baseline": BaselinePlanner(), "qwen": QwenPlanner(settings.qwen)}
+    planners = {"baseline": BaselinePlanner(), "llm": LLMPlanner(Router(legacy=settings.qwen))}
     ex = Executive(gw, planners, default_planner=args.planner)
     await ex.start()
     if not gw.connected:

@@ -94,6 +94,11 @@ class Router:
         self._fingerprint: Any = ()  # () never equals a real fingerprint or None
         self._exported: dict = {}
 
+    @property
+    def transport(self) -> Optional[httpx.AsyncBaseTransport]:
+        """The injected transport (tests), shared with the probe."""
+        return self._transport
+
     # -- the store, re-read on change ------------------------------------------------------
     def store(self) -> ProviderStore:
         current = fingerprint(self._path)

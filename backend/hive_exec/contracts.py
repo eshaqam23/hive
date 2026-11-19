@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 PLAN_PROPOSAL_SCHEMA = "hive.plan-proposal.v1"
 TASK_ENVELOPE_SCHEMA = "hive.task-envelope.v1"
@@ -212,10 +212,22 @@ class AllocatedTask(Strict):
     skill: SkillKind
 
 
-class PlannerRecord(Strict):
-    """Provenance of a proposal. ``kind`` is never inferred: it states which planner ran."""
+#: Planner kinds. "qwen" is the exec_v2 name of "llm", still accepted on input.
+PLANNER_KIND_ALIASES = {"qwen": "llm"}
 
-    kind: Literal["qwen", "baseline"]
+
+def normalize_planner_kind(kind: Optional[str]) -> Optional[str]:
+    return PLANNER_KIND_ALIASES.get(kind, kind) if isinstance(kind, str) else kind
+
+
+class PlannerRecord(Strict):
+    """Provenance of a proposal. ``kind`` is never inferred: it states which planner ran.
+
+    ``latency_ms`` is total planning time (the Executive overwrites it, repairs
+    included); ``provider_latency_ms`` is the one HTTP call that answered.
+    """
+
+    kind: Literal["llm", "baseline"]
     label: str
     model: Optional[str] = None
     endpoint: Optional[str] = None
@@ -228,6 +240,16 @@ class PlannerRecord(Strict):
     input_tokens_est: Optional[int] = None
     usage: Optional[dict[str, Any]] = None
     errors: list[str] = Field(default_factory=list)
+    provider_id: Optional[str] = None
+    provider_kind: Optional[str] = None
+    fallback_used: bool = False
+    failovers: list[str] = Field(default_factory=list)
+    provider_latency_ms: Optional[float] = None
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _alias_kind(cls, value: Any) -> Any:
+        return normalize_planner_kind(value)
 
 
 class ExecutionPlan(Strict):

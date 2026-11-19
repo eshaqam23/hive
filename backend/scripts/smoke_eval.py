@@ -1,12 +1,12 @@
 """Smoke evaluation: ~10 labeled commands, each run twice (spec 11).
 
     cd backend
-    .venv/Scripts/python scripts/smoke_eval.py               # live Qwen from .env (QWEN_BASE_URL)
+    .venv/Scripts/python scripts/smoke_eval.py               # live LLM: the executive role in ~/.hive/providers.yaml
     .venv/Scripts/python scripts/smoke_eval.py --planner baseline   # dry run of the harness (labeled Baseline)
     .venv/Scripts/python scripts/smoke_eval.py --execute     # also auto-approve valid revisions on the fake fleet
 
 This is a smoke evaluation, not a reliability benchmark. Results are labeled with
-the planner that actually produced them; a Baseline run is never reported as Qwen.
+the planner that actually produced them; a Baseline run is never reported as an LLM.
 """
 
 from __future__ import annotations
@@ -25,7 +25,9 @@ from hive_exec.config import ExecSettings  # noqa: E402
 from hive_exec.executive import Executive  # noqa: E402
 from hive_exec.gateway.fake import FakeGateway  # noqa: E402
 from hive_exec.planner.baseline import BaselinePlanner  # noqa: E402
-from hive_exec.planner.qwen import QwenPlanner  # noqa: E402
+from hive_exec.contracts import normalize_planner_kind  # noqa: E402
+from hive_exec.llm.router import Router  # noqa: E402
+from hive_exec.planner.llm import LLMPlanner  # noqa: E402
 
 DEMO = ("Find the red block in the work area, check the pickup corridor, "
         "and bring the block to the drop-off area.")
@@ -92,20 +94,21 @@ async def run_case(ex: Executive, planner_kind: str, case, execute: bool) -> dic
 
 async def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--planner", choices=["qwen", "baseline"], default="qwen")
+    ap.add_argument("--planner", choices=["llm", "qwen", "baseline"], default="llm")  # qwen = llm
     ap.add_argument("--repeats", type=int, default=2)
     ap.add_argument("--execute", action="store_true")
     ap.add_argument("--out", default=str(Path(__file__).resolve().parents[2] / "reports"))
     args = ap.parse_args()
+    args.planner = normalize_planner_kind(args.planner)
 
     settings = ExecSettings.from_env()
-    planners = {"qwen": QwenPlanner(settings.qwen), "baseline": BaselinePlanner()}
+    planners = {"llm": LLMPlanner(Router(legacy=settings.qwen)), "baseline": BaselinePlanner()}
     ex = Executive(FakeGateway(time_scale=0.01), planners, default_planner=args.planner)
     await ex.gateway.start(ex.handle_event)
-    if args.planner == "qwen":
-        probe = await planners["qwen"].probe()
-        if not probe.ok:
-            print(f"Qwen probe failed: {probe.error}\nNo live evaluation was run.")
+    if args.planner == "llm":
+        probe = await planners["llm"].probe()
+        if not probe["ok"]:
+            print(f"LLM probe failed: {probe['error']}\nNo live evaluation was run.")
             sys.exit(2)
     rows = []
     for rep in range(args.repeats):
@@ -117,11 +120,13 @@ async def main() -> None:
                   f"first_pass={row['first_pass_ok']} repaired={row['repaired']} latency={row['latency_ms']}ms"
                   + (f" final={row.get('final_status')}" if args.execute else ""))
     lat = [r["latency_ms"] for r in rows if r["latency_ms"] is not None]
+    llm_status = planners["llm"].status()
     summary = {
         "planner": args.planner, "label": rows[0]["planner_label"] if rows else None,
-        "model": settings.qwen.model if args.planner == "qwen" else None,
-        "endpoint": settings.qwen.base_url if args.planner == "qwen" else None,
-        "settings": planners["qwen"].settings_record() if args.planner == "qwen" else None,
+        "provider": llm_status["provider"] if args.planner == "llm" else None,
+        "model": llm_status["model"] if args.planner == "llm" else None,
+        "endpoint": llm_status["endpoint"] if args.planner == "llm" else None,
+        "settings": llm_status["settings"] if args.planner == "llm" else None,
         "runs": len(rows), "matches": sum(r["match"] for r in rows),
         "planner_errors": sum(r["outcome"] == "planner_error" for r in rows),
         "first_pass_ok": sum(bool(r["first_pass_ok"]) for r in rows),

@@ -83,7 +83,7 @@ export default function ExecutiveView() {
   }
 
   const mission = state.mission;
-  const qwen = state.planners.qwen;
+  const llm = state.planners.llm;
   const gateway = state.gateway;
   const terminal = mission && ["completed", "blocked", "rejected", "canceled", "planner_error"].includes(mission.status);
 
@@ -95,8 +95,18 @@ export default function ExecutiveView() {
           <h1>Mission</h1>
         </div>
         <div className="badge-row">
-          <span className={`badge ${qwen?.live_enabled ? "qwen" : "off"}`} title={qwen?.probe?.error || ""}>
-            Qwen: {qwen?.configured ? (qwen.live_enabled ? `probe ok · ${qwen.model}` : "probe failed") : "not configured"}
+          <span
+            className={`badge ${llm?.live_enabled ? "llm" : "off"}`}
+            title={llm?.probe?.error || (llm?.problems || []).join("; ")}
+          >
+            LLM:{" "}
+            {llm?.configured
+              ? llm.live_enabled
+                ? `probe ok · ${llm.provider} · ${llm.model}`
+                : llm.probe
+                  ? `probe failed · ${llm.provider}`
+                  : `${llm.provider} · not probed`
+              : "not configured"}
           </span>
           <span className="badge baseline">Baseline available (labeled)</span>
           <span className={`badge transport ${gateway.verified_transport ? "verified" : ""}`} title={gateway.detail}>
@@ -120,8 +130,8 @@ export default function ExecutiveView() {
             />
             <div className="action-row">
               <select value={planner} onChange={(e) => setPlanner(e.target.value)} disabled={busy}>
-                <option value="qwen">Qwen3 (vLLM endpoint)</option>
-                <option value="baseline">Baseline templates (not Qwen)</option>
+                <option value="llm">LLM (provider store)</option>
+                <option value="baseline">Baseline (no LLM)</option>
               </select>
               <button
                 className="primary"

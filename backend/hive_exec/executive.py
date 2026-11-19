@@ -31,6 +31,7 @@ from .contracts import (
     TaskEnvelope,
     TaskEvent,
     TaskSpec,
+    normalize_planner_kind,
 )
 from .gateway.base import RobotGateway
 from .planner.base import Planner, PlannerError
@@ -102,12 +103,12 @@ def _hash(obj: Any) -> str:
 
 class Executive:
     def __init__(self, gateway: RobotGateway, planners: dict[str, Planner], allocator: Optional[Allocator] = None,
-                 clock: Callable[[], float] = time.time, default_planner: str = "qwen"):
+                 clock: Callable[[], float] = time.time, default_planner: str = "llm"):
         self.gateway = gateway
-        self.planners = planners
+        self.planners = {normalize_planner_kind(k): p for k, p in planners.items()}  # "qwen" -> "llm"
         self.allocator = allocator or CapabilityAllocator()
         self.clock = clock
-        self.default_planner = default_planner
+        self.default_planner = normalize_planner_kind(default_planner)
         self.lock = asyncio.Lock()
         self.run_id = ""
         self.scenario = "unknown"
@@ -218,7 +219,7 @@ class Executive:
 
     # ============================================================ missions
     async def create_mission(self, command: str, planner_kind: Optional[str] = None) -> Mission:
-        planner_kind = planner_kind or self.default_planner
+        planner_kind = normalize_planner_kind(planner_kind) or self.default_planner
         if planner_kind not in self.planners:
             raise ExecError(f"Unknown planner {planner_kind}", 400)
         async with self.lock:

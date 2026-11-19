@@ -62,7 +62,7 @@ class ExecSettings:
     host: str = "127.0.0.1"
     port: int = 8788
     gateway: str = "fake"  # fake | synapse
-    default_planner: str = "qwen"  # qwen | baseline (operator can choose per mission)
+    default_planner: str = "llm"  # llm | baseline ("qwen" = llm); operator can choose per mission
     sim_time_scale: float = 1.0
     bridge_url: str = "ws://127.0.0.1:8790"
     cors_origins: list[str] = field(default_factory=lambda: ["http://127.0.0.1:5173", "http://localhost:5173"])
@@ -74,7 +74,7 @@ class ExecSettings:
             host=os.environ.get("HIVE_EXEC_HOST", "127.0.0.1"),
             port=int(os.environ.get("HIVE_EXEC_PORT", "8788")),
             gateway=os.environ.get("HIVE_GATEWAY", "fake"),
-            default_planner=os.environ.get("HIVE_DEFAULT_PLANNER", "qwen"),
+            default_planner=os.environ.get("HIVE_DEFAULT_PLANNER", "llm"),
             sim_time_scale=float(os.environ.get("HIVE_SIM_TIME_SCALE", "1.0")),
             bridge_url=os.environ.get("HIVE_BRIDGE_URL", "ws://127.0.0.1:8790"),
             qwen=QwenSettings.from_env(),

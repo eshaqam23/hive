@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Any, Literal, Optional
 
@@ -15,7 +16,8 @@ from .contracts import plan_proposal_json_schema
 from .executive import ExecError, Executive
 from .gateway.base import RobotGateway
 from .planner.baseline import BaselinePlanner
-from .planner.qwen import QwenPlanner
+from .llm.router import Router
+from .planner.llm import LLMPlanner
 from .sim.fake_world import KNOWN_FAULTS
 
 
@@ -37,7 +39,7 @@ class Body(BaseModel):
 
 class MissionIn(Body):
     command: str = Field(min_length=1, max_length=1000)
-    planner: Optional[Literal["qwen", "baseline"]] = None
+    planner: Optional[Literal["llm", "qwen", "baseline"]] = None  # "qwen" is the exec_v2 alias of "llm"
 
 
 class ApproveIn(Body):
@@ -70,17 +72,21 @@ def create_app(settings: Optional[ExecSettings] = None, gateway: Optional[RobotG
     settings = settings or ExecSettings.from_env()
     if executive is None:
         gateway = gateway or make_gateway(settings)
-        planners = {"qwen": QwenPlanner(settings.qwen), "baseline": BaselinePlanner()}
+        planners = {"llm": LLMPlanner(Router(legacy=settings.qwen)), "baseline": BaselinePlanner()}
         executive = Executive(gateway, planners, default_planner=settings.default_planner)
     ex = executive
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await ex.start()
-        qwen = ex.planners.get("qwen")
-        if isinstance(qwen, QwenPlanner) and settings.qwen.base_url:
-            await qwen.probe()
+        llm = ex.planners.get("llm")
+        probe_task = None
+        if isinstance(llm, LLMPlanner) and llm.status()["configured"]:
+            # In the background: an unreachable provider must not hold startup for a timeout.
+            probe_task = asyncio.create_task(llm.probe())
         yield
+        if probe_task is not None and not probe_task.done():
+            probe_task.cancel()
         await ex.gateway.stop()
 
     app = FastAPI(title="HIVE Executive", version="0.1.0", lifespan=lifespan)
@@ -114,11 +120,10 @@ def create_app(settings: Optional[ExecSettings] = None, gateway: Optional[RobotG
 
     @app.post("/api/exec/planner/probe")
     async def planner_probe():
-        qwen = ex.planners.get("qwen")
-        if not isinstance(qwen, QwenPlanner):
-            raise HTTPException(404, "Qwen planner not configured")
-        result = await qwen.probe()
-        return result.__dict__
+        llm = ex.planners.get("llm")
+        if not isinstance(llm, LLMPlanner):
+            raise HTTPException(404, "LLM planner not available")
+        return await llm.probe()
 
     @app.post("/api/exec/missions")
     async def create_mission(body: MissionIn):

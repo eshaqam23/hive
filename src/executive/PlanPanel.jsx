@@ -112,7 +112,7 @@ function RevisionDetail({ rev, mission, robots, isLatest, busy, onApprove, onRej
           {rev.kind} · status {rev.status.replaceAll("_", " ")} · hash {rev.proposal_hash}
           {rev.planner.latency_ms != null ? ` · ${Math.round(rev.planner.latency_ms)} ms` : ""}
           {rev.planner.repaired ? " · repaired once" : ""}
-          {rev.planner.kind === "qwen" && rev.planner.first_pass_ok === false ? " · first pass invalid" : ""}
+          {rev.planner.kind === "llm" && rev.planner.first_pass_ok === false ? " · first pass invalid" : ""}
         </small>
       </div>
 
