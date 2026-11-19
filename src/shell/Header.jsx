@@ -13,7 +13,8 @@ const TABS = [
 ];
 
 /* The robot page is part of Fleet, so Fleet stays lit while it is open. */
-const tabOf = (view) => (view === "robot" ? "fleet" : view);
+/* the robot page and the fleet command log both sit under Fleet */
+const tabOf = (view) => (view === "robot" || view === "log" ? "fleet" : view);
 
 const TONE = { live: "text-live", warn: "text-warn", danger: "text-danger", muted: "text-muted", faint: "text-faint" };
 

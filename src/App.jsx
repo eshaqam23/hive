@@ -18,6 +18,7 @@ import { liveStatus } from "./shell/status.js";
 import { runStopAll } from "./shell/stopAll.js";
 import { execPost } from "./executive/api.js";
 import { useExecutive } from "./executive/useExecutive.js";
+import ChatView from "./chat/ChatView.jsx";
 
 const API_BASE_URL = import.meta.env.VITE_HIVE_API_URL || "http://127.0.0.1:8787/api";
 const FLEET_STORAGE_KEY = "hive:fleet:manual-rc-v1";
@@ -257,7 +258,8 @@ export default function App() {
   const robotsRef = useRef(robots);
   robotsRef.current = robots;
   const backend = useBackendHealth();
-  const exec = useExecutive();
+  // the mission chat polls the Executive every 500 ms and parks while the browser tab is hidden
+  const exec = useExecutive({ stateMs: view === "chat" ? 500 : 2000, pauseHidden: view === "chat" });
   const [stopRun, setStopRun] = useState(null); // the last STOP ALL: { id, at, cars, results }
 
   const selectedRobot = robots.find((robot) => robot.id === selectedRobotId) || robots[0];
@@ -799,7 +801,7 @@ export default function App() {
               links={links}
               messages={messages}
               onAdd={setAddingPreset}
-              onChat={() => setView("chat")}
+              onChat={() => setView("log")}
               onOpen={openRobot}
               robots={robots}
               {...robotActions}
@@ -826,14 +828,8 @@ export default function App() {
           )}
           {view === "robot" && !selectedRobot && <EmptyFleet onAdd={() => setAddingPreset("cameraRcCar")} />}
           {view === "map" && <MapView execState={exec.state} robots={robots} />}
-          {view === "chat" && (
-            <>
-              <p className="mx-8 mt-6 rounded-xl border border-dashed border-line-strong px-4 py-3 text-[14px] text-muted" role="note">
-                Mission chat with the Executive arrives in a later build step. Until then this is the fleet command log.
-              </p>
-              <CommandView messages={messages} onSend={sendCommand} robots={robots} />
-            </>
-          )}
+          {view === "chat" && <ChatView exec={exec} robots={robots} />}
+          {view === "log" && <CommandView messages={messages} onSend={sendCommand} robots={robots} />}
         </main>
 
         {showDock && (
