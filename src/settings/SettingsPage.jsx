@@ -178,8 +178,8 @@ export default function SettingsPage({ onChanged }) {
       <p className="break-all font-mono text-[13px] text-faint">/api/exec/llm · {view?.store?.path ?? "~/.hive/providers.yaml"}</p>
       <h1 className="mt-2 font-display text-[clamp(32px,3.4vw,48px)] leading-[1.05] tracking-display">Models</h1>
       <p className="mt-2 max-w-[62ch] text-[16px] leading-relaxed text-muted">
-        Which model each role runs on, and the providers behind them. Keys are written to <span className="font-mono text-[14px]">~/.hive/providers.yaml</span> and never read back
-        out; this page only ever sees the last four characters.
+        Which model each role runs on, and the providers behind them. Keys are written to the store file named above and never read back out; this page only ever sees the
+        last four characters.
       </p>
 
       {loadError && (

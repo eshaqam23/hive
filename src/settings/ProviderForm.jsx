@@ -11,7 +11,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Caret } from "../chat/ui.jsx";
 import { KINDS, MODES_BY_KIND, SAMPLING_FIELDS, draftErrors, editDraft, editSampling, providerBody } from "./settingsModel.js";
 
-const LABEL = "grid gap-1.5 text-[13px] font-medium text-muted";
+const LABEL = "grid content-start gap-1.5 text-[13px] font-medium text-muted";
 
 function FieldError({ text, id }) {
   if (!text) return null;
@@ -187,7 +187,7 @@ export default function ProviderForm({ initial, template, provider, existingIds 
             spellCheck={false}
             type="password"
           />
-          <span className="text-[12px] font-normal text-faint">Write-only: stored in ~/.hive/providers.yaml (0600), never sent back to this page.</span>
+          <span className="text-[12px] font-normal text-faint">Write-only: saved to the provider store (0600), never sent back to this page.</span>
         </label>
       </div>
 

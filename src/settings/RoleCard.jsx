@@ -68,7 +68,7 @@ export default function RoleCard({ role, roles, providers, modelsById = {}, onRe
       </header>
 
       <div className="grid gap-4 sm:grid-cols-2">
-        <label className="grid gap-1.5 text-[13px] font-medium text-muted">
+        <label className="grid content-start gap-1.5 text-[13px] font-medium text-muted">
           Provider
           <select
             className="field font-mono"
@@ -93,7 +93,7 @@ export default function RoleCard({ role, roles, providers, modelsById = {}, onRe
             <span className="text-[12px] font-normal text-warn">No key stored for {primaryRow.id}.</span>
           )}
         </label>
-        <label className="grid gap-1.5 text-[13px] font-medium text-muted">
+        <label className="grid content-start gap-1.5 text-[13px] font-medium text-muted">
           Model
           <input
             autoCapitalize="off"
