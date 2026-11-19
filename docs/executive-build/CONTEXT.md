@@ -113,4 +113,4 @@ System pytest 7.4 warns "Unknown config option: asyncio_mode"; that is expected.
   `python3 -m pytest backend/tests -q --ignore=backend/tests/test_api.py --ignore=backend/tests/test_contracts.py --ignore=backend/tests/test_executive.py --ignore=backend/tests/test_validator.py --ignore-glob='backend/tests/test_llm_*'`
 - exec (hive-exec venv, expect 241 after prompt 5; 209 after prompt 4):
   `~/.venvs/hive-exec/bin/python -m pytest backend/tests/test_api.py backend/tests/test_contracts.py backend/tests/test_executive.py backend/tests/test_validator.py backend/tests/test_llm_*.py -q`
-- Also run `npm test` (Windows Node, expect 217 after prompt 7; 150 after prompt 6) and the mock e2e from the Baseline section.
+- Also run `npm test` (Windows Node, expect 274 after prompt 8; 217 after prompt 7) and the mock e2e from the Baseline section.

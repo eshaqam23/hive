@@ -1,4 +1,48 @@
-# Gate 7 UI evidence (prompt 7)
+# UI evidence
+
+## Gate 8: mission chat (prompt 8)
+
+Captured 2026-11-19 with Playwright (Chromium, 1440×900, dark theme) on the synapse gateway with
+the Baseline planner. Every robot state here comes from the fake ROS fleet and carries a SIM tag.
+
+| File | What it shows |
+|---|---|
+| `chat-awaiting-approval.png` | Rev 1 awaiting approval: the open thinking card (Baseline (no LLM), latency, what it read, four lines from summary, planning log and allocation reasons), the plan table with checks passed 2/2, Approve & run · Edit plan · Reject, "Nothing moves until you approve.", the composer disabled with its reason, and the sim drawer collapsed with the armed fault |
+| `chat-running.png` | Rev 2 executing: T1 done with its report line, T2 accepted with Stop current, T3 and T4 blocked ("waits on T2", "waits on T3"), the gripper car busy · T2 in the fleet list, and agent reports newest first |
+| `chat-failed-replan.png` | Rev 2's T3 failed `motor_stall` with its report line and Replan, T4 skipped, the recovery thinking card, and "Replan proposal · rev 3 · triggered by T3 motor_stall" with its diff against rev 2 |
+| `chat-complete.png` | Rev 3 finished and "Mission complete · 4 min 16 s · 6 of 7 step(s) succeeded", with rev 2's T3 failure shown as recovered, the Export run link and Start a new run |
+
+### How the stack was run
+
+The four services ran in WSL from the repo root, started by one script. The UI ran on Windows.
+
+- Car backend: `HIVE_ROS_SETUP=backend/test/mock_ros/setup.bash python3 backend/server.py` (port 8787)
+- Fake ROS fleet: `bash ros/run_fake_fleet.sh` (ROS_DOMAIN_ID 77)
+- Synapse bridge: `node bridge/server.mjs` (port 8790, rosbridge on 9090)
+- Executive, from `backend/`: `HIVE_GATEWAY=synapse HIVE_DEFAULT_PLANNER=baseline HIVE_PROVIDERS_FILE=<temp file> HIVE_RUNS_DIR=<temp dir> ~/.venvs/hive-exec/bin/python -m hive_exec` (port 8788).
+  The temporary providers file keeps the real `~/.hive/providers.yaml` out of the run, so the LLM planner reports "not bound".
+- UI, on Windows: `npx vite --host 127.0.0.1` (port 5173)
+
+`GET /api/exec/health` during the run reported `"gateway":{"kind":"synapse","label":"AgenticROS / Corebrum Synapse bridge","connected":true,"verified_round_trip":true,…}`, `"default_planner":"baseline"`, and the bridge and rosbridge both connected.
+
+### The run
+
+1. In Sim controls: scenario "Unknown object/route", fault `nav_fault_after_pickup` checked, then Reset simulation.
+2. Sent with the Baseline chip: "Find the red block in the work area, check the pickup corridor, and bring the block to the drop-off area."
+3. Rev 1 (observation stage: T1 `inspect_area` on camera_01, T2 `scan_route` on lidar_01). Approved. It finished in about 3 s, so no screenshot shows rev 1 running.
+4. Rev 2 (4 tasks on gripper_01) arrived awaiting approval. Approved, then captured running.
+5. T3 `navigate_to` failed with `motor_stall`, T4 was skipped, and the Executive proposed recovery rev 3 (2 tasks). Captured, then approved.
+6. The mission completed. Its duration includes the time spent waiting for each approval.
+
+After a page reload the thread repainted all three revisions and the completion card, and the
+finished mission was kept in localStorage (`hive.chat.earlier.v1`, 3 revisions, export link).
+
+### Seen during the run, not changed in prompt 8
+
+- The header pill shows the Executive's `active_revision`, so it reads "rev 1" while rev 2 waits for approval.
+- At a 390 px wide viewport the header is 528 px wide and STOP ALL sits off-screen. It happens on every tab, and the header layout is unchanged since Gate 7.
+
+## Gate 7: fleet, robot page and map (prompt 7)
 
 Captured 2026-11-19 with Playwright (Chromium, 1440×900, dark theme).
 
@@ -9,7 +53,7 @@ Captured 2026-11-19 with Playwright (Chromium, 1440×900, dark theme).
 | `map.png` | Map tab with the Executive's real reply (`available: false`): the empty state |
 | `map-demo.png` | Map tab with the dev-only **Demo data** toggle on. It is a fixture and is watermarked DEMO |
 
-## How the stack was run
+### How the stack was run
 
 The stack was started by hand, not with `npm run hive`. The launcher does not pass `HIVE_ROS_SETUP` through to WSL.
 
@@ -19,7 +63,7 @@ The stack was started by hand, not with `npm run hive`. The launcher does not pa
   `HIVE_GATEWAY=fake ~/.venvs/hive-exec/bin/python -m hive_exec` (port 8788)
 - UI: `npx vite --host 127.0.0.1` (port 5173)
 
-## live-data regression on the mock backend
+### live-data regression on the mock backend
 
 These steps were run after a full page reload:
 
