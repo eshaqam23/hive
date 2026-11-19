@@ -149,3 +149,9 @@ def test_synapse_health_reports_bridge_and_rosbridge_separately():
     links = gw.transport_health()
     assert links["bridge"]["used"] and links["bridge"]["url"] == "ws://127.0.0.1:8790"
     assert links["bridge"]["connected"] is False and links["rosbridge"]["connected"] is False
+
+
+def test_http_map_stub():
+    with _client() as c:
+        assert c.get("/api/exec/map").json() == {
+            "available": False, "reason": "shared perception not built yet", "schema": "hive.shared-map.v0"}

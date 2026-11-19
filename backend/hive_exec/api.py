@@ -116,6 +116,10 @@ def create_app(settings: Optional[ExecSettings] = None, gateway: Optional[RobotG
     async def health():
         return exec_health(ex)
 
+    @app.get("/api/exec/map")
+    async def shared_map():
+        return {"available": False, "reason": "shared perception not built yet", "schema": "hive.shared-map.v0"}
+
     @app.get("/api/exec/state")
     async def state():
         return ex.state()
