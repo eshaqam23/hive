@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { backendCommand, toWslPath } from "./backend-command.mjs";
+import { backendCommand, launchPlan, serviceCommand, toWslPath, withWslEnv, wslSignals } from "./backend-command.mjs";
 
 describe("toWslPath", () => {
   it("lower-cases the drive letter and converts backslashes", () => {
@@ -43,5 +43,135 @@ describe("backendCommand", () => {
     expect(script).toContain("echo $PY > /tmp/hive-1.pid");
     expect(script).toContain("tail -n +1 -f --pid=$PY /tmp/hive-1.pid.log");
     expect(script).toContain("exit $C");
+  });
+});
+
+describe("launchPlan", () => {
+  const names = (plan) => plan.steps.map((s) => s.name);
+
+  it("defaults to the Synapse stack: backend, fake fleet, bridge, Executive, then Vite", () => {
+    const plan = launchPlan({ argv: [], env: {} });
+    expect(plan.gateway).toBe("synapse");
+    expect(names(plan)).toEqual(["backend", "fleet", "bridge", "exec", "vite"]);
+  });
+  it("waits for rosbridge :9090 and the bridge :8790 before starting the Executive", () => {
+    const { steps } = launchPlan({ argv: [], env: {} });
+    const port = (n) => steps.find((s) => s.name === n).port;
+    expect(port("fleet")).toBe(9090);
+    expect(port("bridge")).toBe(8790);
+    expect(port("exec")).toBe(8788);
+    expect(port("backend")).toBe(8787);
+    expect(port("vite")).toBe(5173);
+    expect(steps.findIndex((s) => s.name === "exec")).toBeGreaterThan(steps.findIndex((s) => s.name === "bridge"));
+  });
+  it("HIVE_GATEWAY=fake runs the Executive's in-process sim without ROS or the bridge", () => {
+    const plan = launchPlan({ argv: [], env: { HIVE_GATEWAY: "fake" } });
+    expect(plan.gateway).toBe("fake");
+    expect(names(plan)).toEqual(["backend", "exec", "vite"]);
+  });
+  it("--no-bridge leaves out the fake fleet and the bridge", () => {
+    expect(names(launchPlan({ argv: ["--no-bridge"], env: {} }))).toEqual(["backend", "exec", "vite"]);
+  });
+  it("--no-executive runs live-data's backend and Vite only", () => {
+    expect(names(launchPlan({ argv: ["--no-executive"], env: {} }))).toEqual(["backend", "vite"]);
+  });
+  it("--backend-only runs the car backend alone, as before", () => {
+    expect(names(launchPlan({ argv: ["--backend-only"], env: {} }))).toEqual(["backend"]);
+  });
+  it("rejects an unknown gateway and an unknown flag", () => {
+    expect(launchPlan({ argv: [], env: { HIVE_GATEWAY: "ros" } }).error).toMatch(/HIVE_GATEWAY/);
+    expect(launchPlan({ argv: ["--no-exec"], env: {} }).error).toMatch(/--no-exec/);
+  });
+});
+
+describe("serviceCommand", () => {
+  it("runs the Executive with the hive-exec venv from backend/ on Linux", () => {
+    const r = serviceCommand("exec", { platform: "linux", repoDir: "/home/u/hive/", env: {}, home: "/home/u" });
+    expect(r).toEqual({ cmd: "/home/u/.venvs/hive-exec/bin/python", args: ["-m", "hive_exec"], cwd: "/home/u/hive/backend" });
+  });
+  it("honours HIVE_EXEC_PYTHON (with ~) on Linux", () => {
+    const r = serviceCommand("exec", { platform: "linux", repoDir: "/h", env: { HIVE_EXEC_PYTHON: "~/py/bin/python" }, home: "/home/u" });
+    expect(r.cmd).toBe("/home/u/py/bin/python");
+  });
+  it("runs the fake fleet script and the bridge from the repo on Linux", () => {
+    expect(serviceCommand("fleet", { platform: "linux", repoDir: "/h", env: {}, home: "/u" })).toEqual({
+      cmd: "bash",
+      args: ["ros/run_fake_fleet.sh"],
+      cwd: "/h",
+    });
+    expect(serviceCommand("bridge", { platform: "linux", repoDir: "/h", env: {}, home: "/u", nodePath: "/usr/bin/node" })).toEqual({
+      cmd: "/usr/bin/node",
+      args: ["bridge/server.mjs"],
+      cwd: "/h",
+    });
+  });
+
+  const win = (name, env = {}) => serviceCommand(name, { platform: "win32", repoDir: "C:\\hive", env, pidfile: "/tmp/hive-exec-1.pid" });
+
+  it("supervises each service inside WSL like the backend: HUP ignored, log file, pidfile", () => {
+    const r = win("exec", { HIVE_WSL_DISTRO: "Ubuntu-24.04" });
+    expect(r.cmd).toBe("wsl.exe");
+    expect(r.args.slice(0, 7)).toEqual(["-d", "Ubuntu-24.04", "--cd", "/mnt/c/hive", "--exec", "bash", "-c"]);
+    const script = r.args[7];
+    expect(script).toContain("trap '' HUP INT");
+    expect(script).toContain("echo $PY > /tmp/hive-exec-1.pid");
+    expect(script).toContain("tail -n +1 -f --pid=$PY /tmp/hive-exec-1.pid.log");
+    expect(script).toContain("rm -f /tmp/hive-exec-1.pid /tmp/hive-exec-1.pid.log");
+    expect(script).toContain("exit $C");
+  });
+  it("starts each WSL service in its own process group with SIGINT handling restored", () => {
+    // A background job of a non-interactive bash ignores SIGINT; the service must get it back.
+    for (const name of ["exec", "fleet", "bridge"]) {
+      expect(win(name).args.at(-1)).toMatch(/setsid env --default-signal=INT .+ > \/tmp\/hive-exec-1\.pid\.log 2>&1 < \/dev\/null &/);
+    }
+  });
+  it("clears the whole process group once the service leader exits, so no child is orphaned", () => {
+    const script = win("fleet").args.at(-1);
+    expect(script).toContain("kill -TERM -- -$PY");
+    expect(script).toContain("kill -KILL -- -$PY");
+    expect(script.indexOf("wait $PY")).toBeLessThan(script.indexOf("kill -TERM -- -$PY"));
+    expect(script.indexOf("kill -KILL -- -$PY")).toBeLessThan(script.indexOf("rm -f"));
+  });
+  it("finds the Executive python from HIVE_EXEC_PYTHON or the default venv inside WSL, then cds to backend/", () => {
+    const script = win("exec").args.at(-1);
+    expect(script).toContain('PYBIN="${HIVE_EXEC_PYTHON:-$HOME/.venvs/hive-exec/bin/python}"');
+    expect(script).toContain("cd backend");
+    expect(script).toContain('"$PYBIN" -m hive_exec');
+  });
+  it("loads nvm for the bridge inside WSL and runs the fleet script", () => {
+    expect(win("bridge").args.at(-1)).toContain('. "$HOME/.nvm/nvm.sh"');
+    expect(win("bridge").args.at(-1)).toContain("node bridge/server.mjs");
+    expect(win("fleet").args.at(-1)).toContain("bash ros/run_fake_fleet.sh");
+  });
+});
+
+describe("wslSignals", () => {
+  it("signals the backend by its pid only, exactly as live-data did", () => {
+    expect(wslSignals("/tmp/b.pid", { group: false })).toEqual({
+      stop: "kill -INT $(cat /tmp/b.pid)",
+      retry: "kill -INT $(cat /tmp/b.pid)",
+      alive: "kill -0 $(cat /tmp/b.pid) 2>/dev/null",
+      kill: "kill -KILL $(cat /tmp/b.pid)",
+    });
+  });
+  it("asks a service leader first, then its group, and checks the group is gone", () => {
+    const s = wslSignals("/tmp/s.pid", { group: true });
+    expect(s.stop).toBe("kill -INT $(cat /tmp/s.pid)");
+    expect(s.retry).toContain("kill -INT -- -$P");
+    expect(s.alive).toContain("kill -0 $P 2>/dev/null || kill -0 -- -$P 2>/dev/null");
+    expect(s.kill).toContain("kill -KILL -- -$P");
+  });
+});
+
+describe("withWslEnv", () => {
+  const all = { PYTHONUNBUFFERED: "1", HIVE_GATEWAY: "synapse", HIVE_PROVIDERS_FILE: "/p.yaml", HIVE_SIM_TIME_SCALE: "5", HIVE_EXEC_PYTHON: "/py" };
+  it("adds the variables WSL needs without repeating existing ones", () => {
+    expect(withWslEnv(undefined, all)).toBe("PYTHONUNBUFFERED:HIVE_GATEWAY:HIVE_PROVIDERS_FILE:HIVE_SIM_TIME_SCALE:HIVE_EXEC_PYTHON");
+    expect(withWslEnv("FOO/p:HIVE_GATEWAY", all)).toBe("FOO/p:HIVE_GATEWAY:PYTHONUNBUFFERED:HIVE_PROVIDERS_FILE:HIVE_SIM_TIME_SCALE:HIVE_EXEC_PYTHON");
+  });
+  it("leaves out unset and empty variables (WSL would pass them as empty strings)", () => {
+    const env = { PYTHONUNBUFFERED: "1", HIVE_GATEWAY: "fake", HIVE_SIM_TIME_SCALE: "" };
+    expect(withWslEnv(undefined, env)).toBe("PYTHONUNBUFFERED:HIVE_GATEWAY");
+    expect(withWslEnv("", {})).toBe("");
   });
 });

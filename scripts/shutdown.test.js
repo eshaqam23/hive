@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { shutdown } from "./shutdown.mjs";
+import { shutdown, shutdownAll } from "./shutdown.mjs";
 
 function fakeChild() {
   const c = new EventEmitter();
@@ -106,5 +106,74 @@ describe("shutdown", () => {
     const backend = fakeChild();
     backend.exitCode = 1;
     expect(await shutdown({ backend, frontend: null, platform: "linux" })).toBe("exited");
+  });
+});
+
+describe("shutdownAll", () => {
+  const svc = (name, child, order, extra = {}) => ({
+    name,
+    child,
+    requestStop: vi.fn(async () => {
+      order.push(`ask:${name}`);
+      setTimeout(() => child.exit(0), 200);
+    }),
+    ...extra,
+  });
+
+  it("stops the car backend first, then each service in order, then Vite", async () => {
+    const order = [];
+    const backend = fakeChild();
+    const vite = fakeChild();
+    vite.kill.mockImplementation(() => order.push("kill:vite"));
+    const services = ["exec", "bridge", "fleet"].map((n) => svc(n, fakeChild(), order));
+    const p = shutdownAll({ backend: svc("backend", backend, order), services, frontend: vite, platform: "win32" });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(await p).toEqual({ backend: "exited", exec: "exited", bridge: "exited", fleet: "exited" });
+    expect(order).toEqual(["ask:backend", "ask:exec", "ask:bridge", "ask:fleet", "kill:vite"]);
+  });
+
+  it("does not ask any service to stop until the backend is gone", async () => {
+    const order = [];
+    const backend = fakeChild();
+    const exec = fakeChild();
+    const slowBackend = svc("backend", backend, order, {
+      requestStop: vi.fn(async () => {
+        order.push("ask:backend");
+        setTimeout(() => backend.exit(0), 2500); // stopping every robot takes a while
+      }),
+    });
+    const p = shutdownAll({ backend: slowBackend, services: [svc("exec", exec, order)], frontend: null, platform: "win32" });
+    await vi.advanceTimersByTimeAsync(2400);
+    expect(order).toEqual(["ask:backend"]);
+    await vi.advanceTimersByTimeAsync(1000);
+    await p;
+    expect(order).toEqual(["ask:backend", "ask:exec"]);
+  });
+
+  it("retries, then hard-kills a stuck service with its own hardKill, and still stops the rest", async () => {
+    const order = [];
+    const stuck = fakeChild();
+    const hardKill = vi.fn(async () => order.push("hardkill:fleet"));
+    const fleet = { name: "fleet", child: stuck, requestStop: vi.fn(), retryStop: vi.fn(async () => order.push("retry:fleet")), hardKill, waitMs: 1000 };
+    const vite = fakeChild();
+    vite.kill.mockImplementation(() => order.push("kill:vite"));
+    const p = shutdownAll({ backend: null, services: [fleet], frontend: vite, platform: "win32" });
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(await p).toEqual({ fleet: "killed" });
+    expect(order).toEqual(["retry:fleet", "hardkill:fleet", "kill:vite"]);
+    expect(stuck.kill).not.toHaveBeenCalled(); // hardKill replaces the default child.kill
+  });
+
+  it("does not hang on a hardKill that never settles", async () => {
+    const stuck = fakeChild();
+    const fleet = { name: "fleet", child: stuck, requestStop: vi.fn(), hardKill: () => new Promise(() => {}), waitMs: 500 };
+    const p = shutdownAll({ backend: null, services: [fleet], frontend: null, platform: "linux" });
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(await p).toEqual({ fleet: "killed" });
+  });
+
+  it("skips services that never started", async () => {
+    const p = shutdownAll({ backend: null, services: [{ name: "exec", child: null }], frontend: null, platform: "linux" });
+    expect(await p).toEqual({ exec: "exited" });
   });
 });
