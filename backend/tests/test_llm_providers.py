@@ -243,6 +243,26 @@ def test_env_row_id_is_reserved():
         load_store().upsert(groq_row(id=ENV_ROW_ID))
 
 
+@pytest.mark.parametrize("name", ["PATH", "HOME", "HIVE_PROVIDERS_FILE", "LD_PRELOAD", "PYTHONPATH",
+                                  "HIVE_GATEWAY"])
+def test_api_key_env_must_name_a_key_variable(name):
+    """export_keys writes the key INTO this variable, so it must not be able to clobber the process."""
+    with pytest.raises(ValueError, match="api_key_env"):
+        groq_row(api_key_env=name)
+
+
+@pytest.mark.parametrize("name", ["GROQ_API_KEY", "QWEN_API_KEY", "HIVE_KEY_LAB", "HF_TOKEN", "my_key"])
+def test_api_key_env_accepts_key_and_token_names(name):
+    assert groq_row(api_key_env=name).key_env == name
+
+
+def test_a_file_row_with_a_bad_api_key_env_is_skipped_and_reported():
+    store_path().write_text("providers:\n  groq:\n    base_url: https://api.groq.com/openai/v1\n"
+                            "    model: openai/gpt-oss-120b\n    api_key_env: PATH\n", encoding="utf-8")
+    store = load_store()
+    assert store.row("groq") is None and any("api_key_env" in p for p in store.problems)
+
+
 # -- env-var naming: how a key reaches the client -------------------------------------------
 def test_known_hosted_presets_keep_their_documented_env_var():
     assert env_var_for("groq") == "GROQ_API_KEY"

@@ -154,6 +154,14 @@ class ProviderRow(BaseModel):
     api_key_env: str = Field("", pattern=r"^([A-Za-z_][A-Za-z0-9_]{0,63})?$")
     source: Literal["store", "env"] = "store"
 
+    @field_validator("api_key_env")
+    @classmethod
+    def _key_variables_only(cls, value: str) -> str:
+        # export_keys writes the key INTO this variable: PATH or HIVE_PROVIDERS_FILE here would clobber the process.
+        if value and "KEY" not in value.upper() and "TOKEN" not in value.upper():
+            raise ValueError("api_key_env must name a key variable (containing KEY or TOKEN), e.g. GROQ_API_KEY")
+        return value
+
     @field_validator("base_url")
     @classmethod
     def _http_only(cls, value: str) -> str:
