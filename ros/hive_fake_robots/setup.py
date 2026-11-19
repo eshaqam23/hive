@@ -14,5 +14,8 @@ setup(
     zip_safe=True,
     description="HIVE fake fleet action servers",
     license="Apache-2.0",
-    entry_points={"console_scripts": ["fake_fleet = hive_fake_robots.fake_fleet:main"]},
+    entry_points={"console_scripts": [
+        "fake_fleet = hive_fake_robots.fake_fleet:main",
+        "rosbridge_local = hive_fake_robots.rosbridge_local:main",
+    ]},
 )
