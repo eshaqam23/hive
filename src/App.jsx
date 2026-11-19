@@ -19,6 +19,7 @@ import { runStopAll } from "./shell/stopAll.js";
 import { execPost } from "./executive/api.js";
 import { useExecutive } from "./executive/useExecutive.js";
 import ChatView from "./chat/ChatView.jsx";
+import SettingsPage from "./settings/SettingsPage.jsx";
 
 const API_BASE_URL = import.meta.env.VITE_HIVE_API_URL || "http://127.0.0.1:8787/api";
 const FLEET_STORAGE_KEY = "hive:fleet:manual-rc-v1";
@@ -830,6 +831,7 @@ export default function App() {
           {view === "map" && <MapView execState={exec.state} robots={robots} />}
           {view === "chat" && <ChatView exec={exec} robots={robots} />}
           {view === "log" && <CommandView messages={messages} onSend={sendCommand} robots={robots} />}
+          {view === "models" && <SettingsPage onChanged={exec.refresh} />}
         </main>
 
         {showDock && (

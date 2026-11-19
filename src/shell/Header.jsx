@@ -1,6 +1,6 @@
 // The app header: mark, view tabs, mission pill, LIVE dot, theme, models and STOP ALL. It only draws
 // what App hands it; STOP ALL's work happens in App (runStopAll), so this stays a dumb component.
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { SimTag } from "./SimTag.jsx";
 import { CloseIcon, GearIcon, HiveMark, MoonIcon, SunIcon } from "./icons.jsx";
 import { missionPill } from "./status.js";
@@ -27,21 +27,6 @@ function useNow(active, everyMs = 1000) {
     return () => clearInterval(timer);
   }, [active, everyMs]);
   return now;
-}
-
-/* Closes a popover on Escape or a click outside it. */
-function useDismiss(open, ref, onClose) {
-  useEffect(() => {
-    if (!open) return undefined;
-    const onKey = (event) => event.key === "Escape" && onClose();
-    const onDown = (event) => ref.current && !ref.current.contains(event.target) && onClose();
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("pointerdown", onDown);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("pointerdown", onDown);
-    };
-  }, [open, ref, onClose]);
 }
 
 function MissionPill({ mission, sim, onOpen }) {
@@ -100,37 +85,22 @@ function LiveDot({ live }) {
   );
 }
 
-function ModelsMenu({ models }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef(null);
-  const close = React.useCallback(() => setOpen(false), []);
-  useDismiss(open, ref, close);
+/* The gear opens the Models page; its tooltip names what the Executive plans with right now. */
+function ModelsButton({ models, active, onOpen }) {
   const llm = models?.llm;
+  const bound = llm && [llm.provider_label, llm.model].filter(Boolean).join(" · ");
+  const title = `Models · planner ${models?.defaultPlanner ?? "—"} · LLM ${bound || "not bound"}`;
   return (
-    <span className="relative" ref={ref}>
-      <button
-        aria-expanded={open}
-        aria-label="Models"
-        className="ctl size-10 hover:bg-raised"
-        onClick={() => setOpen((o) => !o)}
-        title="Models"
-        type="button"
-      >
-        <GearIcon size={19} />
-      </button>
-      {open && (
-        <div aria-label="Models" className="absolute right-0 top-full z-30 mt-2 w-[300px] rounded-xl border border-line bg-raised p-4 shadow-float" role="group">
-          <p className="text-[15px] font-semibold">Models</p>
-          <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[14px]">
-            <dt className="text-faint">Default planner</dt>
-            <dd className="font-mono">{models?.defaultPlanner ?? "—"}</dd>
-            <dt className="text-faint">LLM</dt>
-            <dd className="font-mono">{llm ? [llm.provider_label, llm.model].filter(Boolean).join(" · ") || "—" : "—"}</dd>
-          </dl>
-          <p className="mt-3 text-[13px] text-muted">Model settings arrive with mission chat.</p>
-        </div>
-      )}
-    </span>
+    <button
+      aria-current={active ? "page" : undefined}
+      aria-label="Models"
+      className={`ctl size-10 ${active ? "bg-card text-ink" : "hover:bg-raised"}`}
+      onClick={onOpen}
+      title={title}
+      type="button"
+    >
+      <GearIcon size={19} />
+    </button>
   );
 }
 
@@ -208,7 +178,7 @@ export default function Header({ view, onNavigate, live, mission, sim, models, s
         >
           {theme === "dark" ? <SunIcon size={19} /> : <MoonIcon size={19} />}
         </button>
-        <ModelsMenu models={models} />
+        <ModelsButton active={view === "models"} models={models} onOpen={() => onNavigate("models")} />
         <button className="btn btn-danger ml-1.5 min-h-10 px-4 font-semibold tracking-wide" onClick={onStopAll} title="software stop, not a hardware e-stop" type="button">
           STOP ALL
         </button>

@@ -59,14 +59,18 @@ describe("Header", () => {
     expect(screen.getByRole("button", { name: "Switch to dark theme" })).toBeTruthy();
   });
 
-  it("opens the Models placeholder", () => {
-    header({ models: { defaultPlanner: "rules", llm: { provider_label: "Groq", model: "llama-3.3" } } });
-    fireEvent.click(screen.getByRole("button", { name: "Models" }));
-    const menu = screen.getByRole("group", { name: "Models" });
-    expect(within(menu).getByText("rules")).toBeTruthy();
-    expect(within(menu).getByText("Groq · llama-3.3")).toBeTruthy();
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.queryByRole("group", { name: "Models" })).toBeNull();
+  it("opens the Models page from the gear, lit while it is open, naming the bound LLM", () => {
+    const onNavigate = vi.fn();
+    header({ models: { defaultPlanner: "rules", llm: { provider_label: "Groq", model: "llama-3.3" } }, onNavigate });
+    const gear = screen.getByRole("button", { name: "Models" });
+    expect(gear.getAttribute("title")).toBe("Models · planner rules · LLM Groq · llama-3.3");
+    expect(gear.getAttribute("aria-current")).toBeNull();
+    fireEvent.click(gear);
+    expect(onNavigate).toHaveBeenCalledWith("models");
+    cleanup();
+    header({ view: "models", models: null });
+    expect(screen.getByRole("button", { name: "Models" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("button", { name: "Models" }).getAttribute("title")).toBe("Models · planner — · LLM not bound");
   });
 
   it("fires STOP ALL in one click and shows each result", () => {
