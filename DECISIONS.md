@@ -62,3 +62,35 @@ and kind.
 **Planner kind.** `"llm"` replaces `"qwen"`, which is still accepted as an
 alias in `MissionIn` and in saved state. The baseline is labeled "Baseline (no
 LLM)".
+
+## Executive build, prompts 2–10 (one line each)
+
+- **P2 merge, not rebase:** exec_v2 was merged into live-data; on conflict live-data's `server.py` and `App.jsx` won, because exec_v2's only server change (the `/gripper_open` topic) was already there.
+- **P2 two interpreters:** the car-backend tests run on system `python3` (has cv2) and the Executive tests on the hive-exec venv (has FastAPI and pytest-asyncio); one interpreter cannot collect both.
+- **P2 schema test:** the Qwen request test compares against `planner.schema` (with `scope` required), the schema actually sent, not the unpatched one.
+- **P3 what came from exec:** `bridge/`, `ros/`, `backend/scripts/` and docs only; exec's `hive_exec/`, `App.jsx`, `hive.mjs` and `package.json` were left, because exec_v2's are newer.
+- **P3 domain 77 always:** the fake fleet ignores an inherited `ROS_DOMAIN_ID`, because a `~/.bashrc` exporting 42 put the fake action servers on the camera car's domain.
+- **P3 refuse Origin, no token:** both WebSocket servers answer 403 to any `Origin` header, because browsers always send one and the gateway never does; a token would add nothing, since any local process can reach domain 77 over DDS anyway.
+- **P3 rosbridge_local:** rosbridge 2.7.1 has no origin setting, so the launch file runs the stock script with `check_origin` replaced instead of patching the installed package.
+- **P3 robot_id allowlist:** the bridge accepts only the three fake robot ids, because the id becomes part of the ROS action name.
+- **P4 provider store, router and probe:** see the section above.
+- **P5 per-task stop through recovery:** Stop current reuses the task-failure recovery path (`operator_stop`) instead of a new state, so the decision semantics stay exec_v2's.
+- **P5 agent_commands byte for byte:** the recorded `envelope_json` reproduces the bridge's `JSON.stringify` output, so the file is exactly what an instance agent receives.
+- **P5 health gates dispatch:** mission start and approve answer 503 naming the dependency that is down, rather than dispatching into a dead gateway.
+- **P5 map stub:** `/api/exec/map` answers `available: false` with the schema name instead of 404, so the Map tab can show its empty state from the same call the real map will answer.
+- **P6 Cyclone DDS for the fake fleet:** under Fast DDS (the default in a non-interactive shell) rosbridge could not reach `/hive/fleet_control`; domain 77 is separate, so the car backend's Fast DDS pin is untouched.
+- **P6 shutdown order:** one Ctrl+C stops the car backend first and completely, because it is the process that stops real cars.
+- **P6 busy port refuses:** the launcher names the leftover process and its `pkill` rather than killing it; the operator decides.
+- **P6 synapse by default:** `npm run hive` defaults to `HIVE_GATEWAY=synapse`, the path real dispatch will take; the Executive alone (and `.env.example`) still defaults to `fake`.
+- **P7 SIM tag:** any state from the fake world or fake fleet is tagged SIM; real connection data comes only from the car backend.
+- **P7 map from a contract:** the Map tab renders `hive.shared-map.v0` (written down first in `docs/shared-map-contract.md`), and its fixture is watermarked DEMO.
+- **P7 STOP ALL:** stops every connected car through the car backend and cancels the Executive mission, so one button covers both paths.
+- **P8 polling pauses when hidden:** Executive polling stops while the tab is hidden and resumes on `visibilitychange`.
+- **P8 earlier missions in localStorage:** the list is per browser, not shared between machines.
+- **P8 retire the old Executive view:** the old view, plan panel, world map and stylesheet were removed rather than kept beside the chat, and the command log moved under Fleet.
+- **P9 key input uncontrolled:** the key field is not React state and is emptied at submit; tests grep the DOM, inputs, storage and console for the key.
+- **P9 model pickers:** fed by `GET /api/exec/llm/providers/{id}/models` (no chat, not logged); without a model list they fall back to free text.
+- **P9 refresh after save:** the Models page refreshes Executive state after every write so the planner chip shows the new binding at once.
+- **P10 HIVE_ROS_SETUP through WSLENV:** a Windows path is converted to `/mnt/<drive>/...` so the launcher can run the car backend on the mock ROS.
+- **P10 open on Mission:** sending missions is the main job, so the app (and a reload) opens on Mission, now the first tab; the view is still not in the URL.
+- **P10 left as is:** Gemini's rejection of `seed` and the header pill showing the active revision while a later one awaits approval.

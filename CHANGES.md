@@ -63,6 +63,73 @@ Design: `docs/superpowers/specs/2026-11-13-hive-live-data-design.md`. Setting up
 
 ---
 
+## Update: branch `feature/executive` (mission chat, Executive, Synapse bridge, model router)
+
+Starts from `origin/feature/live-data` (76dc4d4). Build context: `docs/executive-build/CONTEXT.md`.
+How to run it: the README's "Executive" section. Choices: `DECISIONS.md`. Live-data's safety
+behaviour (hold-to-drive, 10 Hz stream, deadman, stop burst + confirmation, command ordering,
+reconnect, stop on disconnect/exit) is unchanged, and all of its tests pass unchanged.
+
+- **Executive:** `origin/exec_v2`'s `backend/hive_exec/` (FastAPI on :8788): planner, validator,
+  allocator, scheduler, recovery, edit ops, replan, cancel, fake gateway and fake world. Its
+  decision semantics are unchanged. Added: per-task stop (`POST /api/exec/tasks/{task_id}/cancel`,
+  through the task-failure recovery path), each dispatched task envelope recorded under
+  `runs/<run_id>/agent_commands/<robot>/` and shown as `agent_command` in `/state`,
+  `/api/exec/health` per dependency (mission start and approve answer 503 naming what is down),
+  and a `/api/exec/map` stub. Fixed: recovery now starts when a sibling task succeeds after
+  another task failed.
+- **Bridge and fake fleet:** from `origin/exec`: `bridge/` (Synapse bridge on :8790 over
+  `@corebrum/core` 0.8.16 + patch v1), `ros/` (`hive_interfaces` with `ExecuteSkill` and
+  `FleetControl`, `hive_fake_robots`), `backend/scripts/b_e2e.py`. Hardened for a laptop: the
+  fake fleet always runs on domain 77 and Cyclone DDS, the bridge and rosbridge refuse any
+  `Origin` header, and the bridge accepts only the three fake robot ids.
+- **LLM providers:** a provider store at `~/.hive/providers.yaml` (summer v1 files read as they
+  are), roles with ordered fallback chains, a router with failover on transport errors only, a
+  probe (models, ping, plan round trip), and `/api/exec/llm` routes. Keys are write-only.
+  `QwenPlanner` became `LLMPlanner` over the router; `qwen` stays an accepted alias. Patterns
+  ported from `Bhavya007-17/hive@4fa0156`.
+- **Launcher:** `npm run hive` starts the car backend, the fake fleet, the bridge, the Executive
+  and Vite in that order, each waiting for the previous port, with `[backend] [fleet] [bridge]
+  [exec] [vite]` prefixes. One Ctrl+C stops the car backend first. Flags `--no-executive`,
+  `--no-bridge`, `--backend-only`; `HIVE_GATEWAY=fake` for the in-process sim.
+- **Front end:** tabs Mission | Fleet | Map and a Models page behind the header gear. Mission is
+  the chat (thinking, plan card with COMMAND TO AGENT, approve / edit / reject, Stop current,
+  replan proposals with a diff, completion card, earlier missions). Fleet is a grid of car panels
+  that open the existing car page. Map is a shell on `hive.shared-map.v0` with a DEMO fixture.
+  The header has the LIVE dot, a mission pill, the theme toggle and STOP ALL (stops every car and
+  cancels the mission). Simulated data is tagged SIM. The old Executive view, plan panel and
+  world map were removed.
+- **Docs:** `docs/instance-agent-contract.md` (what the real instance agent must implement),
+  `docs/shared-map-contract.md` (what the shared map must provide), UI evidence for gates 7–10 in
+  `docs/evidence/ui/`.
+
+**How it was checked** (2026-11-19, Windows 11, RTX 5070 Laptop GPU, WSL2 Ubuntu 24.04):
+
+| Check | Result |
+| --- | --- |
+| `npm test` (Windows Node 24) | 32 files, 297 tests passed |
+| live-data pytest (system `python3`) | 152 passed |
+| Executive pytest (hive-exec venv) | 244 passed |
+| mock e2e (`backend/test/test_e2e.py` against the mock `rclpy`) | 62/62 passed |
+| `node bridge/check.mjs` against the fake fleet's rosbridge | 8/8 passed |
+| `backend/scripts/b_e2e.py` (Executive through Synapse to the fake fleet) | 9/9 stories passed (`docs/evidence/b-e2e.json`) |
+| Browser end to end (Gate 10: Playwright, Chromium, `npm run hive` on the mock car backend) | 10/10 steps passed, including an LLM-planned mission on Groq `openai/gpt-oss-120b` (`docs/evidence/ui/README.md`) |
+
+**Not tested:**
+
+- **No real instance agent.** Every `ExecuteSkill` goal was answered by the fake fleet. The
+  contract is written down, but no agent on a car has implemented it.
+- **No real shared map.** The Map tab has only been shown empty and with the DEMO fixture;
+  `/api/exec/map` is a stub.
+- **Executive dispatch was not run on hardware.** No mission has moved a real car. The car
+  regression in Gate 10 drove the mock car only, and the cars themselves were last checked on
+  `feature/live-data`.
+- Ollama and the VT ARC vLLM did not plan a mission during the gates (Ollama was not running at
+  Gate 9); only Groq planned live.
+  Gemini fails its Test (`Unknown name "seed"`), left unchanged.
+
+---
+
 ## Summary
 
 | Area | State |

@@ -108,6 +108,140 @@ Then start it with:
 hive
 ```
 
+## Executive
+
+The Executive turns a typed mission into a plan: tasks, the car each task goes to, and the exact
+command that car's instance agent will receive. Nothing moves until you approve. Approved tasks go
+out over the AgenticROS / Synapse bridge as ROS 2 `ExecuteSkill` actions. Today a fake fleet
+answers them; the real instance agent will sit behind the same action names
+([docs/instance-agent-contract.md](docs/instance-agent-contract.md)).
+
+### Tabs
+
+- **Mission** (opens first; the HIVE mark also opens it): a chat column. Type a mission ("Describe
+  a mission", Enter sends, Shift+Enter adds a line). You get the Executive's thinking, then a plan
+  card (TASK · WHAT · SENT TO · COMMAND TO AGENT · STATUS) with Approve & run, Edit plan and
+  Reject. While a mission runs, rows tick through accepted / in progress / done / failed; each
+  running row has Stop current, a failure produces a Replan proposal (Approve rev N · Edit · Keep
+  rev N-1), and the mission ends in a completion card. A planner chip picks the LLM planner or
+  Baseline (no LLM). Earlier missions are listed above the thread.
+- **Fleet:** one panel per car with its link state and Executive status. Clicking a panel opens
+  the existing car page (Live view, hold-to-drive, Activity). The command log lives here.
+- **Map:** the UI shell for the shared perception map on the `hive.shared-map.v0` contract
+  ([docs/shared-map-contract.md](docs/shared-map-contract.md)). Until that map exists it says
+  "Shared perception map not built yet"; the DEMO toggle shows a fixture, watermarked DEMO.
+- **Models** (gear in the header): roles on top (Executive: plans missions; Instance agent: not
+  built yet), each bound to a provider, a model and an ordered fallback chain. Provider cards
+  below with Test, Edit and Delete. Add provider starts from a template.
+
+The header also has the LIVE dot, a mission pill (`mission running · rev N · mm:ss`), the theme
+toggle and **STOP ALL**, which stops every connected car through the car backend and cancels the
+Executive mission. Anything that comes from the fake world or fake fleet (location, battery,
+availability) carries a **SIM** tag.
+
+### Models setup
+
+Providers and role bindings are stored in `~/.hive/providers.yaml` (mode 0600, outside the repo,
+gitignored anywhere in the tree; `HIVE_PROVIDERS_FILE` points elsewhere). Edit them on the Models
+page. Keys are write-only: after saving, the page shows only whether a key is present and its last
+four characters. A save applies to the next mission.
+
+- **Ollama (local):** install Ollama on Windows or in WSL and pull the model: `ollama pull
+  qwen3:8b`. With WSL mirrored networking, Ollama on Windows is reached from WSL at
+  `http://127.0.0.1:11434`. Structured mode `ollama_format`, no key.
+- **VT ARC (vLLM):** vLLM runs on an ARC compute node. Open the tunnel yourself in another
+  terminal and leave it open; Hive never runs ssh:
+  ```bash
+  ssh -L 8000:<compute-node>:8000 <pid>@tinkercliffs1.arc.vt.edu
+  ```
+  The base URL stays `http://127.0.0.1:8000/v1`. Use `guided_json` instead of `structured_outputs`
+  for vLLM older than 0.10. A key is needed only if the server was started with `--api-key`.
+- **Hosted OSS-model providers:** presets for Groq, Cerebras, OpenRouter, Together AI and Google
+  Gemini (OpenAI endpoint), or Other. Paste the provider's key into the card; it goes only into the
+  store file. Structured mode `json_schema`. Gemini currently fails Test with `Unknown name "seed"`
+  because the hosted presets send a seed.
+- **Local OpenAI-compatible server:** LM Studio (`:1234/v1`), llama.cpp server (`:8080/v1`) or a
+  local vLLM (`:8000/v1`). Use `json_object` if the server rejects `json_schema`.
+
+Press **Test** on a card before a mission: it lists models, sends a ping, then does one plan
+round trip (10 s per request, no retries). The planner chip says "live" only for the row the last
+Test proved. While no store file exists, `QWEN_*` variables (see `.env.example`) become a read-only
+`env` row; the first save creates the store and `QWEN_*` is no longer read.
+
+### Running it
+
+`npm run hive` (see [Run](#run)) starts the Executive with the rest. Modes:
+
+| Command | What runs |
+| --- | --- |
+| `npm run hive` | car backend, fake fleet, bridge, Executive (`HIVE_GATEWAY=synapse`, the default), Vite |
+| `HIVE_GATEWAY=fake npm run hive` | car backend, Executive with its in-process simulation (no ROS, no bridge), Vite |
+| `npm run hive -- --no-bridge` | no fake fleet or bridge; the Executive uses `HIVE_GATEWAY` as set (bring your own bridge on :8790 for `synapse`) |
+| `npm run hive -- --no-executive` | car backend + Vite only |
+| `npm run backend` | the car backend alone (`--backend-only`) |
+| `HIVE_ROS_SETUP=$PWD/backend/test/mock_ros/setup.bash npm run hive` | everything above with the car backend on the mock `rclpy` (three simulated cars) |
+
+In PowerShell, set the variables first (`$env:HIVE_GATEWAY = "fake"`). `HIVE_GATEWAY`,
+`HIVE_PROVIDERS_FILE`, `HIVE_SIM_TIME_SCALE`, `HIVE_EXEC_PYTHON` and `HIVE_ROS_SETUP` reach WSL
+through `WSLENV`; a Windows path in `HIVE_ROS_SETUP` is converted to `/mnt/<drive>/...`.
+`HIVE_SIM_TIME_SCALE` (default 1.0) speeds up or slows down the fake robots.
+
+### Ports and the Executive venv
+
+| Port | Process |
+| --- | --- |
+| 5173 | Vite (strict; the car backend accepts only this origin) |
+| 8787 | car backend (`backend/server.py`) |
+| 8788 | Executive (`python -m hive_exec`, FastAPI, under `/api/exec`) |
+| 8790 | Synapse bridge (`bridge/server.mjs`) |
+| 9090 | the fake fleet's rosbridge |
+
+The fake fleet runs on `ROS_DOMAIN_ID=77` with LOCALHOST discovery and Cyclone DDS, whatever the
+shell inherits; the cars use 42, 43 and 44. The bridge and rosbridge refuse any WebSocket
+handshake that carries an `Origin` header, so a web page cannot drive the fleet.
+
+The Executive runs from its own venv, `~/.venvs/hive-exec` (inside WSL on Windows). Create it once:
+
+```bash
+python3 -m venv ~/.venvs/hive-exec
+~/.venvs/hive-exec/bin/pip install -r backend/requirements.txt
+```
+
+Set `HIVE_EXEC_PYTHON` to use another interpreter. The car backend keeps using system `python3`.
+
+### Building the bridge and the fake fleet
+
+Once, inside Ubuntu 24.04 (WSL on Windows), with Node 20 or newer in WSL:
+
+```bash
+sudo apt install ros-jazzy-rosbridge-suite ros-jazzy-rmw-cyclonedds-cpp build-essential python3-colcon-common-extensions
+bash ros/build.sh                                    # hive_interfaces + hive_fake_robots, colcon build into ~/hive_ros_ws
+HIVE_CORE_PATCH=1 bash bridge/scripts/build-core.sh  # @corebrum/core 0.8.16 at the pinned Synapse commit + patch v1, into ~/.hive-bridge/core
+```
+
+Then, with the fake fleet and bridge running (`npm run hive` starts both):
+
+```bash
+node bridge/check.mjs          # 8 Synapse compatibility checks against rosbridge
+node bridge/origin-check.mjs   # localhost hardening (5 checks)
+cd backend && ~/.venvs/hive-exec/bin/python scripts/b_e2e.py   # 9 mission stories through Synapse
+```
+
+Details, the pinned dependency and the limits: [docs/delivery-b-agenticros.md](docs/delivery-b-agenticros.md).
+What a real instance agent must implement: [docs/instance-agent-contract.md](docs/instance-agent-contract.md).
+What the shared map must provide: [docs/shared-map-contract.md](docs/shared-map-contract.md).
+
+### Executive tests
+
+Run from the repo root inside WSL (one interpreter cannot run both sets):
+
+```bash
+# car backend (system python3)
+python3 -m pytest backend/tests -q --ignore=backend/tests/test_api.py --ignore=backend/tests/test_contracts.py --ignore=backend/tests/test_executive.py --ignore=backend/tests/test_validator.py --ignore-glob='backend/tests/test_llm_*'
+# Executive (hive-exec venv)
+~/.venvs/hive-exec/bin/python -m pytest backend/tests/test_api.py backend/tests/test_contracts.py backend/tests/test_executive.py backend/tests/test_validator.py backend/tests/test_llm_*.py -q
+```
+
 ## Build
 
 ```bash
@@ -216,6 +350,8 @@ that verifies what each simulated robot actually received. See `backend/test/REA
 - `src/`: React frontend
 - `backend/`: Python backend and per-robot ROS 2 workers
 - `backend/test/`: mock `rclpy` and end-to-end tests
+- `backend/hive_exec/`: the Executive (FastAPI on :8788): planner, validator, allocator, scheduler, recovery, LLM provider store and router
+- `bridge/`: the Synapse bridge (:8790) and its checks; `ros/`: `hive_interfaces` (ExecuteSkill, FleetControl) and the fake fleet
 - `public/models/`: the robots' CAD models (GLB) and their credits
 - `scripts/hive.mjs`: combined launcher for backend and frontend (starts the backend in WSL on Windows)
 - `docs/robot-setup.md`: per-car domains, Pi and Windows firewall setup, hardware checklist
