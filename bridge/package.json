@@ -1,0 +1,20 @@
+{
+  "name": "hive-synapse-bridge",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Narrow bridge from the HIVE Executive to AgenticROS/Corebrum Synapse (@corebrum/core rosbridge transport).",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build-core": "HIVE_CORE_PATCH=1 bash scripts/build-core.sh",
+    "check": "node check.mjs",
+    "start": "node server.mjs"
+  },
+  "hive": {
+    "synapse_repo": "https://github.com/Corebrum/corebrum-synapse",
+    "synapse_commit": "6f7b7840e2b3345f66412a0fb800f294cb94667c",
+    "core_version": "0.8.16",
+    "patch": "patches/corebrum-core-rosbridge-actions.v1.patch",
+    "note": "@corebrum/core is built from source into ~/.hive-bridge/core (outside OneDrive) and imported from there."
+  }
+}

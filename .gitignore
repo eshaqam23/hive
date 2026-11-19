@@ -11,3 +11,13 @@ backend/test/mock_ros/jitter
 .coverage
 .coverage.*
 coverage/
+.venv/
+backend/.venv/
+.pytest_cache/
+reports/*.json
+runs/
+ros/build/
+ros/install/
+ros/log/
+bridge/vendor/
+providers.yaml

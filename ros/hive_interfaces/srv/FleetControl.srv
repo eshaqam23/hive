@@ -1,0 +1,6 @@
+# Coordinated control of the shared fake world: status | reset | inject_fault
+string command
+string args_json
+---
+bool ok
+string result_json

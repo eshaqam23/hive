@@ -1,0 +1,477 @@
+{
+  "checked_at": "2026-11-11T17:01:10",
+  "planner": "baseline",
+  "results": [
+    {
+      "story": "unknown object/route (two stages)",
+      "expected": "completed",
+      "final": "completed",
+      "pass": true,
+      "run_id": "run-ef1ac1fb",
+      "revisions": [
+        {
+          "rev": 1,
+          "kind": "initial",
+          "scope": "observation_stage",
+          "planner": "Baseline (templates, not Qwen)",
+          "status": "finished",
+          "tasks": [
+            "t1:camera_01:inspect_area",
+            "t2:lidar_01:scan_route"
+          ]
+        },
+        {
+          "rev": 2,
+          "kind": "continuation",
+          "scope": "full",
+          "planner": "Baseline (templates, not Qwen)",
+          "status": "finished",
+          "tasks": [
+            "t1:gripper_01:navigate_to",
+            "t2:gripper_01:pick_object",
+            "t3:gripper_01:navigate_to",
+            "t4:gripper_01:place_object"
+          ]
+        }
+      ],
+      "attempts": [
+        {
+          "attempt": "1.t1.a1-dc47",
+          "robot": "camera_01",
+          "skill": "inspect_area",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "1.t2.a1-7a18",
+          "robot": "lidar_01",
+          "skill": "scan_route",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "2.t1.a1-cef6",
+          "robot": "gripper_01",
+          "skill": "navigate_to",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "2.t2.a1-5d3d",
+          "robot": "gripper_01",
+          "skill": "pick_object",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "2.t3.a1-e6d3",
+          "robot": "gripper_01",
+          "skill": "navigate_to",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "2.t4.a1-4752",
+          "robot": "gripper_01",
+          "skill": "place_object",
+          "status": "succeeded"
+        }
+      ],
+      "robots_dispatched": [
+        "camera_01",
+        "gripper_01",
+        "lidar_01"
+      ],
+      "outcome": {
+        "status": "completed",
+        "reason": "All mission goals satisfied by confirmed results."
+      },
+      "carried": {},
+      "events_received": 30,
+      "notes": "",
+      "gateway": {
+        "kind": "synapse",
+        "label": "AgenticROS / Corebrum Synapse",
+        "verified_transport": true,
+        "connected": true,
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 6 round trip(s) this run"
+      }
+    },
+    {
+      "story": "known-object delivery",
+      "expected": "completed",
+      "final": "completed",
+      "pass": true,
+      "run_id": "run-8c3df1b8",
+      "revisions": [
+        {
+          "rev": 1,
+          "kind": "initial",
+          "scope": "full",
+          "planner": "Baseline (templates, not Qwen)",
+          "status": "finished",
+          "tasks": [
+            "t1:gripper_01:navigate_to",
+            "t2:gripper_01:pick_object",
+            "t3:gripper_01:navigate_to",
+            "t4:gripper_01:place_object"
+          ]
+        }
+      ],
+      "attempts": [
+        {
+          "attempt": "1.t1.a1-3051",
+          "robot": "gripper_01",
+          "skill": "navigate_to",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "1.t2.a1-0630",
+          "robot": "gripper_01",
+          "skill": "pick_object",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "1.t3.a1-11e5",
+          "robot": "gripper_01",
+          "skill": "navigate_to",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "1.t4.a1-10c6",
+          "robot": "gripper_01",
+          "skill": "place_object",
+          "status": "succeeded"
+        }
+      ],
+      "robots_dispatched": [
+        "gripper_01"
+      ],
+      "outcome": {
+        "status": "completed",
+        "reason": "All mission goals satisfied by confirmed results."
+      },
+      "carried": {},
+      "events_received": 20,
+      "notes": "",
+      "gateway": {
+        "kind": "synapse",
+        "label": "AgenticROS / Corebrum Synapse",
+        "verified_transport": true,
+        "connected": true,
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 4 round trip(s) this run"
+      }
+    },
+    {
+      "story": "camera-only task",
+      "expected": "completed",
+      "final": "completed",
+      "pass": true,
+      "run_id": "run-f71a7a83",
+      "revisions": [
+        {
+          "rev": 1,
+          "kind": "initial",
+          "scope": "full",
+          "planner": "Baseline (templates, not Qwen)",
+          "status": "finished",
+          "tasks": [
+            "t1:camera_01:capture_image"
+          ]
+        }
+      ],
+      "attempts": [
+        {
+          "attempt": "1.t1.a1-293a",
+          "robot": "camera_01",
+          "skill": "capture_image",
+          "status": "succeeded"
+        }
+      ],
+      "robots_dispatched": [
+        "camera_01"
+      ],
+      "outcome": {
+        "status": "completed",
+        "reason": "All mission goals satisfied by confirmed results."
+      },
+      "carried": {},
+      "events_received": 5,
+      "notes": "",
+      "gateway": {
+        "kind": "synapse",
+        "label": "AgenticROS / Corebrum Synapse",
+        "verified_transport": true,
+        "connected": true,
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 1 round trip(s) this run"
+      }
+    },
+    {
+      "story": "ambiguous request (no dispatch)",
+      "expected": "clarification",
+      "final": "clarification",
+      "pass": true,
+      "run_id": "run-7df6b2e6",
+      "revisions": [],
+      "attempts": [],
+      "robots_dispatched": [],
+      "outcome": null,
+      "carried": {},
+      "events_received": 0,
+      "notes": "",
+      "gateway": {
+        "kind": "synapse",
+        "label": "AgenticROS / Corebrum Synapse",
+        "verified_transport": false,
+        "connected": true,
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 0 round trip(s) this run"
+      }
+    },
+    {
+      "story": "failure after pickup -> approved recovery",
+      "expected": "completed",
+      "final": "completed",
+      "pass": true,
+      "run_id": "run-c5ff827e",
+      "revisions": [
+        {
+          "rev": 1,
+          "kind": "initial",
+          "scope": "full",
+          "planner": "Baseline (templates, not Qwen)",
+          "status": "finished",
+          "tasks": [
+            "t1:gripper_01:navigate_to",
+            "t2:gripper_01:pick_object",
+            "t3:gripper_01:navigate_to",
+            "t4:gripper_01:place_object"
+          ]
+        },
+        {
+          "rev": 2,
+          "kind": "recovery",
+          "scope": "full",
+          "planner": "Baseline (templates, not Qwen)",
+          "status": "finished",
+          "tasks": [
+            "t1:gripper_01:navigate_to",
+            "t2:gripper_01:place_object"
+          ]
+        }
+      ],
+      "attempts": [
+        {
+          "attempt": "1.t1.a1-8edf",
+          "robot": "gripper_01",
+          "skill": "navigate_to",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "1.t2.a1-6dbb",
+          "robot": "gripper_01",
+          "skill": "pick_object",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "1.t3.a1-537b",
+          "robot": "gripper_01",
+          "skill": "navigate_to",
+          "status": "failed"
+        },
+        {
+          "attempt": "2.t1.a1-2bb5",
+          "robot": "gripper_01",
+          "skill": "navigate_to",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "2.t2.a1-72ca",
+          "robot": "gripper_01",
+          "skill": "place_object",
+          "status": "succeeded"
+        }
+      ],
+      "robots_dispatched": [
+        "gripper_01"
+      ],
+      "outcome": {
+        "status": "completed",
+        "reason": "All mission goals satisfied by confirmed results."
+      },
+      "carried": {},
+      "events_received": 25,
+      "notes": "possession before recovery: red_block_1",
+      "gateway": {
+        "kind": "synapse",
+        "label": "AgenticROS / Corebrum Synapse",
+        "verified_transport": true,
+        "connected": true,
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 5 round trip(s) this run"
+      }
+    },
+    {
+      "story": "failure after pickup -> honest blocked outcome",
+      "expected": "blocked",
+      "final": "blocked",
+      "pass": true,
+      "run_id": "run-f1d811fc",
+      "revisions": [
+        {
+          "rev": 1,
+          "kind": "initial",
+          "scope": "full",
+          "planner": "Baseline (templates, not Qwen)",
+          "status": "finished",
+          "tasks": [
+            "t1:gripper_01:navigate_to",
+            "t2:gripper_01:pick_object",
+            "t3:gripper_01:navigate_to",
+            "t4:gripper_01:place_object"
+          ]
+        }
+      ],
+      "attempts": [
+        {
+          "attempt": "1.t1.a1-0175",
+          "robot": "gripper_01",
+          "skill": "navigate_to",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "1.t2.a1-9769",
+          "robot": "gripper_01",
+          "skill": "pick_object",
+          "status": "succeeded"
+        }
+      ],
+      "robots_dispatched": [
+        "gripper_01"
+      ],
+      "outcome": {
+        "status": "blocked",
+        "reason": "No continuation: The gripper robot is unavailable; no carrier can transport. (gripper_01 unavailable)"
+      },
+      "carried": {
+        "gripper_01": "red_block_1"
+      },
+      "events_received": 10,
+      "notes": "",
+      "gateway": {
+        "kind": "synapse",
+        "label": "AgenticROS / Corebrum Synapse",
+        "verified_transport": true,
+        "connected": true,
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 2 round trip(s) this run"
+      }
+    },
+    {
+      "story": "targeted cancellation confirmed by ROS",
+      "expected": "canceled",
+      "final": "canceled",
+      "pass": true,
+      "run_id": "run-6f7706e9",
+      "revisions": [
+        {
+          "rev": 1,
+          "kind": "initial",
+          "scope": "full",
+          "planner": "Baseline (templates, not Qwen)",
+          "status": "executing",
+          "tasks": [
+            "t1:gripper_01:navigate_to",
+            "t2:gripper_01:pick_object",
+            "t3:gripper_01:navigate_to",
+            "t4:gripper_01:place_object"
+          ]
+        }
+      ],
+      "attempts": [
+        {
+          "attempt": "1.t1.a1-0e67",
+          "robot": "gripper_01",
+          "skill": "navigate_to",
+          "status": "canceled"
+        }
+      ],
+      "robots_dispatched": [
+        "gripper_01"
+      ],
+      "outcome": {
+        "status": "canceled",
+        "reason": "Operator canceled; all active tasks confirmed terminal."
+      },
+      "carried": {},
+      "events_received": 2,
+      "notes": "status right after cancel request: canceling",
+      "gateway": {
+        "kind": "synapse",
+        "label": "AgenticROS / Corebrum Synapse",
+        "verified_transport": true,
+        "connected": true,
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 1 round trip(s) this run"
+      }
+    },
+    {
+      "story": "uncertain place blocks without retry",
+      "expected": "blocked",
+      "final": "blocked",
+      "pass": true,
+      "run_id": "run-7b37c96c",
+      "revisions": [
+        {
+          "rev": 1,
+          "kind": "initial",
+          "scope": "full",
+          "planner": "Baseline (templates, not Qwen)",
+          "status": "finished",
+          "tasks": [
+            "t1:gripper_01:navigate_to",
+            "t2:gripper_01:pick_object",
+            "t3:gripper_01:navigate_to",
+            "t4:gripper_01:place_object"
+          ]
+        }
+      ],
+      "attempts": [
+        {
+          "attempt": "1.t1.a1-38ed",
+          "robot": "gripper_01",
+          "skill": "navigate_to",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "1.t2.a1-50e3",
+          "robot": "gripper_01",
+          "skill": "pick_object",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "1.t3.a1-68b7",
+          "robot": "gripper_01",
+          "skill": "navigate_to",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "1.t4.a1-5685",
+          "robot": "gripper_01",
+          "skill": "place_object",
+          "status": "uncertain"
+        }
+      ],
+      "robots_dispatched": [
+        "gripper_01"
+      ],
+      "outcome": {
+        "status": "blocked",
+        "reason": "t4 on gripper_01 has an uncertain outcome; no automatic retry of pick/place. Manual reconciliation or reset required."
+      },
+      "carried": {
+        "gripper_01": "red_block_1"
+      },
+      "events_received": 20,
+      "notes": "",
+      "gateway": {
+        "kind": "synapse",
+        "label": "AgenticROS / Corebrum Synapse",
+        "verified_transport": true,
+        "connected": true,
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 4 round trip(s) this run"
+      }
+    }
+  ]
+}

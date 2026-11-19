@@ -1,0 +1,23 @@
+# HIVE task over ROS 2 actions (custom HIVE contract, not a built-in Synapse skill).
+# Goal: the hive.task-envelope.v1 JSON plus routing fields for logging.
+string run_id
+string attempt_id
+string robot_id
+string skill
+string envelope_json
+---
+# Result: terminal HIVE status (succeeded | failed | uncertain | canceled | rejected)
+string run_id
+string attempt_id
+string status
+string result_json
+string error_code
+string error_message
+string observations_json
+float32 energy_used_pct
+---
+# Feedback: phase is "accepted" (first message after goal acceptance) or "running"
+string run_id
+string attempt_id
+string phase
+float32 progress

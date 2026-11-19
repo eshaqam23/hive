@@ -2,3 +2,5 @@
 *.sh text eol=lf
 *.bash text eol=lf
 *.py text eol=lf
+ros/** text eol=lf
+bridge/** text eol=lf

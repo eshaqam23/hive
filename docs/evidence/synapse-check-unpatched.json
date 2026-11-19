@@ -1,0 +1,92 @@
+{
+  "checked_at": "2026-11-11T21:47:44.643Z",
+  "core_version": "0.8.16",
+  "synapse_commit": "6f7b7840e2b3345f66412a0fb800f294cb94667c",
+  "patch": "none",
+  "rosbridge": "ws://127.0.0.1:9090",
+  "results": [
+    {
+      "name": "success: scan_route completes",
+      "pass": true,
+      "observed": {
+        "result": true,
+        "hiveStatus": "succeeded",
+        "ms": 724
+      }
+    },
+    {
+      "name": "feedback: progress messages reach the client",
+      "pass": false,
+      "observed": {
+        "feedbackCount": 0
+      }
+    },
+    {
+      "name": "terminal status: rosbridge GoalStatus exposed to caller",
+      "pass": false,
+      "observed": {
+        "note": "HIVE status is also in values.status"
+      }
+    },
+    {
+      "name": "rejection: goal rejected by server is distinguishable",
+      "pass": true,
+      "observed": {
+        "result": false,
+        "error": "Action goal was rejected",
+        "ms": 66,
+        "serverReason": {
+          "code": "stale_run",
+          "message": "run stale-run != check-1794433657109"
+        }
+      }
+    },
+    {
+      "name": "abort: failed skill returns aborted with HIVE error",
+      "pass": true,
+      "observed": {
+        "result": true,
+        "hiveStatus": "failed",
+        "error": "route_blocked",
+        "ms": 833
+      }
+    },
+    {
+      "name": "targeted cancel: only the addressed goal is canceled",
+      "pass": false,
+      "observed": {
+        "lidar": {
+          "threw": "no terminal result within 4s"
+        },
+        "lidarStillActive": true
+      }
+    },
+    {
+      "name": "cancel isolation: concurrent goal on another robot unaffected",
+      "pass": true,
+      "observed": {
+        "result": true,
+        "hiveStatus": "succeeded",
+        "ms": 506
+      }
+    },
+    {
+      "name": "concurrency: two robots execute in parallel",
+      "pass": true,
+      "observed": {
+        "camera": {
+          "result": true,
+          "hiveStatus": "succeeded",
+          "ms": 631
+        },
+        "lidar": {
+          "result": true,
+          "hiveStatus": "succeeded",
+          "ms": 651
+        },
+        "wallMs": 652,
+        "observations": 1
+      }
+    }
+  ]
+}
