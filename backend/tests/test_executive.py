@@ -224,3 +224,38 @@ async def test_late_result_for_uncertain_attempt_is_reconciled_not_advanced(make
     assert ex.mission.status == "blocked"  # plan not advanced
     assert sum(1 for a in ex.attempts.values()) == 1  # nothing redispatched
     await ex.reset("unknown")
+
+
+async def test_sibling_success_after_failure_still_recovers():
+    """A sibling that completes before its cancel lands must still let the bounded recovery run."""
+    import asyncio
+
+    from hive_exec.executive import Executive
+    from hive_exec.gateway.fake import FakeGateway
+    from hive_exec.planner.baseline import BaselinePlanner
+
+    class LateCancelGateway(FakeGateway):
+        async def cancel(self, run_id, attempt_id):  # the robot passed its commit point; cancel is moot
+            return None
+
+    ex = Executive(LateCancelGateway(time_scale=0.2), {"baseline": BaselinePlanner()}, default_planner="baseline")
+    await ex.gateway.start(ex.handle_event)
+    await ex.reset("unknown")
+    try:
+        await ex.create_mission(DEMO)
+        await approve_latest(ex)
+        for _ in range(200):
+            if len(ex.attempts) == 2 and all(a.status in ("accepted", "running") for a in ex.attempts.values()):
+                break
+            await asyncio.sleep(0.01)
+        lidar = next(a for a in ex.attempts.values() if a.robot_id == "lidar_01")
+        await ex.handle_event(TaskEvent(event_id="f1", run_id=ex.run_id, attempt_id=lidar.attempt_id,
+                                        robot_id="lidar_01", seq=900, status="failed",
+                                        error={"code": "lidar_fault", "message": "injected"}))
+        assert ex.mission.status == "recovering"
+        assert await wait_for(ex, {"awaiting_approval"} | DONE) == "awaiting_approval"
+        camera = next(a for a in ex.attempts.values() if a.robot_id == "camera_01")
+        assert camera.status == "succeeded"
+        assert ex.mission.recovery_used and ex.mission.revisions[-1].kind == "recovery"
+    finally:
+        await ex.gateway.stop()

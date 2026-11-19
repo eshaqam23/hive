@@ -661,6 +661,11 @@ class Executive:
         if ev.status == "canceled":
             await self._on_task_failure(m, rt, "failed")
             return
+        if m.status == "recovering":
+            # A sibling settled after the failure (e.g. it passed its commit point before the cancel
+            # landed). _tick() only runs while executing, so re-check whether recovery can start.
+            await self._maybe_recover(m)
+            return
         await self._tick()
 
     def _apply_effects(self, att: Attempt, ev: TaskEvent) -> None:
