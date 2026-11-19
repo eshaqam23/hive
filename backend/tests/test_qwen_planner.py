@@ -2,8 +2,6 @@
 
 import json
 
-from hive_exec.contracts import plan_proposal_json_schema
-
 from .conftest import DEMO, approve_latest, wait_for
 from .qwen_mock import MOCK_MODEL, scripted_planner
 
@@ -43,7 +41,7 @@ async def test_request_shape_non_thinking_structured(make_exec):
     await ex.create_mission(DEMO)
     body = mock.requests[-1]
     assert body["chat_template_kwargs"] == {"enable_thinking": False}
-    assert body["structured_outputs"]["json"] == plan_proposal_json_schema()
+    assert body["structured_outputs"]["json"] == planner.schema
     assert body["seed"] == 1234 and body["model"] == MOCK_MODEL
     rec = ex.mission.revisions[-1].planner
     assert rec.kind == "qwen" and rec.model == MOCK_MODEL and "mock" in rec.label
