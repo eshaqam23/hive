@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -8,6 +9,22 @@ from typing import Optional
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_provider_store(tmp_path, monkeypatch):
+    """No test may read or write the operator's real ~/.hive/providers.yaml.
+
+    The store exports keys into os.environ, so the environment is restored too.
+    """
+    saved = dict(os.environ)
+    monkeypatch.setenv("HIVE_PROVIDERS_FILE", str(tmp_path / "providers.yaml"))
+    yield
+    for var in set(os.environ) - set(saved):
+        os.environ.pop(var, None)
+    for var, value in saved.items():
+        if os.environ.get(var) != value:
+            os.environ[var] = value
 
 
 DEMO = ("Find the red block in the work area, check the pickup corridor, "
