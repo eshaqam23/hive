@@ -63,6 +63,15 @@ class SynapseGateway(RobotGateway):
     def connected(self) -> bool:
         return self._ws is not None and self._ros_connected
 
+    def transport_health(self) -> dict[str, Any]:
+        bi = self._bridge_info
+        return {
+            "bridge": {"used": True, "url": self.url, "connected": self._ws is not None,
+                       "core_version": bi.get("core_version"), "synapse_commit": bi.get("synapse_commit"),
+                       "patch": bi.get("patch")},
+            "rosbridge": {"used": True, "url": bi.get("rosbridge_url"), "connected": self._ros_connected},
+        }
+
     def on_disconnect(self, cb) -> None:
         self._disconnect_listeners.append(cb)
 

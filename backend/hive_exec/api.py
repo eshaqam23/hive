@@ -15,6 +15,7 @@ from .config import ExecSettings
 from .contracts import plan_proposal_json_schema
 from .executive import ExecError, Executive
 from .gateway.base import RobotGateway
+from .health import exec_health, not_ready_reason
 from .planner.baseline import BaselinePlanner
 from .llm import api as llm_api
 from .llm.router import Router
@@ -104,9 +105,16 @@ def create_app(settings: Optional[ExecSettings] = None, gateway: Optional[RobotG
     async def _exec_error(_, exc: ExecError):
         return JSONResponse({"ok": False, "error": str(exc), "detail": exc.detail}, status_code=exc.status)
 
+    def require_ready(planner_kind: Optional[str]) -> None:
+        """503 naming what is down. Only starting or approving work is gated, never cancel or stop."""
+        problem = not_ready_reason(ex, planner_kind)
+        if problem:
+            reason, missing = problem
+            raise ExecError(f"Not ready: {reason}", 503, {"missing": missing})
+
     @app.get("/api/exec/health")
     async def health():
-        return {"ok": True, "service": "hive-executive", "run_id": ex.run_id}
+        return exec_health(ex)
 
     @app.get("/api/exec/state")
     async def state():
@@ -133,6 +141,7 @@ def create_app(settings: Optional[ExecSettings] = None, gateway: Optional[RobotG
 
     @app.post("/api/exec/missions")
     async def create_mission(body: MissionIn):
+        require_ready(body.planner)
         await ex.create_mission(body.command, body.planner)
         return ex.state()
 
@@ -148,6 +157,8 @@ def create_app(settings: Optional[ExecSettings] = None, gateway: Optional[RobotG
 
     @app.post("/api/exec/revisions/{revision}/approve")
     async def approve(revision: int, body: ApproveIn):
+        if ex.mission is not None:
+            require_ready(ex.mission.planner_kind)
         await ex.approve(revision, body.proposal_hash)
         return ex.state()
 

@@ -4,6 +4,10 @@ from fastapi.testclient import TestClient
 
 from hive_exec.api import create_app
 from hive_exec.config import ExecSettings, QwenSettings
+from hive_exec.executive import Executive
+from hive_exec.gateway.fake import FakeGateway
+from hive_exec.gateway.synapse import SynapseGateway
+from hive_exec.planner.baseline import BaselinePlanner
 
 from .conftest import DEMO
 
@@ -51,11 +55,12 @@ def test_http_known_story_and_export():
 
 def test_http_qwen_unavailable_is_visible():
     with _client() as c:
-        s = c.post("/api/exec/missions", json={"command": DEMO, "planner": "qwen"}).json()  # alias of "llm"
-        assert s["mission"]["status"] == "planner_error"
-        assert s["mission"]["revisions"] == []
-        assert s["mission"]["planner_kind"] == "llm"
-        assert "not configured" in s["mission"]["outcome"]["reason"]
+        r = c.post("/api/exec/missions", json={"command": DEMO, "planner": "qwen"})  # alias of "llm"
+        assert r.status_code == 503
+        body = r.json()
+        assert body["detail"]["missing"] == ["planner:llm"]
+        assert "planner llm is down" in body["error"] and "not bound to a provider" in body["error"]
+        assert c.get("/api/exec/state").json()["mission"] is None  # nothing was started
 
 
 def test_http_rejects_unknown_fields_and_faults():
@@ -86,3 +91,61 @@ def test_http_task_stop_one_task_then_recovery():
         assert s["mission"]["revisions"][0]["runtime"][scan]["state"] == "canceled"
         assert s["mission"]["revisions"][0]["runtime"][cam]["state"] == "succeeded"
         assert c.post("/api/exec/tasks/t99/cancel").status_code == 409  # nothing executing now
+
+
+def test_http_health_reports_each_dependency():
+    with _client() as c:
+        h = c.get("/api/exec/health").json()
+    assert h["ok"] is True and h["ready"] is True and h["missing"] == []
+    assert h["gateway"] == {"kind": "fake", "label": h["gateway"]["label"], "connected": True,
+                            "verified_round_trip": False, "detail": h["gateway"]["detail"]}
+    assert h["default_planner"] == "baseline" and h["planner"]["ready"] is True
+    llm = h["planners"]["llm"]
+    assert llm["role"] == "executive" and llm["bound"] is False and llm["ready"] is False
+    assert llm["last_probe"] is None and "not bound" in llm["reason"]
+    assert h["bridge"] == {"used": False} and h["rosbridge"] == {"used": False}
+
+
+def test_http_health_names_an_unbound_default_planner():
+    settings = ExecSettings(sim_time_scale=0.005, default_planner="llm", qwen=QwenSettings(base_url=""))
+    with TestClient(create_app(settings)) as c:
+        h = c.get("/api/exec/health").json()
+        assert h["ready"] is False and h["missing"] == ["planner:llm"]
+        r = c.post("/api/exec/missions", json={"command": DEMO})  # default planner
+        assert r.status_code == 503 and r.json()["detail"]["missing"] == ["planner:llm"]
+        assert c.post("/api/exec/missions", json={"command": DEMO, "planner": "baseline"}).status_code == 200
+
+
+class _SwitchableGateway(FakeGateway):
+    up = True
+
+    def info(self):
+        gi = super().info()
+        gi.connected = self.up
+        gi.detail = gi.detail if self.up else "link down (test)"
+        return gi
+
+
+def test_http_gateway_down_gates_start_and_approve_but_never_cancel():
+    gw = _SwitchableGateway(time_scale=0.005)
+    ex = Executive(gw, {"baseline": BaselinePlanner()}, default_planner="baseline")
+    with TestClient(create_app(ExecSettings(default_planner="baseline"), executive=ex)) as c:
+        s = c.post("/api/exec/missions", json={"command": DEMO}).json()
+        rev = s["mission"]["revisions"][-1]
+        gw.up = False
+        h = c.get("/api/exec/health").json()
+        assert h["ready"] is False and h["missing"] == ["gateway"] and h["gateway"]["connected"] is False
+        r = c.post(f"/api/exec/revisions/{rev['revision']}/approve", json={"proposal_hash": rev["proposal_hash"]})
+        assert r.status_code == 503 and r.json()["detail"]["missing"] == ["gateway"]
+        assert "robot gateway" in r.json()["error"] and "link down (test)" in r.json()["error"]
+        assert c.post("/api/exec/missions", json={"command": DEMO}).status_code == 503
+        assert c.post("/api/exec/tasks/t1/cancel").status_code == 409  # not gated: refused on its own terms
+        r = c.post("/api/exec/cancel")
+        assert r.status_code == 200 and r.json()["mission"]["status"] == "canceled"
+
+
+def test_synapse_health_reports_bridge_and_rosbridge_separately():
+    gw = SynapseGateway("ws://127.0.0.1:8790")  # not started: both links down
+    links = gw.transport_health()
+    assert links["bridge"]["used"] and links["bridge"]["url"] == "ws://127.0.0.1:8790"
+    assert links["bridge"]["connected"] is False and links["rosbridge"]["connected"] is False

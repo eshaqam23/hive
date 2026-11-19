@@ -63,3 +63,7 @@ class RobotGateway(ABC):
 
     async def debug_truth(self) -> Optional[dict[str, Any]]:
         return None
+
+    def transport_health(self) -> dict[str, Any]:
+        """The bridge and rosbridge links behind this gateway. An in-process gateway uses neither."""
+        return {"bridge": {"used": False}, "rosbridge": {"used": False}}
