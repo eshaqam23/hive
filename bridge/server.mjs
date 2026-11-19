@@ -24,6 +24,9 @@ const PORT = Number(process.env.HIVE_BRIDGE_PORT || 8790);
 const ACTION_TYPE = "hive_interfaces/action/ExecuteSkill";
 const PATCH = corePkg.hive?.patch || "none";
 const ROS_STATUS = { 4: "succeeded", 5: "canceled", 6: "aborted" };
+// robot_id becomes part of a ROS action name, so only the fake fleet's robots are accepted
+// (same list as ROBOTS in ros/hive_fake_robots/hive_fake_robots/fake_fleet.py).
+const ROBOTS = new Set(["camera_01", "lidar_01", "gripper_01"]);
 
 const attempts = new Map(); // attempt_id -> { env, seq, goalId, action, terminal }
 const clients = new Set();
@@ -102,6 +105,7 @@ const parseJson = (s, fallback) => {
 };
 
 async function submit(env) {
+  if (!ROBOTS.has(env.robot_id)) return { accepted_for_delivery: false, detail: "unknown robot_id" };
   if (attempts.has(env.attempt_id)) return { accepted_for_delivery: true, detail: "duplicate submission ignored" };
   if (!rosConnected) return { accepted_for_delivery: false, detail: "rosbridge not connected" };
   const action = `/${env.robot_id}/execute_skill`;
@@ -200,7 +204,18 @@ async function handle(msg) {
   }
 }
 
-const wss = new WebSocketServer({ host: "127.0.0.1", port: PORT });
+// Browsers always send Origin on a WebSocket handshake and no CORS check applies, so any web
+// page could otherwise drive the fleet through this localhost port. The Executive's gateway is
+// not a browser and sends no Origin, so every handshake that carries one is refused.
+const wss = new WebSocketServer({
+  host: "127.0.0.1",
+  port: PORT,
+  verifyClient: (info, done) => {
+    if (!info.origin) return done(true);
+    log(`refused handshake with Origin ${JSON.stringify(info.origin).slice(0, 100)}`);
+    done(false, 403, "Origin not allowed");
+  },
+});
 wss.on("connection", (ws) => {
   clients.add(ws);
   log("executive connected");
