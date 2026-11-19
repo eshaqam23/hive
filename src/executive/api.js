@@ -23,12 +23,20 @@ export async function execPost(path, payload = {}) {
   return data;
 }
 
+// One-line agent command, e.g. inspect_area(area_id="work_area", object_query="red_block").
+// Same format as describe_command in backend/hive_exec/agent_commands.py (agent_command.line in /state).
+function formatArg(v) {
+  if (typeof v === "string") return JSON.stringify(v);
+  if (typeof v === "object") return v.label ? JSON.stringify(v.label) : JSON.stringify(v);
+  return String(v);
+}
+
 export function describeAction(action) {
   if (!action) return "";
   const { kind, ...params } = action;
   const args = Object.entries(params)
     .filter(([, v]) => v !== null && v !== undefined)
-    .map(([k, v]) => `${k}=${typeof v === "object" ? v.label || JSON.stringify(v) : v}`)
+    .map(([k, v]) => `${k}=${formatArg(v)}`)
     .join(", ");
   return `${kind}(${args})`;
 }
