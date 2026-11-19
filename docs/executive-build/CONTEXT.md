@@ -103,3 +103,14 @@ Taken 2026-11-18 before any code change, on feature/executive = origin/feature/l
 - `python3 -m pytest backend/tests -q` (WSL, Python 3.12.3, pytest 7.4.4): 152 passed.
 - Mock e2e (`backend/server.py` with HIVE_ROS_SETUP=backend/test/mock_ros/setup.bash, then
   `python3 backend/test/test_e2e.py backend/test/mock_ros`): 62/62 passed.
+
+## Test commands
+Run from the repo root inside WSL. One interpreter can't run both sets: system python3 has
+live-data's deps (cv2) but no pytest-asyncio, so it skips the 24 async exec tests; the
+hive-exec venv has FastAPI + pytest-asyncio but no cv2, so test_adapters.py fails to collect.
+System pytest 7.4 warns "Unknown config option: asyncio_mode"; that is expected.
+- live-data (system python3, expect 152):
+  `python3 -m pytest backend/tests -q --ignore=backend/tests/test_api.py --ignore=backend/tests/test_contracts.py --ignore=backend/tests/test_executive.py --ignore=backend/tests/test_qwen_planner.py --ignore=backend/tests/test_validator.py`
+- exec (hive-exec venv, expect 45):
+  `~/.venvs/hive-exec/bin/python -m pytest backend/tests/test_api.py backend/tests/test_contracts.py backend/tests/test_executive.py backend/tests/test_qwen_planner.py backend/tests/test_validator.py -q`
+- Also run `npm test` (Windows Node) and the mock e2e from the Baseline section.
