@@ -121,6 +121,7 @@ def test_no_response_this_api_can_produce_contains_a_key():
             c.post("/api/exec/llm/providers", content=f'{{"id": "groq", "api_key": "{KEY}"',
                    headers={"content-type": "application/json"}).text,  # broken JSON
             c.get("/api/exec/planner").text,
+            c.get("/api/exec/health").text,  # carries the last probe error
             c.get("/api/exec/state").text,
         ]
         c.post("/api/exec/reset", json={"scenario": "unknown"})
