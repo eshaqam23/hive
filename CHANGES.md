@@ -56,7 +56,9 @@ Design: `docs/superpowers/specs/2026-11-13-hive-live-data-design.md`. Setting up
 - **Tests:** Vitest also picks up `scripts/*.test.js`.
 - **Change address:** a car's IP address and ROS domain can be changed in place (pencil on its
   Home card, or "Change address" on its car page), for Wi-Fi that hands out a new IP each time. A
-  connected car is stopped and disconnected at its old address first, then waits for Connect.
+  connected car is stopped and disconnected at its old address first, then waits for Connect. The
+  old address is let go even when the car shows offline, so no leftover worker keeps a second
+  publisher on its `/cmd_vel`.
 - **Real-hardware results:** to be added after the checklist in `docs/robot-setup.md` is run.
 
 ---

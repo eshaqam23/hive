@@ -196,7 +196,11 @@ describe("App change address", () => {
     expect(within(homeCard("Rover")).getByText("10.0.0.9")).toBeTruthy();
     expect(within(homeCard("Rover")).getByText("domain 45")).toBeTruthy();
     expect(saved()[0]).toMatchObject({ host: "10.0.0.9", domainId: 45 });
-    expect(server.calls.some((c) => c.path === "/robots/disconnect")).toBe(false); // it was not connected
+    // Even an offline car's old address is let go: a leftover backend worker there can still reach the
+    // car (its static peer points at this machine) and would mix its commands into /cmd_vel.
+    await waitFor(() =>
+      expect(server.calls.filter((c) => c.path === "/robots/disconnect").map((c) => c.body)).toEqual([{ ip: "10.0.0.5", domain_id: 43 }]),
+    );
     fireEvent.click(within(homeCard("Rover")).getByRole("button", { name: "Connect Rover" }));
     await waitFor(() => expect(within(homeCard("Rover")).getByText("Live")).toBeTruthy());
     expect(server.calls.find((c) => c.path === "/robots/connect").body).toEqual({ ip: "10.0.0.9", domain_id: 45 });

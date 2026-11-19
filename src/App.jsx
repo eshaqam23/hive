@@ -555,9 +555,11 @@ export default function App() {
     if (view === "robot" && selectedRobot?.id === robot.id) setView("home");
   }
 
-  /* A car's IP changes with the Wi-Fi lease, so its address and domain can be changed in place. A car
-     that may be live is stopped and disconnected at its OLD address first (the backend's worker is
-     keyed by address), then waits offline: the operator presses Connect to use the new one. */
+  /* A car's IP changes with the Wi-Fi lease, so its address and domain can be changed in place. The
+     backend's worker is keyed by address, so the OLD address is always disconnected first: a live car
+     is stopped there, and a leftover worker of an offline one is closed, since it can still reach the
+     car (the car's static peer is this machine) and would mix its commands into /cmd_vel. The car
+     then waits offline: the operator presses Connect to use the new address. */
   function changeAddress(robot, { host, domainId }) {
     setEditingRobotId(null);
     const current = robotsRef.current.find((r) => r.id === robot.id);
@@ -567,6 +569,7 @@ export default function App() {
     if (driveRef.current.robotId === current.id) endDriveLocally();
     window.clearTimeout(followRef.current[current.id]);
     if (live) robotApi(current, "/robots/disconnect", target(current)).catch(() => {});
+    else if (current.host) postApi("/robots/disconnect", target(current)).catch(() => {});
     setLinks((all) => (all[current.id] ? { ...all, [current.id]: null } : all));
     updateRobot(current.id, { host, domainId, status: "offline", reconnecting: false, mode: "Idle", lastError: "", warnings: [] });
     logActivity(
