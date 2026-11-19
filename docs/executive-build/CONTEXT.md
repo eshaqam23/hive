@@ -110,7 +110,7 @@ live-data's deps (cv2) but no pytest-asyncio, so it skips the 24 async exec test
 hive-exec venv has FastAPI + pytest-asyncio but no cv2, so test_adapters.py fails to collect.
 System pytest 7.4 warns "Unknown config option: asyncio_mode"; that is expected.
 - live-data (system python3, expect 152):
-  `python3 -m pytest backend/tests -q --ignore=backend/tests/test_api.py --ignore=backend/tests/test_contracts.py --ignore=backend/tests/test_executive.py --ignore=backend/tests/test_qwen_planner.py --ignore=backend/tests/test_validator.py`
-- exec (hive-exec venv, expect 45):
-  `~/.venvs/hive-exec/bin/python -m pytest backend/tests/test_api.py backend/tests/test_contracts.py backend/tests/test_executive.py backend/tests/test_qwen_planner.py backend/tests/test_validator.py -q`
+  `python3 -m pytest backend/tests -q --ignore=backend/tests/test_api.py --ignore=backend/tests/test_contracts.py --ignore=backend/tests/test_executive.py --ignore=backend/tests/test_validator.py --ignore-glob='backend/tests/test_llm_*'`
+- exec (hive-exec venv, expect 209 after prompt 4; was 45):
+  `~/.venvs/hive-exec/bin/python -m pytest backend/tests/test_api.py backend/tests/test_contracts.py backend/tests/test_executive.py backend/tests/test_validator.py backend/tests/test_llm_*.py -q`
 - Also run `npm test` (Windows Node) and the mock e2e from the Baseline section.

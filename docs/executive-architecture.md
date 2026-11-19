@@ -26,7 +26,8 @@ pipeline UI in `frontend/`) were not used; `exec` branches from `main`.
 | Observed world / trusted robot state | `hive_exec/world.py` |
 | Simulator truth + fake skill semantics | `hive_exec/sim/fake_world.py` (only fake skill implementations import it) |
 | Context builder | `hive_exec/context.py` (observed world only; 9,216-token input budget, no truncation) |
-| Qwen planner | `hive_exec/planner/qwen.py`, prompt `hive_exec/planner/prompt.py` (`hive.prompt.v1`) |
+| LLM planner | `hive_exec/planner/llm.py`, prompt `hive_exec/planner/prompt.py` (`hive.prompt.v2`) |
+| LLM providers | `hive_exec/llm/`: `providers.py` (store), `router.py` (role chains, transport-only failover), `probe.py`, `api.py` (`/api/exec/llm`), `templates.py`; see `DECISIONS.md` |
 | Baseline planner (labeled) | `hive_exec/planner/baseline.py` |
 | Allocator (interface + capability matching) | `hive_exec/allocator.py` |
 | Validator | `hive_exec/validator.py` |
