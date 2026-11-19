@@ -70,7 +70,7 @@ export function AgentReports({ state }) {
     .slice(-MAX_REPORTS)
     .reverse();
   return (
-    <section aria-label="Agent reports" className="min-h-0">
+    <section aria-label="Agent reports">
       <Eyebrow className="mb-2">Agent reports</Eyebrow>
       {rows.length === 0 ? (
         <p className="text-[13px] text-faint">Nothing reported yet. Reports appear when robots take tasks.</p>
@@ -104,7 +104,7 @@ export function MiniMap({ robots, state }) {
 
 export default function RightRail({ state, robots, showMap = true, children = null }) {
   return (
-    <aside aria-label="Mission context" className="flex flex-col gap-6 border-line bg-sidebar px-5 py-6 lg:h-full lg:min-h-0 lg:overflow-y-auto lg:border-l">
+    <aside aria-label="Mission context" className="relative flex flex-col gap-6 border-line bg-sidebar px-5 py-6 lg:h-full lg:min-h-0 lg:overflow-y-auto lg:border-l">
       <FleetList state={state} />
       {showMap && <MiniMap robots={robots} state={state} />}
       <AgentReports state={state} />

@@ -47,7 +47,7 @@ export default function Composer({ text, setText, block, sending, planner, plann
   };
 
   return (
-    <form className="sticky bottom-0 mx-auto w-full max-w-3xl bg-linear-to-t from-panel from-70% px-6 pb-6 pt-3" onSubmit={submit}>
+    <form className="sticky bottom-0 mx-auto w-full max-w-3xl flex-none bg-panel px-6 pb-6 pt-3 lg:static" onSubmit={submit}>
       {block && (
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2 px-1" role="status">
           <p className="text-[13px] text-warn" data-composer-block>

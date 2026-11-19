@@ -316,6 +316,7 @@ describe("composer", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Try the demo mission" }));
     const box = screen.getByPlaceholderText("Describe a mission");
     expect(box.value).toBe(DEMO_COMMAND);
+    expect(document.activeElement).toBe(box);
     fireEvent.keyDown(box, { key: "Enter", shiftKey: true });
     expect(posts("/missions")).toHaveLength(0);
     expect(screen.getByRole("button", { name: "Baseline" }).getAttribute("aria-pressed")).toBe("true");

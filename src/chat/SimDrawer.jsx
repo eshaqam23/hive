@@ -38,14 +38,14 @@ export default function SimDrawer({ state, busy, act }) {
 
   return (
     <section aria-label="Simulation controls" className="rounded-2xl border border-dashed border-warn/50">
-      <button aria-expanded={open} className="flex w-full items-center gap-2 px-4 py-2.5 text-left" onClick={() => setOpen(!open)} type="button">
+      <button aria-expanded={open} className="flex w-full flex-wrap items-center gap-x-2 gap-y-0.5 px-4 py-2.5 text-left" onClick={() => setOpen(!open)} type="button">
         <span className="text-faint">
           <Caret open={open} />
         </span>
-        <span className="text-[14px] font-medium text-ink">Sim controls</span>
+        <span className="whitespace-nowrap text-[14px] font-medium text-ink">Sim controls</span>
         <SimTag className="text-[11px] leading-4" />
-        <span className="text-[12px] text-warn">simulation only</span>
-        {active.length > 0 && <span className="ml-auto truncate font-mono text-[12px] text-faint">active: {active.join(", ")}</span>}
+        <span className="whitespace-nowrap text-[12px] text-warn">simulation only</span>
+        {active.length > 0 && <span className="basis-full truncate pl-6 font-mono text-[12px] text-faint">active: {active.join(", ")}</span>}
       </button>
       {open && (
         <div className="space-y-3 border-t border-dashed border-warn/40 px-4 py-3">
@@ -74,7 +74,7 @@ export default function SimDrawer({ state, busy, act }) {
                   <li className="flex items-start gap-2" key={name}>
                     <input checked={picked.includes(name)} className="mt-1" id={`fault-${name}`} onChange={() => toggle(name)} type="checkbox" />
                     <label className="min-w-0 flex-1 text-[13px]" htmlFor={`fault-${name}`}>
-                      <span className="font-mono text-ink">{name}</span>
+                      <span className="break-all font-mono text-ink">{name}</span>
                       <span className="block text-faint">{description}</span>
                     </label>
                     <button

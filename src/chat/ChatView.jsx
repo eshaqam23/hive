@@ -245,6 +245,12 @@ export default function ChatView({ exec, robots = [], showMap = true }) {
     return res.ok;
   };
 
+  /* the demo chip fills the composer and hands it focus, so Enter sends it */
+  const fillDemo = () => {
+    setText(DEMO_COMMAND);
+    document.getElementById("mission-input")?.focus();
+  };
+
   const newRun = () => act("/reset", { scenario: state?.scenario || "unknown", faults: [] }, "New run started.");
 
   const exportCurrent = async () => {
@@ -266,38 +272,41 @@ export default function ChatView({ exec, robots = [], showMap = true }) {
 
   return (
     <div className="lg:grid lg:h-full lg:grid-cols-[minmax(0,1fr)_minmax(300px,340px)]">
-      <div className="flex min-h-full flex-col lg:h-full lg:min-h-0 lg:overflow-y-auto">
-        <div className="mx-auto w-full max-w-[860px] flex-1 space-y-5 px-6 pb-6 pt-8">
-          <EarlierMissions list={shownEarlier} onExport={exportEarlier} onView={setViewing} viewing={viewing} />
+      <div className="flex min-h-full flex-col lg:h-full lg:min-h-0">
+        {/* the thread scrolls; the composer stays below it and never covers the last card */}
+        <div className="relative flex-1 lg:min-h-0 lg:overflow-y-auto">
+          <div className="mx-auto w-full max-w-[860px] space-y-5 px-6 pb-6 pt-8">
+            <EarlierMissions list={shownEarlier} onExport={exportEarlier} onView={setViewing} viewing={viewing} />
 
-          {viewed ? (
-            <>
-              <div className="flex items-center justify-between rounded-xl bg-raised px-4 py-2 text-[13px]">
-                <span className="text-muted">Viewing an earlier mission · read-only</span>
-                <button className="font-medium text-coral hover:underline" onClick={() => setViewing(null)} type="button">
-                  Back to the current run
-                </button>
-              </div>
-              <Thread act={act} onExport={() => exportEarlier(viewed)} readOnly state={viewed.export} />
-            </>
-          ) : (
-            <>
-              {reachable === false && !state && (
-                <ReasonCard reason={`${error || "No answer"}. Start it with npm run hive.`} title="Executive unreachable" />
-              )}
-              {!mission && !pending && state && <Hero onDemo={() => setText(DEMO_COMMAND)} />}
-              <Thread
-                act={act}
-                busy={busy}
-                onExport={exportCurrent}
-                pending={pending}
-                plannerLabel={livePlannerLabel(planner, state?.planners)}
-                sending={sending}
-                state={state}
-              />
-            </>
-          )}
-          <div ref={endRef} />
+            {viewed ? (
+              <>
+                <div className="flex items-center justify-between rounded-xl bg-raised px-4 py-2 text-[13px]">
+                  <span className="text-muted">Viewing an earlier mission · read-only</span>
+                  <button className="font-medium text-coral hover:underline" onClick={() => setViewing(null)} type="button">
+                    Back to the current run
+                  </button>
+                </div>
+                <Thread act={act} onExport={() => exportEarlier(viewed)} readOnly state={viewed.export} />
+              </>
+            ) : (
+              <>
+                {reachable === false && !state && (
+                  <ReasonCard reason={`${error || "No answer"}. Start it with npm run hive.`} title="Executive unreachable" />
+                )}
+                {!mission && !pending && state && <Hero onDemo={fillDemo} />}
+                <Thread
+                  act={act}
+                  busy={busy}
+                  onExport={exportCurrent}
+                  pending={pending}
+                  plannerLabel={livePlannerLabel(planner, state?.planners)}
+                  sending={sending}
+                  state={state}
+                />
+              </>
+            )}
+            <div ref={endRef} />
+          </div>
         </div>
         <Composer
           block={viewed ? { reason: "Viewing an earlier mission (read-only)." } : block}
