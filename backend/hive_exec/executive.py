@@ -12,17 +12,21 @@ import asyncio
 import hashlib
 import itertools
 import json
+import os
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .agent_commands import describe_command, write_command
 from .allocator import Allocator, CapabilityAllocator
 from .catalog import BATTERY_RESERVE_PCT, ROBOTS, SKILLS, catalog_dict, route_between
 from .context import ContextBudgetExceeded, build_context
 from .contracts import (
     RUN_EXPORT_SCHEMA,
     TERMINAL_STATUSES,
+    AllocatedTask,
     ExecutionPlan,
     Goal,
     Observation,
@@ -77,6 +81,7 @@ class Attempt:
     effects_applied: bool = False
     submitted_at: float = 0.0
     task_stop_requested: bool = False  # operator stopped this one task (not the mission)
+    command_file: Optional[str] = None  # agent_commands/<robot>/<task>-r<rev>-a<n>.json, when recorded
 
 
 @dataclass
@@ -105,8 +110,10 @@ def _hash(obj: Any) -> str:
 
 class Executive:
     def __init__(self, gateway: RobotGateway, planners: dict[str, Planner], allocator: Optional[Allocator] = None,
-                 clock: Callable[[], float] = time.time, default_planner: str = "llm"):
+                 clock: Callable[[], float] = time.time, default_planner: str = "llm",
+                 runs_dir: Optional[Path] = None):
         self.gateway = gateway
+        self.runs_dir = Path(runs_dir) if runs_dir is not None else None
         self.planners = {normalize_planner_kind(k): p for k, p in planners.items()}  # "qwen" -> "llm"
         self.allocator = allocator or CapabilityAllocator()
         self.clock = clock
@@ -589,6 +596,7 @@ class Executive:
                           submitted_at=self.clock())
             self.attempts[attempt_id] = att
             rt.attempt_ids.append(attempt_id)
+            att.command_file = self._record_command(att.envelope, len(rt.attempt_ids))
             rt.state, rt.started_at = "dispatched", self.clock()
             self.robots[task.robot_id].current_attempt_id = attempt_id
             self.log("dispatch", f"{task.task_id} -> {task.robot_id}: {task.skill} {params}", attempt_id=attempt_id)
@@ -608,6 +616,17 @@ class Executive:
                 return
         if all(m.tasks[f"{plan.revision}:{t.task_id}"].state in TERMINAL_STATUSES | {"skipped"} for t in plan.tasks):
             await self._finish_revision(m, plan)
+
+    def _record_command(self, envelope: dict, attempt_no: int) -> Optional[str]:
+        """Write the envelope exactly as it goes out; a full disk must never stop dispatch."""
+        try:
+            path = write_command(self.runs_dir, envelope, attempt_no)
+        except OSError as exc:
+            self.log("agent_command", f"Could not record the command for {envelope['task_id']}: {exc}")
+            return None
+        if path is None:
+            return None
+        return Path(os.path.relpath(path, self.runs_dir.parent)).as_posix()
 
     # ======================================================= event intake
     async def handle_event(self, ev: TaskEvent) -> None:
@@ -838,7 +857,22 @@ class Executive:
         d = p.model_dump()
         d["runtime"] = {t.task_id: asdict(m.tasks[f"{p.revision}:{t.task_id}"]) for t in p.tasks
                         if f"{p.revision}:{t.task_id}" in m.tasks}
+        for t, td in zip(p.tasks, d["tasks"]):
+            td["agent_command"] = self._agent_command(m, p, t)
         return d
+
+    def _agent_command(self, m: Mission, p: ExecutionPlan, task: AllocatedTask) -> dict:
+        """What the instance agent gets for this task: the latest envelope sent, or (before dispatch) the
+        one-line form of what would be sent."""
+        rt = m.tasks.get(f"{p.revision}:{task.task_id}")
+        att = self.attempts.get(rt.attempt_ids[-1]) if rt and rt.attempt_ids else None
+        if att is not None:
+            env = att.envelope
+            return {"line": describe_command(env["skill"], env["params"]), "envelope": env,
+                    "attempt_id": att.attempt_id, "attempt": len(rt.attempt_ids), "file": att.command_file}
+        params = task.action.model_dump(exclude={"kind"}, exclude_none=True)
+        return {"line": describe_command(task.skill, params), "envelope": None, "attempt_id": None,
+                "attempt": None, "file": None}
 
     def state(self) -> dict:
         m = self.mission

@@ -185,6 +185,11 @@ def plan_proposal_json_schema() -> dict[str, Any]:
     return PlanProposal.model_json_schema()
 
 
+def task_envelope_json_schema() -> dict[str, Any]:
+    """Saved as schemas/task_envelope.v1.json: what an instance agent receives in envelope_json."""
+    return TaskEnvelope.model_json_schema()
+
+
 # ------------------------------------------------------- backend-owned models
 
 

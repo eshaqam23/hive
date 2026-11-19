@@ -67,6 +67,7 @@ class ExecSettings:
     bridge_url: str = "ws://127.0.0.1:8790"
     cors_origins: list[str] = field(default_factory=lambda: ["http://127.0.0.1:5173", "http://localhost:5173"])
     qwen: QwenSettings = field(default_factory=QwenSettings)
+    runs_dir: Optional[Path] = None  # agent command files go under <runs_dir>/<run_id>/; None = not written
 
     @classmethod
     def from_env(cls) -> "ExecSettings":
@@ -78,4 +79,5 @@ class ExecSettings:
             sim_time_scale=float(os.environ.get("HIVE_SIM_TIME_SCALE", "1.0")),
             bridge_url=os.environ.get("HIVE_BRIDGE_URL", "ws://127.0.0.1:8790"),
             qwen=QwenSettings.from_env(),
+            runs_dir=Path(os.environ.get("HIVE_RUNS_DIR") or Path(__file__).resolve().parents[2] / "runs"),
         )

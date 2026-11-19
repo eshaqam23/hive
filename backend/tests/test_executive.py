@@ -7,9 +7,12 @@ import json
 
 import pytest
 
+from hive_exec.agent_commands import envelope_json
 from hive_exec.context import build_context
 from hive_exec.contracts import TaskEvent
-from hive_exec.executive import ExecError
+from hive_exec.executive import ExecError, Executive
+from hive_exec.gateway.fake import FakeGateway
+from hive_exec.planner.baseline import BaselinePlanner
 
 from .conftest import DEMO, approve_latest, wait_for
 
@@ -307,3 +310,42 @@ async def test_task_stop_refuses_when_nothing_is_running(make_exec):
         await ex.cancel_task("t99")
     assert e.value.status == 404
     assert await wait_for(ex, DONE) == "completed"
+
+
+async def test_every_dispatched_attempt_is_written_and_shown(tmp_path):
+    ex = Executive(FakeGateway(time_scale=0.005), {"baseline": BaselinePlanner()}, default_planner="baseline",
+                   runs_dir=tmp_path)
+    await ex.gateway.start(ex.handle_event)
+    await ex.reset("known")
+    try:
+        await ex.create_mission(DEMO)
+        pending = ex.state()["mission"]["revisions"][-1]["tasks"]
+        assert all(t["agent_command"]["envelope"] is None and t["agent_command"]["line"] for t in pending)
+        await approve_latest(ex)
+        assert await wait_for(ex, DONE) == "completed"
+        files = sorted(tmp_path.rglob("*.json"))
+        assert len(files) == len(ex.attempts) > 0
+        for att in ex.attempts.values():
+            n = ex.mission.tasks[f"{att.revision}:{att.task_id}"].attempt_ids.index(att.attempt_id) + 1
+            f = tmp_path / ex.run_id / "agent_commands" / att.robot_id / f"{att.task_id}-r{att.revision}-a{n}.json"
+            assert f.read_text(encoding="utf-8") == envelope_json(att.envelope)
+        s = ex.state()
+        task = s["mission"]["revisions"][0]["tasks"][0]
+        cmd = task["agent_command"]
+        assert cmd["envelope"]["schema_version"] == "hive.task-envelope.v1"
+        assert cmd["envelope"]["task_id"] == task["task_id"] and cmd["attempt_id"]
+        assert cmd["line"].startswith(task["action"]["kind"] + "(")
+        assert cmd["file"].endswith(f"{task['task_id']}-r1-a1.json")
+    finally:
+        await ex.gateway.stop()
+
+
+async def test_no_runs_dir_means_no_files(make_exec, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    ex = await make_exec("known")
+    await ex.create_mission(DEMO)
+    await approve_latest(ex)
+    await wait_for(ex, DONE)
+    assert not list(tmp_path.rglob("*.json"))
+    cmd = ex.state()["mission"]["revisions"][0]["tasks"][0]["agent_command"]
+    assert cmd["envelope"] is not None and cmd["file"] is None

@@ -1,0 +1,71 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "attempt_id": {
+      "title": "Attempt Id",
+      "type": "string"
+    },
+    "mission_id": {
+      "title": "Mission Id",
+      "type": "string"
+    },
+    "params": {
+      "additionalProperties": true,
+      "title": "Params",
+      "type": "object"
+    },
+    "revision": {
+      "title": "Revision",
+      "type": "integer"
+    },
+    "robot_id": {
+      "title": "Robot Id",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "hive.task-envelope.v1",
+      "default": "hive.task-envelope.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "skill": {
+      "enum": [
+        "navigate_to",
+        "inspect_area",
+        "capture_image",
+        "scan_route",
+        "pick_object",
+        "place_object"
+      ],
+      "title": "Skill",
+      "type": "string"
+    },
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "timeout_s": {
+      "exclusiveMinimum": 0,
+      "maximum": 600,
+      "title": "Timeout S",
+      "type": "number"
+    }
+  },
+  "required": [
+    "run_id",
+    "mission_id",
+    "revision",
+    "task_id",
+    "attempt_id",
+    "robot_id",
+    "skill",
+    "params",
+    "timeout_s"
+  ],
+  "title": "TaskEnvelope",
+  "type": "object"
+}

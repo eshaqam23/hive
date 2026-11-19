@@ -74,7 +74,8 @@ def create_app(settings: Optional[ExecSettings] = None, gateway: Optional[RobotG
     if executive is None:
         gateway = gateway or make_gateway(settings)
         planners = {"llm": LLMPlanner(Router(legacy=settings.qwen)), "baseline": BaselinePlanner()}
-        executive = Executive(gateway, planners, default_planner=settings.default_planner)
+        executive = Executive(gateway, planners, default_planner=settings.default_planner,
+                              runs_dir=settings.runs_dir)
     ex = executive
 
     @asynccontextmanager
