@@ -1,5 +1,22 @@
 # UI evidence
 
+## Gate 9: Models page (prompt 9)
+
+Captured 2026-11-19 with Playwright (Chromium, dark theme). The viewport was 1440×2300 so the
+whole page fits in one image. The Executive ran against a throwaway store
+(`HIVE_PROVIDERS_FILE=/tmp/hive-gate9/providers.yaml`), never `~/.hive/providers.yaml`. The
+store was seeded with three keyless rows through `POST /api/exec/llm/providers`, and the
+executive role was bound to `["ollama", "arc-vllm"]` through `POST /api/exec/llm/roles`. No key
+appears in either image.
+
+| File | What it shows |
+|---|---|
+| `models.png` | Roles on top. Executive: plans missions is bound to ollama · qwen3:8b, with arc-vllm as fallback 1 and the model hint "No model list: unreachable: http://127.0.0.1:11434 (ConnectTimeout). Type any id.". Instance agent: not built yet is not bound. Below are the provider cards for VT ARC vLLM, Cerebras and Ollama (local), each with kind, base_url, model, "none via <KEY_ENV>" and role chips. Ollama's Test result reads FAILED 10.0 s with the verbatim error "unreachable: http://127.0.0.1:11434 (ConnectTimeout)", because Ollama was not running. |
+| `models-templates.png` | The Add provider picker, filled from `GET /api/exec/llm/templates`. It lists Ollama (local), then VT ARC (vLLM) with its tunnel hint. Next is Hosted OSS-model provider with presets Groq, Cerebras (marked "added"), OpenRouter, Together AI, Google Gemini and Other. Last is Local OpenAI-compatible server with LM Studio, llama.cpp server, vLLM (local) and Other. |
+
+The console showed only `ERR_CONNECTION_REFUSED` on `127.0.0.1:8787/api/health`. The car
+backend was not started for this gate.
+
 ## Gate 8: mission chat (prompt 8)
 
 Captured 2026-11-19 with Playwright (Chromium, 1440×900, dark theme) on the synapse gateway with
