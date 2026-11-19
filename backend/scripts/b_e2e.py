@@ -127,6 +127,39 @@ async def story_cancel(ex):
                      notes=f"status right after cancel request: {shown_before_confirm}")
 
 
+async def story_task_stop(ex):
+    """Stop one task (the hung route scan) while the camera keeps working; recovery is proposed."""
+    await ex.reset("unknown", ["hang_scan"])
+    await ex.create_mission(DEMO)
+    rev = ex.mission.revisions[-1]
+    scan_task = next(t.task_id for t in rev.tasks if t.skill == "scan_route")
+    await approve(ex)
+    for _ in range(200):
+        live = {a.robot_id: a for a in ex.attempts.values() if a.status in ("accepted", "running")}
+        if "lidar_01" in live and "camera_01" in live:
+            break
+        await asyncio.sleep(0.01)
+    rt = await ex.cancel_task(scan_task)
+    shown = rt.state
+    scan = next(a for a in ex.attempts.values() if a.robot_id == "lidar_01")
+    camera = next(a for a in ex.attempts.values() if a.robot_id == "camera_01")
+    for _ in range(400):
+        if scan.status in ("canceled", "failed", "uncertain", "succeeded"):
+            break
+        await asyncio.sleep(0.01)
+    camera_when_confirmed = camera.status
+    final = await wait(ex, {"awaiting_approval"} | DONE, 30)
+    ok = (shown == "canceling" and scan.status == "canceled" and camera.status == "succeeded"
+          and ex.mission.recovery_used and ex.mission.revisions[-1].kind == "recovery")
+    row = summarize(ex, "stop one task; others keep running; recovery proposed",
+                    "awaiting_approval", final if ok else f"{final} (checks failed)",
+                    notes=f"{scan_task} right after stop: {shown}; scan confirmed {scan.status} while camera was "
+                          f"{camera_when_confirmed}; camera finished {camera.status}; "
+                          f"command files: {[a.command_file for a in ex.attempts.values()]}")
+    await ex.cancel()  # leave nothing awaiting approval
+    return row
+
+
 async def story_uncertain(ex):
     await ex.reset("known", ["uncertain_place"])
     await ex.create_mission(DEMO)
@@ -143,7 +176,7 @@ async def main():
     settings = ExecSettings.from_env()
     gw = SynapseGateway(args.bridge)
     planners = {"baseline": BaselinePlanner(), "llm": LLMPlanner(Router(legacy=settings.qwen))}
-    ex = Executive(gw, planners, default_planner=args.planner)
+    ex = Executive(gw, planners, default_planner=args.planner, runs_dir=settings.runs_dir)
     await ex.start()
     if not gw.connected:
         print(f"Synapse bridge not connected at {args.bridge}")
@@ -151,7 +184,7 @@ async def main():
     print("gateway:", vars(gw.info()))
     rows = []
     for story in (story_unknown, story_known, story_camera, story_ambiguous, story_failure_recovery,
-                  story_failure_block, story_cancel, story_uncertain):
+                  story_failure_block, story_cancel, story_task_stop, story_uncertain):
         row = await story(ex)
         rows.append(row)
         print(f"{'PASS' if row['pass'] else 'FAIL'}  {row['story']}: {row['final']}  "
