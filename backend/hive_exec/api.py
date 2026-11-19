@@ -165,6 +165,12 @@ def create_app(settings: Optional[ExecSettings] = None, gateway: Optional[RobotG
         await ex.cancel()
         return ex.state()
 
+    @app.post("/api/exec/tasks/{task_id}/cancel")
+    async def cancel_task(task_id: str):
+        """Stop one task of the active revision; never gated on planner or transport health."""
+        await ex.cancel_task(task_id)
+        return ex.state()
+
     @app.post("/api/exec/reset")
     async def reset(body: ResetIn):
         unknown = [f for f in body.faults if f not in KNOWN_FAULTS]

@@ -259,3 +259,51 @@ async def test_sibling_success_after_failure_still_recovers():
         assert ex.mission.recovery_used and ex.mission.revisions[-1].kind == "recovery"
     finally:
         await ex.gateway.stop()
+
+
+async def test_task_stop_cancels_one_task_and_recovers_while_others_run(make_exec):
+    import asyncio
+
+    ex = await make_exec("unknown", ["hang_scan"], time_scale=0.2)  # camera inspect takes ~0.6 s
+    await ex.create_mission(DEMO)
+    rev = ex.mission.revisions[-1]
+    scan_task = next(t.task_id for t in rev.tasks if t.skill == "scan_route")
+    await approve_latest(ex)
+    for _ in range(200):
+        if len(ex.attempts) == 2 and all(a.status in ("accepted", "running") for a in ex.attempts.values()):
+            break
+        await asyncio.sleep(0.01)
+    scan = next(a for a in ex.attempts.values() if a.robot_id == "lidar_01")
+    camera = next(a for a in ex.attempts.values() if a.robot_id == "camera_01")
+    rt = await ex.cancel_task(scan_task)
+    assert rt.state == "canceling" and ex.mission.status == "executing"  # not canceled until the robot confirms
+    again = await ex.cancel_task(scan_task)  # idempotent while the cancel is in flight
+    assert again.state == "canceling"
+    for _ in range(200):
+        if scan.status == "canceled":
+            break
+        await asyncio.sleep(0.005)
+    assert scan.status == "canceled"
+    assert camera.status in ("accepted", "running"), "the other task must keep running"
+    assert ex.mission.status == "recovering"
+    rt = ex.mission.tasks[f"{rev.revision}:{scan_task}"]
+    assert rt.state == "canceled" and rt.error["code"] == "operator_stop"
+    assert await wait_for(ex, {"awaiting_approval"} | DONE) == "awaiting_approval"
+    assert camera.status == "succeeded"
+    assert ex.mission.recovery_used and ex.mission.revisions[-1].kind == "recovery"
+    assert any("canceled (operator_stop)" in h for h in ex.mission.history)
+
+
+async def test_task_stop_refuses_when_nothing_is_running(make_exec):
+    ex = await make_exec("known")
+    with pytest.raises(ExecError):
+        await ex.cancel_task("t1")  # no mission
+    await ex.create_mission(DEMO)
+    with pytest.raises(ExecError) as e:
+        await ex.cancel_task("t1")  # awaiting approval
+    assert e.value.status == 409
+    await approve_latest(ex)
+    with pytest.raises(ExecError) as e:
+        await ex.cancel_task("t99")
+    assert e.value.status == 404
+    assert await wait_for(ex, DONE) == "completed"

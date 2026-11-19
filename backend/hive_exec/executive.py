@@ -55,7 +55,8 @@ class TaskRuntime:
     task_id: str
     revision: int
     robot_id: Optional[str]
-    state: str = "pending"  # pending|dispatched|accepted|running|succeeded|failed|rejected|canceled|uncertain|skipped
+    # pending|dispatched|accepted|running|canceling|succeeded|failed|rejected|canceled|uncertain|skipped
+    state: str = "pending"
     attempt_ids: list[str] = field(default_factory=list)
     progress: float = 0.0
     result: Optional[dict] = None
@@ -75,6 +76,7 @@ class Attempt:
     last_seq: int = -1
     effects_applied: bool = False
     submitted_at: float = 0.0
+    task_stop_requested: bool = False  # operator stopped this one task (not the mission)
 
 
 @dataclass
@@ -490,6 +492,28 @@ class Executive:
                 await self.gateway.cancel(self.run_id, a.attempt_id)
             self._check_cancel_settled(m)
 
+    async def cancel_task(self, task_id: str) -> TaskRuntime:
+        """Stop one task's live attempt. The task shows "canceling" until the robot confirms; the
+        confirmed cancel then takes the task-failure path (bounded recovery) while other tasks keep running."""
+        async with self.lock:
+            m = self._require_mission()
+            if m.status not in ("executing", "recovering"):
+                raise ExecError(f"Mission is {m.status}; no task is running.")
+            rt = m.tasks.get(f"{m.active_revision}:{task_id}")
+            if rt is None:
+                raise ExecError(f"No task {task_id} in revision {m.active_revision}.", 404)
+            att = self.attempts.get(rt.attempt_ids[-1]) if rt.attempt_ids else None
+            if att is None or att.status in TERMINAL_STATUSES:
+                raise ExecError(f"Task {task_id} is {rt.state}; nothing to stop.")
+            if att.task_stop_requested:
+                return rt
+            att.task_stop_requested = True
+            rt.state = "canceling"
+            self.log("cancel", f"Stop requested for {task_id} on {att.robot_id}; waiting for the robot to confirm.",
+                     attempt_id=att.attempt_id)
+            await self.gateway.cancel(self.run_id, att.attempt_id)
+            return rt
+
     def _check_cancel_settled(self, m: Mission) -> None:
         if m.status != "canceling":
             return
@@ -624,8 +648,8 @@ class Executive:
         rt = m.tasks.get(f"{att.revision}:{att.task_id}") if m else None
         if rt:
             rt.progress = ev.progress
-            if ev.status in ("accepted", "running"):
-                rt.state = ev.status
+            if ev.status in ("accepted", "running") and not att.task_stop_requested:
+                rt.state = ev.status  # a stopped task keeps showing "canceling" until confirmed
         if ev.status in ("running",):
             return
         if ev.status == "accepted":
@@ -641,6 +665,8 @@ class Executive:
             rt.state = ev.status
             rt.result, rt.finished_at = ev.result, self.clock()
             rt.error = ev.error.model_dump() if ev.error else None
+            if ev.status == "canceled" and att.task_stop_requested and rt.error is None:
+                rt.error = {"code": "operator_stop", "message": f"Operator stopped {att.task_id}; robot confirmed."}
         self.log("event", f"{att.robot_id} {ev.status} {att.task_id}"
                  + (f": {ev.error.code} - {ev.error.message}" if ev.error else ""),
                  attempt_id=att.attempt_id, result=ev.result)
@@ -658,9 +684,15 @@ class Executive:
         if ev.status in ("failed", "rejected", "uncertain"):
             await self._on_task_failure(m, rt, ev.status)
             return
+        if ev.status == "canceled" and att.task_stop_requested:
+            # Same path as a failed task, except live siblings are left running.
+            await self._on_task_failure(m, rt, "canceled", cancel_siblings=False)
+            return
         if ev.status == "canceled":
             await self._on_task_failure(m, rt, "failed")
             return
+        if att.task_stop_requested:
+            self.log("cancel", f"{att.task_id} reached {ev.status} before the stop landed; result kept.")
         if m.status == "recovering":
             # A sibling settled after the failure (e.g. it passed its commit point before the cancel
             # landed). _tick() only runs while executing, so re-check whether recovery can start.
@@ -702,7 +734,7 @@ class Executive:
             self.log("effect", f"Placement confirmed: {res['object_id']} at {res['location_id']}.")
 
     # ===================================================== failure/recovery
-    async def _on_task_failure(self, m: Mission, rt: TaskRuntime, status: str) -> None:
+    async def _on_task_failure(self, m: Mission, rt: TaskRuntime, status: str, cancel_siblings: bool = True) -> None:
         plan = self._active_plan(m)
         for other in m.tasks.values():
             if other.revision == plan.revision and other.state == "pending":
@@ -714,9 +746,10 @@ class Executive:
                          "no automatic retry of pick/place. Manual reconciliation or reset required."}
         else:
             m.status = "recovering"
-        self.log("failure", f"{rt.task_id} {status}; new dispatch stopped, settling active tasks.")
+        self.log("failure", f"{rt.task_id} {status}; new dispatch stopped, "
+                 + ("settling active tasks." if cancel_siblings else "other active tasks keep running."))
         for a in self.attempts.values():
-            if a.status not in TERMINAL_STATUSES and a.revision == plan.revision:
+            if cancel_siblings and a.status not in TERMINAL_STATUSES and a.revision == plan.revision:
                 await self.gateway.cancel(self.run_id, a.attempt_id)
         m.history.append(f"rev {plan.revision}: {rt.task_id} {status} ({(rt.error or {}).get('code', '')})")
         await self._maybe_recover(m, failed=rt)
@@ -734,7 +767,8 @@ class Executive:
             self._block(m, "Recovery already used for this mission; no further automatic proposals.")
             return
         m.recovery_used = True
-        rt = failed or next((t for t in reversed(list(m.tasks.values())) if t.state in ("failed", "rejected")), None)
+        rt = failed or next((t for t in reversed(list(m.tasks.values())) if t.state in ("failed", "rejected")
+                             or (t.error or {}).get("code") == "operator_stop"), None)
         failure = {"task_id": rt.task_id if rt else None, "robot_id": rt.robot_id if rt else None,
                    "error": rt.error if rt else None,
                    "completed_effects": {r.robot_id: {"location_id": r.location_id, "carrying": r.carried_object}

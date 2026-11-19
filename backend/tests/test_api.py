@@ -8,9 +8,15 @@ from hive_exec.config import ExecSettings, QwenSettings
 from .conftest import DEMO
 
 
-def _client():
-    settings = ExecSettings(sim_time_scale=0.005, default_planner="baseline", qwen=QwenSettings(base_url=""))
+def _client(time_scale=0.005, **kw):
+    settings = ExecSettings(sim_time_scale=time_scale, default_planner="baseline", qwen=QwenSettings(base_url=""),
+                            **kw)
     return TestClient(create_app(settings))
+
+
+def _runtime(s, task_id):
+    m = s["mission"]
+    return m["revisions"][m["active_revision"] - 1]["runtime"][task_id]
 
 
 def _wait(c, statuses, timeout=10):
@@ -56,3 +62,27 @@ def test_http_rejects_unknown_fields_and_faults():
     with _client() as c:
         assert c.post("/api/exec/missions", json={"command": DEMO, "approve": True}).status_code == 422
         assert c.post("/api/exec/faults", json={"fault": "meteor"}).status_code == 400
+
+
+def test_http_task_stop_one_task_then_recovery():
+    with _client(time_scale=0.2) as c:
+        c.post("/api/exec/reset", json={"scenario": "unknown", "faults": ["hang_scan"]})
+        s = c.post("/api/exec/missions", json={"command": DEMO, "planner": "baseline"}).json()
+        rev = s["mission"]["revisions"][-1]
+        scan = next(t["task_id"] for t in rev["tasks"] if t["action"]["kind"] == "scan_route")
+        cam = next(t["task_id"] for t in rev["tasks"] if t["action"]["kind"] == "inspect_area")
+        c.post(f"/api/exec/revisions/{rev['revision']}/approve", json={"proposal_hash": rev["proposal_hash"]})
+        end = time.time() + 5
+        while time.time() < end:
+            s = c.get("/api/exec/state").json()
+            if _runtime(s, scan)["state"] == "accepted" and _runtime(s, cam)["state"] in ("accepted", "running"):
+                break
+            time.sleep(0.01)
+        r = c.post(f"/api/exec/tasks/{scan}/cancel")
+        assert r.status_code == 200
+        assert _runtime(r.json(), scan)["state"] in ("canceling", "canceled")
+        s = _wait(c, {"awaiting_approval", "blocked", "completed"})
+        assert s["mission"]["status"] == "awaiting_approval" and s["mission"]["recovery_used"] is True
+        assert s["mission"]["revisions"][0]["runtime"][scan]["state"] == "canceled"
+        assert s["mission"]["revisions"][0]["runtime"][cam]["state"] == "succeeded"
+        assert c.post("/api/exec/tasks/t99/cancel").status_code == 409  # nothing executing now
