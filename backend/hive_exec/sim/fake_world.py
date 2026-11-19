@@ -12,6 +12,8 @@ servers in ``ros/hive_fake_robots`` reuse the exact same semantics.
 from __future__ import annotations
 
 import copy
+import random
+import secrets
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -38,6 +40,20 @@ DURATION_S = {"navigate_to": 4.0, "inspect_area": 3.0, "capture_image": 2.0, "sc
 ENERGY_PCT = {"navigate_to": 3.0, "inspect_area": 1.0, "capture_image": 0.5, "scan_route": 1.0,
               "pick_object": 2.0, "place_object": 1.0}
 BATTERY_START = 80.0
+
+# Object pool for the random world (synthetic masses). PROFILE_MASS_KG mirrors
+# catalog.OBJECT_PROFILES (a test checks it); UNKNOWN_MASS_KG are labels with no trusted
+# profile, so the planner meets objects it can find but must not carry.
+PROFILE_MASS_KG = {"red_block": 0.10, "blue_block": 0.10, "green_block": 0.10, "duck": 0.05, "tennis_ball": 0.06,
+                   "traffic_cone": 0.20, "rc_car": 1.20, "cardboard_box": 0.40, "water_bottle": 0.50}
+UNKNOWN_MASS_KG = {"mystery_crate": 0.30, "plush_toy": 0.08, "coffee_mug": 0.30}
+WORLD_KINDS = ("fixed", "random")
+RANDOM_MAX_OBJECTS = 5
+RANDOM_OBJECT_LOCATIONS = ("pickup_zone", "work_area")  # camera-observable; gripper reaches only pickup_zone
+RANDOM_GRIPPER_STARTS = ("dropoff_zone", "pickup_zone")
+RANDOM_BLOCKED_P = 0.25
+RANDOM_DUPLICATE_P = 0.2
+RANDOM_BATTERY_PCT = (35.0, 100.0)
 
 KNOWN_FAULTS = {
     "route_blocked": "Obstacle in pickup_corridor (scan reports blocked; navigation fails).",
@@ -69,7 +85,12 @@ class Outcome:
 class FakeWorld:
     """Hidden simulator truth for one run."""
 
-    def __init__(self, faults: Optional[list[str]] = None):
+    def __init__(self, faults: Optional[list[str]] = None, seed: Optional[int] = None, world: str = "fixed"):
+        if world not in WORLD_KINDS:
+            raise ValueError(f"unknown world {world!r} (expected one of {list(WORLD_KINDS)})")
+        _check_seed(seed)
+        self.kind = world
+        self.seed: Optional[int] = None
         self.objects: dict[str, dict[str, Any]] = {
             "red_block_1": {"label": "red_block", "location_id": "pickup_zone", "held_by": None, "mass_kg": 0.10},
         }
@@ -78,9 +99,30 @@ class FakeWorld:
             rid: {"location_id": loc, "battery_pct": BATTERY_START, "carried": None, "health": "ok", "available": True}
             for rid, loc in START_LOCATIONS.items()
         }
+        if world == "random":
+            self.seed = secrets.randbits(32) if seed is None else seed
+            self._randomize(random.Random(self.seed))
         self.faults: set[str] = set()
         for f in faults or []:
             self.inject(f)
+
+    def _randomize(self, rng: random.Random) -> None:
+        """Every random choice goes through ``rng`` (seeded), so a seed replays the world."""
+        pool = sorted(PROFILE_MASS_KG) + sorted(UNKNOWN_MASS_KG)
+        labels: list[str] = []
+        for _ in range(rng.randint(0, RANDOM_MAX_OBJECTS)):
+            dup = labels and rng.random() < RANDOM_DUPLICATE_P
+            labels.append(rng.choice(labels) if dup else rng.choice(pool))
+        objects: dict[str, dict[str, Any]] = {}
+        for label in labels:
+            oid = _next_id(objects, label)
+            objects[oid] = {"label": label, "location_id": rng.choice(RANDOM_OBJECT_LOCATIONS), "held_by": None,
+                            "mass_kg": PROFILE_MASS_KG.get(label, UNKNOWN_MASS_KG.get(label))}
+        self.objects = objects
+        self.obstacles = {"pickup_corridor"} if rng.random() < RANDOM_BLOCKED_P else set()
+        self.robots["gripper_01"]["location_id"] = rng.choice(RANDOM_GRIPPER_STARTS)
+        for rid in sorted(self.robots):
+            self.robots[rid]["battery_pct"] = round(rng.uniform(*RANDOM_BATTERY_PCT), 1)
 
     # ------------------------------------------------------------- faults
     def inject(self, fault: str) -> None:
@@ -92,7 +134,10 @@ class FakeWorld:
         elif fault == "block_missing":
             self.objects = {k: v for k, v in self.objects.items() if v["label"] != "red_block" or v["held_by"]}
         elif fault == "two_red_blocks":
-            self.objects["red_block_2"] = {"label": "red_block", "location_id": "pickup_zone", "held_by": None, "mass_kg": 0.10}
+            # ensure at least two free red blocks (the fixed world gains red_block_2, as before)
+            while sum(o["label"] == "red_block" and o["held_by"] is None for o in self.objects.values()) < 2:
+                self.objects[_next_id(self.objects, "red_block")] = {
+                    "label": "red_block", "location_id": "pickup_zone", "held_by": None, "mass_kg": 0.10}
         elif fault == "gripper_unavailable":
             self.robots["gripper_01"]["available"] = False
         elif fault == "low_battery_gripper":
@@ -229,5 +274,24 @@ class FakeWorld:
 
     def snapshot(self) -> dict[str, Any]:
         """Debug view of hidden truth (never sent to the planner or normal map)."""
-        return copy.deepcopy({"objects": self.objects, "obstacles": sorted(self.obstacles),
+        return copy.deepcopy({"world": self.kind, "seed": self.seed, "objects": self.objects,
+                              "obstacles": sorted(self.obstacles),
+                              "corridor": {r: ("blocked" if r in self.obstacles else "clear") for r in ROUTES},
                               "robots": self.robots, "faults": sorted(self.faults)})
+
+
+def _next_id(objects: dict[str, Any], label: str) -> str:
+    n = 1
+    while f"{label}_{n}" in objects:
+        n += 1
+    return f"{label}_{n}"
+
+
+def _check_seed(seed: Any) -> None:
+    if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int) or seed < 0):
+        raise ValueError(f"seed must be a non-negative integer, got {seed!r}")
+
+
+def world_from_args(args: dict[str, Any]) -> FakeWorld:
+    """Build a world from reset arguments (fake gateway and ROS fake fleet share this)."""
+    return FakeWorld(list(args.get("faults") or []), seed=args.get("seed"), world=args.get("world") or "fixed")

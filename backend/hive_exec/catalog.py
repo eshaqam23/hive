@@ -7,6 +7,7 @@ for a task are derived from this catalog, never from model claims.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -153,14 +154,42 @@ class ObjectProfile:
     label: str
     mass_kg: float
     description: str
+    aliases: tuple[str, ...] = ()
+    synthetic: bool = True  # every mass below is a synthetic fixture value (SYNTHETIC_NOTE)
 
 
-# Trusted object profiles: mass comes from the profile, not from perception.
-OBJECT_PROFILES: dict[str, ObjectProfile] = {
-    "red_block": ObjectProfile("red_block", 0.10, "small red foam block (compatible profile)"),
-    "blue_block": ObjectProfile("blue_block", 0.10, "small blue foam block"),
-    "green_block": ObjectProfile("green_block", 0.10, "small green foam block"),
-}
+# Object labels are open vocabulary (lowercase snake_case). A profile makes an object
+# carriable: its mass comes from the profile, never from perception. Labels without a
+# profile can be found and photographed but not picked up.
+LABEL_PATTERN = r"^[a-z][a-z0-9_]{0,31}$"
+
+OBJECT_PROFILES: dict[str, ObjectProfile] = {p.label: p for p in (
+    ObjectProfile("red_block", 0.10, "small red foam block (compatible profile)", ("red_box", "red_cube", "red_brick")),
+    ObjectProfile("blue_block", 0.10, "small blue foam block", ("blue_box", "blue_cube", "blue_brick")),
+    ObjectProfile("green_block", 0.10, "small green foam block", ("green_box", "green_cube", "green_brick")),
+    ObjectProfile("duck", 0.05, "rubber toy duck", ("rubber_duck", "toy_duck", "rubber_ducky")),
+    ObjectProfile("tennis_ball", 0.06, "tennis ball", ("tennisball", "yellow_ball")),
+    ObjectProfile("traffic_cone", 0.20, "small orange traffic cone", ("cone", "safety_cone", "orange_cone")),
+    ObjectProfile("rc_car", 1.20, "remote-control toy car (over the gripper payload)",
+                  ("toy_car", "rc_truck", "rc_vehicle", "remote_control_car")),
+    ObjectProfile("cardboard_box", 0.40, "small cardboard box", ("carton", "shipping_box")),
+    ObjectProfile("water_bottle", 0.50, "full plastic water bottle", ("bottle", "plastic_bottle")),
+)}
+
+LABEL_ALIASES: dict[str, str] = {a: p.label for p in OBJECT_PROFILES.values() for a in p.aliases}
+
+
+def canonical_label(label: str) -> str:
+    """Deterministic label normalisation: case/space/hyphen folding, then the alias map.
+
+    Unknown labels pass through (normalised) so open-vocabulary objects keep their name.
+    """
+    norm = re.sub(r"[\s\-]+", "_", label.strip().lower())
+    return LABEL_ALIASES.get(norm, norm)
+
+
+def profile_for(label: Optional[str]) -> Optional[ObjectProfile]:
+    return OBJECT_PROFILES.get(canonical_label(label)) if label else None
 
 BATTERY_START_PCT = 80.0
 BATTERY_RESERVE_PCT = 20.0

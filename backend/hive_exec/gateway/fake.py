@@ -48,7 +48,8 @@ class FakeGateway(RobotGateway):
     async def debug_truth(self) -> dict[str, Any]:
         return self.world.snapshot()
 
-    async def reset(self, run_id: str, faults: Optional[list[str]] = None) -> None:
+    async def reset(self, run_id: str, faults: Optional[list[str]] = None, world: str = "fixed",
+                    seed: Optional[int] = None) -> dict[str, Any]:
         for ev in self._cancel.values():
             ev.set()
         tasks = [t for t in self._tasks.values() if not t.done()]
@@ -59,8 +60,9 @@ class FakeGateway(RobotGateway):
         self._tasks.clear()
         self._cancel.clear()
         self._busy.clear()
-        self.world = FakeWorld(faults)
+        self.world = FakeWorld(faults, seed=seed, world=world)
         self.run_id = run_id
+        return {"world": self.world.kind, "seed": self.world.seed}
 
     async def submit(self, env: TaskEnvelope) -> SubmitReceipt:
         if env.run_id != self.run_id:

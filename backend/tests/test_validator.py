@@ -130,3 +130,63 @@ def test_query_resolves_to_unique_observed_instance():
     res, _ = run(_proposal(tasks))
     assert res.report.ok
     assert res.tasks[1].action.object_id == "red_block_1"
+
+
+# -- open-vocabulary carry rules ------------------------------------------------------
+
+
+def _world_with(oid, label, route="route_clear"):
+    w = ObservedWorld()
+    w.accept(Observation(kind="object_seen", entity_id=oid, label=label, location_id="pickup_zone",
+                         area_id="work_area"), "camera_01")
+    w.accept(Observation(kind=route, entity_id="pickup_corridor", route_id="pickup_corridor"), "lidar_01")
+    return w
+
+
+def _carry(oid, label):
+    pick = {"kind": "pick_object", "object_id": oid}
+    place = {"kind": "place_object", "object_id": oid, "location_id": "dropoff_zone"}
+    tasks = [_t("t1", "carrier", NAV_PICKUP), _t("t2", "carrier", pick, ["t1"]),
+             _t("t3", "carrier", NAV_DROP, ["t2"]), _t("t4", "carrier", place, ["t3"])]
+    return _proposal(tasks, goals=[{"kind": "object_at", "object_query": {"label": label},
+                                    "location_id": "dropoff_zone"}])
+
+
+def test_pick_of_a_profiled_open_vocab_object_validates():
+    res, _ = run(_carry("duck_1", "duck"), world=_world_with("duck_1", "duck"))
+    assert res.report.ok, res.report.findings
+
+
+def test_pick_of_an_object_without_profile_is_an_error():
+    res, _ = run(_carry("mystery_crate_1", "mystery_crate"), world=_world_with("mystery_crate_1", "mystery_crate"))
+    assert "unknown_object_profile" in codes(res)
+
+
+def test_pick_by_query_of_an_unknown_label_is_an_error_even_unlocated():
+    tasks = [_t("t1", "carrier", NAV_PICKUP),
+             _t("t2", "carrier", {"kind": "pick_object", "object_query": {"label": "plush_toy"}}, ["t1"])]
+    res, _ = run(_proposal(tasks, scope="observation_stage"))
+    assert "unknown_object_profile" in codes(res)
+    assert sum(f.code == "unknown_object_profile" for f in res.report.findings) == 1
+
+
+def test_pick_over_payload_uses_the_existing_finding():
+    res, _ = run(_carry("rc_car_1", "rc_car"), world=_world_with("rc_car_1", "rc_car"))
+    assert "over_payload" in codes(res) and "unknown_object_profile" not in codes(res)
+
+
+def test_pick_by_alias_query_resolves_the_canonical_object():
+    tasks = [_t("t1", "carrier", NAV_PICKUP),
+             _t("t2", "carrier", {"kind": "pick_object", "object_query": {"label": "toy_car"}}, ["t1"])]
+    res, _ = run(_proposal(tasks, scope="observation_stage"), world=_world_with("rc_car_1", "rc_car"))
+    assert res.tasks[1].action.object_id == "rc_car_1"
+    assert "over_payload" in codes(res)
+
+
+def test_sensing_accepts_any_label():
+    tasks = [_t("t1", "observer", {"kind": "inspect_area", "area_id": "work_area",
+                                   "object_query": {"label": "mystery_crate"}}),
+             _t("t2", "observer", {"kind": "capture_image", "area_id": "pickup_zone"}, ["t1"])]
+    goals = [{"kind": "object_located", "object_query": {"label": "mystery_crate"}, "area_id": "work_area"}]
+    res, _ = run(_proposal(tasks, goals=goals))
+    assert res.report.ok, res.report.findings

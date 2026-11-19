@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from .catalog import OBJECT_PROFILES, ROBOTS, ROUTES
+from .catalog import ROBOTS, ROUTES
 from .contracts import Goal
 from .world import ObservedWorld, RobotState
 
@@ -81,7 +81,10 @@ def build_context(
 
     unresolved: list[str] = []
     goal_labels = {g.object_query.label for g in (canonical_goals or []) if hasattr(g, "object_query")}
-    for label in sorted(goal_labels or OBJECT_PROFILES):
+    # Open vocabulary: only labels the mission asks about (or, without goals, labels already
+    # observed) are worth flagging; listing every profile would imply a closed world.
+    seen_labels = {o["label"] for o in objects}
+    for label in sorted(goal_labels or seen_labels):
         n = len(world.instances(label))
         if n == 0 and not any(a["label"] == label for a in absences):
             unresolved.append(f"location of {label} unknown (no fresh observation)")

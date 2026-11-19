@@ -33,7 +33,15 @@ def _catalog_text() -> str:
     lines.append("LOCATIONS: " + ", ".join(
         f"{l.location_id}" + (f" (inside {l.within})" if l.within else "") for l in LOCATIONS.values()))
     lines.append("ROUTES: " + ", ".join(f"{r.route_id} ({r.a} <-> {r.b})" for r in ROUTES.values()))
-    lines.append("OBJECT LABELS: " + ", ".join(OBJECT_PROFILES))
+    lines.append("OBJECT LABELS: open vocabulary in lowercase snake_case (e.g. duck, rc_car, mystery_crate); "
+                 "use the operator's own object name, or the profile label when the name is a listed synonym.")
+    lines.append("Known objects with a trusted profile (mass known), synthetic values; synonyms map "
+                 "to the same label:")
+    for p in OBJECT_PROFILES.values():
+        lines.append(f"- {p.label} ({p.mass_kg} kg" + (f"; also called {', '.join(p.aliases)}" if p.aliases else "")
+                     + ")")
+    lines.append("Objects without a trusted profile can be found but not carried (pick_object needs a known "
+                 "mass); the same holds for an object heavier than the gripper payload.")
     return "\n".join(lines)
 
 

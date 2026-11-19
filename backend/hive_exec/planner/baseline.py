@@ -10,11 +10,27 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
+from ..catalog import OBJECT_PROFILES
 from ..context import PlanningContext
 from ..contracts import PlanProposal, PlannerRecord
 from .base import Planner, PlannerOutput
 
-LABELS = {"red": "red_block", "blue": "blue_block", "green": "green_block"}
+LABELS = {"red": "red_block", "blue": "blue_block", "green": "green_block"}  # bare colour words (fallback)
+# Every profile label and alias as a phrase ("rubber duck" -> duck), longest first for ties.
+LABEL_PHRASES = sorted({name.replace("_", " "): p.label for p in OBJECT_PROFILES.values()
+                        for name in (p.label, *p.aliases)}.items(), key=lambda kv: -len(kv[0]))
+
+
+def find_label(text: str) -> Optional[str]:
+    """First profiled object named in text (label or alias); else a bare colour word."""
+    t = re.sub(r"[_-]+", " ", text.lower())
+    hits = [(m.start(), -len(phrase), label) for phrase, label in LABEL_PHRASES
+            for m in [re.search(rf"\b{re.escape(phrase)}\b", t)] if m]
+    if hits:
+        return min(hits)[2]
+    return next((v for k, v in LABELS.items() if re.search(rf"\b{k}\b", t)), None)
+
+
 UNSUPPORTED = re.compile(r"\b(fly|drone|cook|paint|swim|climb|stairs|weld|charge|dance|open the door|elevator)\b")
 
 
@@ -35,8 +51,9 @@ def parse_goals(text: str) -> tuple[list[dict], list[str], Optional[str]]:
     t = text.lower()
     if UNSUPPORTED.search(t):
         return [], [f"unsupported request: '{UNSUPPORTED.search(t).group(0)}' has no matching skill"], None
-    label = next((v for k, v in LABELS.items() if re.search(rf"\b{k}\b", t)), None)
-    deliver = re.search(r"\b(bring|deliver|carry|move|take|transport|fetch)\b", t) and re.search(r"\b(block|object|it)\b", t)
+    label = find_label(t)
+    deliver = re.search(r"\b(bring|deliver|carry|move|take|transport|fetch)\b", t) and (
+        label or re.search(r"\b(block|object|it)\b", t))
     photo = re.search(r"\b(picture|photo|image|snapshot)\b", t)
     find = re.search(r"\b(find|locate|look for|search|inspect|where)\b", t)
     scan = re.search(r"\b(scan|check|survey)\b", t) and re.search(r"\b(corridor|route|path)\b", t)
@@ -46,16 +63,16 @@ def parse_goals(text: str) -> tuple[list[dict], list[str], Optional[str]]:
 
     if deliver and not photo:
         if not label:
-            return [], ["no block label given"], "Which block should I move: red, blue or green?"
+            return [], ["no object label given"], "Which object should I move? (e.g. the red block)"
         if not dest:
-            return [], ["destination is not a named location"], "Where should the block go? (e.g. the drop-off area)"
+            return [], ["destination is not a named location"], "Where should it go? (e.g. the drop-off area)"
         return [{"kind": "object_at", "object_query": {"label": label}, "location_id": dest}], [], None
     goals: list[dict] = []
     if photo:
         goals.append({"kind": "image_captured", "area_id": area})
     if find:
         if not label:
-            return [], ["no object label given"], "Which object should I look for: red, blue or green block?"
+            return [], ["no object label given"], "Which object should I look for? (e.g. the red block)"
         goals.append({"kind": "object_located", "object_query": {"label": label}, "area_id": area})
     if scan:
         goals.append({"kind": "route_observed", "route_id": "pickup_corridor"})

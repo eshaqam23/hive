@@ -155,3 +155,51 @@ def test_http_map_stub():
     with _client() as c:
         assert c.get("/api/exec/map").json() == {
             "available": False, "reason": "shared perception not built yet", "schema": "hive.shared-map.v0"}
+
+
+# -- sim world plumbing ------------------------------------------------------------------
+
+
+def test_http_reset_world_and_seed_show_in_state_export_and_truth(monkeypatch):
+    monkeypatch.delenv("HIVE_SIM_WORLD", raising=False)
+    with _client() as c:
+        assert c.get("/api/exec/state").json()["sim"] == {"world": "fixed", "seed": None}
+        r = c.post("/api/exec/reset", json={"scenario": "unknown", "world": "random", "seed": 1234})
+        assert r.status_code == 200
+        assert c.get("/api/exec/state").json()["sim"] == {"world": "random", "seed": 1234}
+        assert c.get("/api/exec/export").json()["sim"] == {"world": "random", "seed": 1234}
+        truth = c.get("/api/exec/debug/truth").json()
+        assert "simulation" in truth["warning"].lower() or "truth" in truth["warning"].lower()
+        t = truth["truth"]
+        assert t["world"] == "random" and t["seed"] == 1234
+        assert set(t["corridor"]) == {"pickup_corridor"}
+        assert all({"label", "location_id", "held_by"} <= set(o) for o in t["objects"].values())
+        assert all({"location_id", "battery_pct"} <= set(r) for r in t["robots"].values())
+        c.post("/api/exec/reset", json={"scenario": "unknown"})
+        assert c.get("/api/exec/state").json()["sim"] == {"world": "fixed", "seed": None}
+
+
+def test_http_reset_rejects_bad_world_or_seed():
+    with _client() as c:
+        assert c.post("/api/exec/reset", json={"world": "chaos"}).status_code == 422
+        assert c.post("/api/exec/reset", json={"world": "random", "seed": -1}).status_code == 422
+        assert c.post("/api/exec/reset", json={"world": "random", "seed": "abc"}).status_code == 422
+
+
+def test_http_env_random_world_is_the_default(monkeypatch):
+    monkeypatch.setenv("HIVE_SIM_WORLD", "random")
+    with _client() as c:
+        sim = c.get("/api/exec/state").json()["sim"]
+        assert sim["world"] == "random" and isinstance(sim["seed"], int)
+        c.post("/api/exec/reset", json={"scenario": "unknown"})
+        assert c.get("/api/exec/state").json()["sim"]["world"] == "random"
+        c.post("/api/exec/reset", json={"scenario": "unknown", "world": "fixed"})
+        assert c.get("/api/exec/state").json()["sim"] == {"world": "fixed", "seed": None}
+
+
+def test_http_env_bad_world_fails_loudly(monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("HIVE_SIM_WORLD", "chaos")
+    with pytest.raises(ValueError, match="HIVE_SIM_WORLD"):
+        create_app(ExecSettings(default_planner="baseline", qwen=QwenSettings(base_url="")))

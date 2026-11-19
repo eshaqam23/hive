@@ -55,8 +55,13 @@ class RobotGateway(ABC):
     async def active_attempts(self) -> list[str]: ...
 
     @abstractmethod
-    async def reset(self, run_id: str, faults: Optional[list[str]] = None) -> None:
-        """Coordinated reset: stop all fake work and start a fresh simulated world for run_id."""
+    async def reset(self, run_id: str, faults: Optional[list[str]] = None, world: str = "fixed",
+                    seed: Optional[int] = None) -> dict[str, Any]:
+        """Coordinated reset: stop all fake work and start a fresh simulated world for run_id.
+
+        world is "fixed" (the demo world) or "random" (built from seed). Returns the world the
+        fleet actually built: {"world": kind, "seed": seed or None}.
+        """
 
     @abstractmethod
     async def inject_fault(self, fault: str) -> None: ...

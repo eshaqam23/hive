@@ -349,3 +349,155 @@ async def test_no_runs_dir_means_no_files(make_exec, tmp_path, monkeypatch):
     assert not list(tmp_path.rglob("*.json"))
     cmd = ex.state()["mission"]["revisions"][0]["tasks"][0]["agent_command"]
     assert cmd["envelope"] is not None and cmd["file"] is None
+
+
+# -- open vocabulary + random sim world -----------------------------------------------
+
+
+async def test_reset_random_world_records_seed_and_robot_start_state(make_exec):
+    from hive_exec.sim.fake_world import FakeWorld
+
+    seed = next(s for s in range(200) if FakeWorld(seed=s, world="random").robots["gripper_01"]["location_id"]
+                == "pickup_zone")
+    ex = await make_exec()
+    assert ex.state()["sim"] == {"world": "fixed", "seed": None}
+    await ex.reset("unknown", [], world="random", seed=seed)
+    s = ex.state()
+    assert s["sim"] == {"world": "random", "seed": seed}
+    truth = await ex.gateway.debug_truth()
+    assert truth["seed"] == seed and truth["world"] == "random"
+    for rid, r in truth["robots"].items():
+        assert ex.robots[rid].location_id == r["location_id"]
+        assert ex.robots[rid].battery_pct == pytest.approx(r["battery_pct"])
+    assert ex.robots["gripper_01"].location_id == "pickup_zone"
+    assert ex.export()["sim"] == {"world": "random", "seed": seed}
+    assert f"seed={seed}" in ex.timeline[-1]["message"] or any(f"seed={seed}" in e["message"] for e in ex.timeline)
+
+
+async def test_reset_random_without_seed_picks_one_that_replays(make_exec):
+    ex = await make_exec()
+    await ex.reset("unknown", [], world="random")
+    seed = ex.state()["sim"]["seed"]
+    assert isinstance(seed, int)
+    first = await ex.gateway.debug_truth()
+    await ex.reset("unknown", [], world="random", seed=seed)
+    again = await ex.gateway.debug_truth()
+    assert first["objects"] == again["objects"] and first["robots"] == again["robots"]
+
+
+async def test_executive_default_world_applies_to_start_and_plain_reset():
+    from hive_exec.executive import Executive
+
+    ex = Executive(FakeGateway(time_scale=0.005), {"baseline": BaselinePlanner()}, default_planner="baseline",
+                   sim_world="random")
+    await ex.start()
+    try:
+        assert ex.state()["sim"]["world"] == "random" and isinstance(ex.state()["sim"]["seed"], int)
+        await ex.reset("unknown")
+        assert ex.state()["sim"]["world"] == "random"
+        await ex.reset("unknown", world="fixed")
+        assert ex.state()["sim"] == {"world": "fixed", "seed": None}
+    finally:
+        await ex.gateway.stop()
+
+
+def test_executive_rejects_an_unknown_default_world():
+    from hive_exec.executive import Executive
+
+    with pytest.raises(ValueError):
+        Executive(FakeGateway(), {"baseline": BaselinePlanner()}, sim_world="chaos")
+
+
+async def test_reset_logs_when_the_gateway_ignores_the_world(make_exec):
+    ex = await make_exec()
+
+    async def old_fleet_reset(run_id, faults=None, world="fixed", seed=None):
+        await FakeGateway.reset(ex.gateway, run_id, faults)  # an old fleet: always the fixed world
+        return {"world": "fixed", "seed": None}
+
+    ex.gateway.reset = old_fleet_reset
+    await ex.reset("unknown", [], world="random", seed=9)
+    assert ex.state()["sim"] == {"world": "fixed", "seed": None}
+    assert any("ignored" in e["message"] for e in ex.timeline)
+
+
+async def test_story_open_vocab_delivery_in_a_random_world(make_exec):
+    from hive_exec.sim.fake_world import FakeWorld
+
+    def good(s):
+        w = FakeWorld(seed=s, world="random")
+        ducks = [o for o in w.objects.values() if o["label"] == "duck"]
+        return (len(ducks) == 1 and ducks[0]["location_id"] == "pickup_zone" and not w.obstacles
+                and all(r["battery_pct"] > 50 for r in w.robots.values()))
+
+    seed = next(s for s in range(5000) if good(s))
+    ex = await make_exec()
+    await ex.reset("unknown", [], world="random", seed=seed)
+    await ex.create_mission("Find the rubber duck in the work area, check the pickup corridor, "
+                            "and bring the duck to the drop-off area.")
+    goals = ex.mission.revisions[-1].proposal.mission_goals
+    assert goals[0].object_query.label == "duck"
+    await approve_latest(ex)
+    await wait_for(ex, {"awaiting_approval"} | DONE)
+    assert ex.mission.revisions[-1].proposal.scope == "full"
+    await approve_latest(ex)
+    assert await wait_for(ex, DONE) == "completed"
+    assert ex.world.objects["duck_1"].location_id == "dropoff_zone"
+
+
+def test_initial_context_lists_no_unasked_object_labels():
+    from hive_exec.world import ObservedWorld, initial_robot_states
+
+    ctx = build_context(phase="initial", command="Find the duck.", robots=initial_robot_states(),
+                        world=ObservedWorld())
+    assert ctx.unresolved == ["clearance of pickup_corridor unknown (no fresh scan)"]
+
+
+def test_context_flags_ambiguity_of_any_observed_label():
+    from hive_exec.contracts import Observation
+    from hive_exec.world import ObservedWorld, initial_robot_states
+
+    w = ObservedWorld()
+    for oid in ("traffic_cone_1", "traffic_cone_2"):
+        w.accept(Observation(kind="object_seen", entity_id=oid, label="traffic_cone", location_id="pickup_zone",
+                             area_id="work_area"), "camera_01")
+    ctx = build_context(phase="initial", command="x", robots=initial_robot_states(), world=w)
+    assert "2 instances of traffic_cone observed: ambiguous" in ctx.unresolved
+
+
+@pytest.mark.parametrize("text,goal", [
+    ("Find the duck.", {"kind": "object_located", "object_query": {"label": "duck"}, "area_id": "work_area"}),
+    ("Find a red box in the feild", {"kind": "object_located", "object_query": {"label": "red_block"},
+                                     "area_id": "work_area"}),
+    ("Locate the traffic cone", {"kind": "object_located", "object_query": {"label": "traffic_cone"},
+                                 "area_id": "work_area"}),
+    ("Bring the toy car to the drop-off area", {"kind": "object_at", "object_query": {"label": "rc_car"},
+                                                "location_id": "dropoff_zone"}),
+    ("Find the red block", {"kind": "object_located", "object_query": {"label": "red_block"}, "area_id": "work_area"}),
+])
+def test_baseline_reads_any_profiled_label_or_alias(text, goal):
+    from hive_exec.planner.baseline import parse_goals
+
+    goals, issues, question = parse_goals(text)
+    assert goals == [goal] and not issues and question is None
+
+
+async def test_synapse_reset_passes_world_and_seed_through():
+    from hive_exec.gateway.synapse import SynapseGateway
+
+    gw = SynapseGateway("ws://127.0.0.1:1")
+    sent = []
+
+    async def fake_request(op, **payload):
+        sent.append((op, payload))
+        return {"run_id": payload["run_id"], "settled": True, "world": payload.get("world"), "seed": payload.get("seed")}
+
+    gw._request = fake_request
+    assert await gw.reset("run-x", ["route_blocked"], world="random", seed=5) == {"world": "random", "seed": 5}
+    assert sent == [("reset", {"run_id": "run-x", "faults": ["route_blocked"], "world": "random", "seed": 5})]
+
+    async def old_fleet(op, **payload):
+        return {"run_id": payload["run_id"], "settled": True}
+
+    gw._request = old_fleet
+    assert await gw.reset("run-y", world="random", seed=5) == {"world": "fixed", "seed": None}

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .allocator import Allocation, binding_tasks
-from .catalog import BATTERY_RESERVE_PCT, OBJECT_PROFILES, ROBOTS, SKILLS, route_between
+from .catalog import BATTERY_RESERVE_PCT, ROBOTS, SKILLS, profile_for, route_between
 from .contracts import (
     AllocatedTask,
     Goal,
@@ -202,6 +202,16 @@ def validate(
                     proj_obj[proj_carry[rid]]["location_id"] = a.location_id
         elif a.kind == "pick_object":
             oid = resolve(t, allow_held=False)
+            # Carry rule: only an object with a trusted profile (mass known) can be picked; checked from
+            # the label even when the object is not located yet, so the planner learns it early.
+            label = proj_obj[oid]["label"] if oid else (a.object_query.label if a.object_query else None)
+            if label is not None:
+                profile = profile_for(label)
+                if profile is None:
+                    err("unknown_object_profile", f"No trusted profile for {label}: {rid} cannot verify its mass, "
+                        "so it can be found and photographed but not carried.", t.task_id)
+                elif profile.mass_kg > desc.payload_limit_kg:
+                    err("over_payload", f"{label} {profile.mass_kg} kg exceeds {desc.payload_limit_kg} kg.", t.task_id)
             if oid:
                 action = a.model_copy(update={"object_id": oid, "object_query": None})
                 o = proj_obj[oid]
@@ -212,11 +222,6 @@ def validate(
                         f"{rid} would be at {proj_loc.get(rid)} but {oid} is observed at {o['location_id']}.", t.task_id)
                 if proj_carry.get(rid):
                     err("capacity", f"{rid} would already hold {proj_carry[rid]} (capacity {desc.capacity}).", t.task_id)
-                profile = OBJECT_PROFILES.get(o["label"])
-                if profile is None:
-                    err("unknown_profile", f"No trusted profile for {o['label']}.", t.task_id)
-                elif profile.mass_kg > desc.payload_limit_kg:
-                    err("over_payload", f"{o['label']} {profile.mass_kg} kg exceeds {desc.payload_limit_kg} kg.", t.task_id)
                 proj_carry[rid] = oid
                 o["held_by"] = rid
                 o["location_id"] = proj_loc.get(rid)

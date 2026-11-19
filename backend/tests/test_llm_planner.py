@@ -262,3 +262,18 @@ async def test_propose_does_not_wait_for_a_probe(make_exec):
     ex = await make_exec(planners={"llm": planner})
     await ex.create_mission(DEMO)
     assert ex.mission.status == "awaiting_approval" and len(mock.requests) == 1
+
+
+def test_catalog_text_presents_labels_as_open_vocabulary():
+    from hive_exec.catalog import OBJECT_PROFILES
+    from hive_exec.planner.prompt import RULES, _catalog_text, system_prompt
+
+    text = _catalog_text()
+    assert "OBJECT LABELS: red_block, blue_block, green_block" not in text
+    assert "open vocabulary" in text and "lowercase snake_case" in text
+    assert "objects with a trusted profile (mass known)" in text
+    assert "can be found but not carried" in text
+    for label, prof in OBJECT_PROFILES.items():
+        assert f"{label} ({prof.mass_kg} kg" in text
+    assert "rubber_duck" in text  # aliases are listed so the model can map synonyms
+    assert RULES in system_prompt()

@@ -194,13 +194,16 @@ class SynapseGateway(RobotGateway):
     async def active_attempts(self) -> list[str]:
         return sorted(self._active)
 
-    async def reset(self, run_id: str, faults: Optional[list[str]] = None) -> None:
-        r = await self._request("reset", run_id=run_id, faults=list(faults or []))
+    async def reset(self, run_id: str, faults: Optional[list[str]] = None, world: str = "fixed",
+                    seed: Optional[int] = None) -> dict[str, Any]:
+        r = await self._request("reset", run_id=run_id, faults=list(faults or []), world=world, seed=seed)
         self._active.clear()
         self._roundtrips = 0
         self.run_id = run_id
         if not r.get("settled", True):
             log.warning("fake servers did not settle before reset")
+        # a fleet built before world support ignores world/seed and runs the fixed world
+        return {"world": r.get("world") or "fixed", "seed": r.get("seed")}
 
     async def inject_fault(self, fault: str) -> None:
         await self._request("inject_fault", fault=fault)

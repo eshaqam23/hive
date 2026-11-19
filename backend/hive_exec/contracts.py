@@ -12,6 +12,8 @@ from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .catalog import LABEL_PATTERN, canonical_label
+
 PLAN_PROPOSAL_SCHEMA = "hive.plan-proposal.v1"
 TASK_ENVELOPE_SCHEMA = "hive.task-envelope.v1"
 TASK_EVENT_SCHEMA = "hive.task-event.v1"
@@ -26,12 +28,14 @@ RobotId = Literal["camera_01", "lidar_01", "gripper_01"]
 LocationId = Literal["camera_post", "lidar_post", "pickup_zone", "dropoff_zone", "work_area"]
 AreaId = Literal["work_area", "pickup_zone", "dropoff_zone"]
 RouteId = Literal["pickup_corridor"]
-ObjectLabel = Literal["red_block", "blue_block", "green_block"]
+# Object labels are open vocabulary (lowercase snake_case); catalog.OBJECT_PROFILES says
+# which labels have a trusted profile (mass known) and may therefore be carried.
+ObjectLabel = Annotated[str, Field(pattern=LABEL_PATTERN)]
 SkillKind = Literal[
     "navigate_to", "inspect_area", "capture_image", "scan_route", "pick_object", "place_object"
 ]
 
-ObjectId = Annotated[str, Field(pattern=r"^[a-z_]{1,24}_[0-9]{1,3}$")]
+ObjectId = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,31}_[0-9]{1,3}$")]
 TaskId = Annotated[str, Field(pattern=r"^t[0-9]{1,2}$")]
 BindingId = Annotated[str, Field(pattern=r"^[a-z_]{1,32}$")]
 ShortText = Annotated[str, Field(min_length=1, max_length=280)]
@@ -43,6 +47,13 @@ class Strict(BaseModel):
 
 class ObjectQuery(Strict):
     label: ObjectLabel
+
+    # The one place labels are canonicalised (aliases such as red_box -> red_block). It runs
+    # before the pattern check, so hashes, validation, matching and envelopes see canonical labels.
+    @field_validator("label", mode="before")
+    @classmethod
+    def _canonical(cls, v: Any) -> Any:
+        return canonical_label(v) if isinstance(v, str) else v
 
 
 # --------------------------------------------------------------------- actions

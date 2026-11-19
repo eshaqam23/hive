@@ -13,6 +13,7 @@ import hashlib
 import itertools
 import json
 import os
+import random
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -21,7 +22,7 @@ from typing import Any, Callable, Optional
 
 from .agent_commands import describe_command, write_command
 from .allocator import Allocator, CapabilityAllocator
-from .catalog import BATTERY_RESERVE_PCT, ROBOTS, SKILLS, catalog_dict, route_between
+from .catalog import BATTERY_RESERVE_PCT, LOCATIONS, ROBOTS, SKILLS, catalog_dict, route_between
 from .context import ContextBudgetExceeded, build_context
 from .contracts import (
     RUN_EXPORT_SCHEMA,
@@ -42,6 +43,7 @@ from .planner.base import Planner, PlannerError
 from .validator import ValidationResult, validate
 from .world import ObservedWorld, RobotState, initial_robot_states
 
+SIM_WORLDS = ("fixed", "random")
 TERMINAL_MISSION = {"completed", "blocked", "rejected", "canceled", "planner_error"}
 MAX_STAGES = 4
 PRE_DISPATCH_FAIL = "precondition_failed"
@@ -111,8 +113,12 @@ def _hash(obj: Any) -> str:
 class Executive:
     def __init__(self, gateway: RobotGateway, planners: dict[str, Planner], allocator: Optional[Allocator] = None,
                  clock: Callable[[], float] = time.time, default_planner: str = "llm",
-                 runs_dir: Optional[Path] = None):
+                 runs_dir: Optional[Path] = None, sim_world: str = "fixed"):
+        if sim_world not in SIM_WORLDS:
+            raise ValueError(f"unknown sim world {sim_world!r} (expected one of {list(SIM_WORLDS)})")
         self.gateway = gateway
+        self.sim_world = sim_world  # default world kind for resets that do not name one
+        self.sim: dict[str, Any] = {"world": "fixed", "seed": None}  # the world the fleet reports it built
         self.runs_dir = Path(runs_dir) if runs_dir is not None else None
         self.planners = {normalize_planner_kind(k): p for k, p in planners.items()}  # "qwen" -> "llm"
         self.allocator = allocator or CapabilityAllocator()
@@ -155,20 +161,34 @@ class Executive:
         self.timeline.append({"seq": next(self._tl), "t": self.clock(), "kind": kind, "message": message,
                               "run_id": self.run_id, **({"data": data} if data else {})})
 
-    async def refresh_status(self) -> None:
+    async def refresh_status(self, sync_location: bool = False) -> None:
         status = await self.gateway.status()
         for rid, st in status.items():
             r = self.robots.get(rid)
             if r is None:
                 continue
+            if sync_location and st.get("location_id") in LOCATIONS:
+                r.location_id = st["location_id"]  # a random world can start a robot elsewhere
             r.battery_pct = float(st.get("battery_pct", r.battery_pct))
             r.health = st.get("health", r.health)
             r.available = bool(st.get("available", r.available))
             r.last_update = self.clock()
 
     # ================================================================ reset
-    async def reset(self, scenario: str = "unknown", faults: Optional[list[str]] = None) -> dict:
-        """Coordinated reset. Settles old work first; prior-run events are discarded afterwards."""
+    async def reset(self, scenario: str = "unknown", faults: Optional[list[str]] = None,
+                    world: Optional[str] = None, seed: Optional[int] = None) -> dict:
+        """Coordinated reset. Settles old work first; prior-run events are discarded afterwards.
+
+        world: "fixed" (demo world) or "random"; None uses the executive default (HIVE_SIM_WORLD).
+        A random world without a seed gets a fresh one, recorded so the run can be replayed.
+        """
+        world = world or self.sim_world
+        if world not in SIM_WORLDS:
+            raise ExecError(f"unknown sim world {world!r}", 422)
+        if world == "fixed":
+            seed = None
+        elif seed is None:
+            seed = random.SystemRandom().randrange(2 ** 32)
         self._gen += 1
         if self._planning and not self._planning.done():
             self._planning.cancel()
@@ -186,18 +206,25 @@ class Executive:
             self.scenario = scenario
             self.faults = list(faults or [])
             try:
-                await self.gateway.reset(self.run_id, self.faults)
+                reported = await self.gateway.reset(self.run_id, self.faults, world=world, seed=seed)
             except Exception as exc:  # noqa: BLE001
                 self.log("reset", f"Coordinated reset failed: {exc}")
                 raise ExecError(f"Coordinated reset failed: {exc}", 503) from exc
             self.world = ObservedWorld(self.clock)
+            reported = reported if isinstance(reported, dict) else {}
+            self.sim = {"world": reported.get("world") or "fixed", "seed": reported.get("seed")}
             self.robots = initial_robot_states(self.clock)
-            await self.refresh_status()
+            await self.refresh_status(sync_location=True)
             self.mission = None
             self.attempts.clear()
             self.raw_events.clear()
             self.timeline.clear()
-            self.log("reset", f"New run {self.run_id} (scenario={scenario}, faults={self.faults or 'none'}).")
+            sim = self.sim["world"] + (f" seed={self.sim['seed']}" if self.sim["seed"] is not None else "")
+            self.log("reset", f"New run {self.run_id} (scenario={scenario}, faults={self.faults or 'none'}, "
+                              f"world={sim}).")
+            if self.sim["world"] != world or (world == "random" and self.sim["seed"] != seed):
+                self.log("reset", f"Requested world={world} seed={seed}, but the fleet ignored it and runs "
+                                  f"world={sim}. Rebuild/restart the fake fleet to get world support.")
             if scenario == "known":
                 self._seed_known()
         return {"run_id": self.run_id}
@@ -881,6 +908,7 @@ class Executive:
             "run_id": self.run_id,
             "scenario": self.scenario,
             "faults": self.faults,
+            "sim": dict(self.sim),
             "gateway": asdict(gi),
             "planners": {k: p.status() for k, p in self.planners.items()},
             "default_planner": self.default_planner,

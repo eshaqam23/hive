@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from typing import Any, Literal, Optional
 
@@ -63,6 +64,16 @@ class ClarifyIn(Body):
 class ResetIn(Body):
     scenario: Literal["unknown", "known"] = "unknown"
     faults: list[str] = Field(default_factory=list)
+    world: Optional[Literal["fixed", "random"]] = None  # None: HIVE_SIM_WORLD default (fixed when unset)
+    seed: Optional[int] = Field(default=None, ge=0, le=2 ** 53)  # replay a random world; ignored when fixed
+
+
+def sim_world_from_env() -> str:
+    """Default sim world for the executive process: HIVE_SIM_WORLD=fixed|random (unset: fixed)."""
+    value = (os.environ.get("HIVE_SIM_WORLD") or "fixed").strip().lower()
+    if value not in ("fixed", "random"):
+        raise ValueError(f"HIVE_SIM_WORLD must be fixed or random, got {value!r}")
+    return value
 
 
 class FaultIn(Body):
@@ -76,7 +87,7 @@ def create_app(settings: Optional[ExecSettings] = None, gateway: Optional[RobotG
         gateway = gateway or make_gateway(settings)
         planners = {"llm": LLMPlanner(Router(legacy=settings.qwen)), "baseline": BaselinePlanner()}
         executive = Executive(gateway, planners, default_planner=settings.default_planner,
-                              runs_dir=settings.runs_dir)
+                              runs_dir=settings.runs_dir, sim_world=sim_world_from_env())
     ex = executive
 
     @asynccontextmanager
@@ -192,7 +203,7 @@ def create_app(settings: Optional[ExecSettings] = None, gateway: Optional[RobotG
         unknown = [f for f in body.faults if f not in KNOWN_FAULTS]
         if unknown:
             raise HTTPException(400, f"Unknown faults: {unknown}")
-        await ex.reset(body.scenario, body.faults)
+        await ex.reset(body.scenario, body.faults, world=body.world, seed=body.seed)
         return ex.state()
 
     @app.get("/api/exec/faults")
