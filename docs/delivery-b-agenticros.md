@@ -79,7 +79,7 @@ Also observed:
 ## Run it (Ubuntu 24.04 / WSL `Ubuntu-24.04`)
 
 ```bash
-sudo apt install ros-jazzy-rosbridge-suite build-essential python3-colcon-common-extensions
+sudo apt install ros-jazzy-rosbridge-suite ros-jazzy-rmw-cyclonedds-cpp build-essential python3-colcon-common-extensions
 # Node >= 20 (NodeSource or nvm)
 bash ros/build.sh                                  # colcon build into ~/hive_ros_ws
 HIVE_CORE_PATCH=1 bash bridge/scripts/build-core.sh  # @corebrum/core at the pinned commit + patch v1
@@ -94,6 +94,10 @@ node bridge/origin-check.mjs                       # localhost hardening check (
 - `ros/run_fake_fleet.sh` always runs on `ROS_DOMAIN_ID=77` with `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`.
   It ignores an inherited `ROS_DOMAIN_ID` (a WSL `~/.bashrc` exporting the car domain 42 is common)
   and says so on stderr, so the fake fleet never joins a real car's domain.
+- It also always runs on Cyclone DDS (`RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`). Under Fast DDS,
+  which a non-interactive shell such as `npm run hive` gets by default, rosbridge answered every
+  `/hive/fleet_control` call with "Service ... does not exist" although `ros2 service call`
+  reached it. Without Cyclone installed it warns and keeps the shell's RMW.
 - Both WebSocket servers refuse any handshake that carries an `Origin` header (HTTP 403). Browsers
   always send one and no CORS check applies to WebSockets, so otherwise any web page could drive
   the fleet through 127.0.0.1. The Executive gateway and `@corebrum/core` send no `Origin`.

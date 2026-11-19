@@ -59,10 +59,32 @@ Start the app with:
 npm run hive
 ```
 
-This starts both the Python backend and the Vite frontend, then opens Hive in the browser.
+This starts, in order, and waits for each one's port before starting the next:
+
+1. `[backend]` the car backend, `python3 backend/server.py` on :8787
+2. `[fleet]` the fake fleet, `bash ros/run_fake_fleet.sh` (three fake robots + rosbridge on :9090, `ROS_DOMAIN_ID=77`)
+3. `[bridge]` the bridge, `node bridge/server.mjs` on :8790
+4. `[exec]` the Executive, `$HIVE_EXEC_PYTHON -m hive_exec` in `backend/` on :8788 (default `~/.venvs/hive-exec/bin/python`)
+5. `[vite]` the front end on :5173, which then opens in the browser
+
+Each line of output carries its process's prefix. The fake fleet and the bridge only start with
+`HIVE_GATEWAY=synapse`, the default. With `HIVE_GATEWAY=fake` the Executive runs its in-process
+simulation instead and needs no ROS. Both fleets are simulated, and the UI labels their data SIM.
+
+One Ctrl+C stops everything: the car backend first (it stops every robot it is driving), then the
+Executive, the bridge, the fake fleet and Vite. If a port is already taken, the launcher refuses
+to start and names the leftover process and the `pkill` that stops it.
+
+| Flag | Effect |
+| --- | --- |
+| `--no-executive` | car backend + Vite only (no Executive, bridge or fake fleet) |
+| `--no-bridge` | no bridge or fake fleet; the Executive uses `HIVE_GATEWAY` as set (bring your own bridge on :8790 for `synapse`) |
+| `--backend-only` | the car backend alone (`npm run backend`) |
+
+Pass flags after `--`, for example `npm run hive -- --no-executive`.
 
 - **Ubuntu:** run it in a terminal. The backend is `python3 backend/server.py` (set `HIVE_PYTHON` to use another Python).
-- **Windows:** run it from PowerShell. `rclpy` only exists in WSL, so the launcher starts the backend inside WSL (`wsl.exe --cd <repo> --exec python3 backend/server.py`) and Vite on Windows. With mirrored networking the Windows browser reaches the backend on `127.0.0.1:8787`. Set `HIVE_WSL_DISTRO` to pick a distro other than the WSL default. Ctrl+C in PowerShell makes the launcher send the backend SIGINT inside WSL, so it stops every robot before exiting, as on Ubuntu.
+- **Windows:** run it from PowerShell. `rclpy` only exists in WSL, so the launcher starts the backend, the fake fleet, the bridge and the Executive inside WSL (`wsl.exe --cd <repo> --exec ...`) and Vite on Windows. With mirrored networking the Windows browser reaches them on `127.0.0.1`. Set `HIVE_WSL_DISTRO` to pick a distro other than the WSL default. The bridge uses WSL's Node (it loads `~/.nvm/nvm.sh` if present). Ctrl+C in PowerShell makes the launcher send each process SIGINT inside WSL, so the backend stops every robot before exiting, as on Ubuntu. `HIVE_GATEWAY`, `HIVE_PROVIDERS_FILE`, `HIVE_SIM_TIME_SCALE` and `HIVE_EXEC_PYTHON` reach WSL through `WSLENV` when they are set.
 
 You can also run the pieces separately (`npm run backend` is the same launcher with `--backend-only`, so it also uses WSL on Windows):
 
