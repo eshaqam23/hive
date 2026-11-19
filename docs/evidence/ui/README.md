@@ -1,5 +1,58 @@
 # UI evidence
 
+## Gate 10: end-to-end in a real browser (prompt 10)
+
+Captured 2026-11-19 with Playwright (Chromium, dark theme, viewport 1440×1500). Images are in
+`e2e/`. The stack was one launcher:
+`HIVE_ROS_SETUP=$PWD/backend/test/mock_ros/setup.bash npm run hive` from Git Bash. That started
+the car backend on the mock ROS, the fake fleet (ROS_DOMAIN_ID 77), the bridge, the Executive
+(gateway synapse) and Vite. The Executive read the real `~/.hive/providers.yaml`: the executive
+role was already bound to groq · openai/gpt-oss-120b. Nothing was saved to the store, so its
+mtime is unchanged and no `.v1.bak` exists. Steps 1–8 used the Baseline planner chip. Step 9
+used the Groq chip.
+
+Fix found and made on the way: `npm run hive` did not pass `HIVE_ROS_SETUP` into WSL, so the car
+backend could not use the mock ROS (93c7ce6, `fix: npm run hive passes HIVE_ROS_SETUP into WSL as
+a WSL path`). The launcher log then read `ROS 2 setup /mnt/c/dev/hive/backend/test/mock_ros/setup.bash: found`.
+
+| Step | Result | Images |
+|---|---|---|
+| 1. Fleet, robot page, back | PASS. Three panels (Camera, LiDAR, Gripper car), each with its Executive SIM status. The camera car page has h1 "Camera car". Back returns to "Your fleet". | `01-fleet.png`, `01-robot-page.png`, `01-fleet-back.png` |
+| 2. Map empty state, DEMO | PASS. "Shared perception map not built yet". The DEMO watermark is shown when on and gone when off. | `02-map-empty.png`, `02-map-demo-on.png`, `02-map-demo-off.png` |
+| 3. exec_v2 demo, Baseline | PASS. Mission m1-f84ea0, run run-ffa5ef06. Thinking card, then rev 1 (observation stage) awaiting approval with COMMAND TO AGENT filled. Approve & run. Rows go accepted, in progress, done. Then the rev 2 continuation is approved and ticks to done. "Mission complete · 1 min 16 s · all 6 step(s) succeeded". `runs/run-ffa5ef06/agent_commands/`: `camera_01/t1-r1-a1.json`, `lidar_01/t2-r1-a1.json`, `gripper_01/t{1,2,3,4}-r2-a1.json` (schema `hive.task-envelope.v1`). | `03-chat-start.png`, `03-awaiting-approval.png`, `03-rev1-tick-{0,3,5}.png`, `03-rev2-running-{1,3}.png`, `03-complete.png` |
+| 4. nav_fault_after_pickup | PASS. Known scenario, fault injected from the Sim drawer. At 8 s T3 is "failed motor_stall" with "drive motor stalled; robot stopped in place", and T4 is skipped. "Replan proposal · rev 2 · triggered by T3 motor_stall" shows the diff "T1, T2 done in rev 1, not repeated" and "2 tasks unchanged (T3→T1, T4→T2)". After Approve rev 2: "Mission complete · 27 s · 4 of 5 step(s) succeeded". | `04-inject.png`, `04-failed-row.png`, `04-replan-proposal.png`, `04-outcome.png` |
+| 5. hang_navigate, Stop current | PASS. T1 hung in accepted. Stop current gives "canceling", then within 0.25 s "canceled operator_stop" with "Operator stopped t1; robot confirmed.". "Replan proposal · rev 2 · triggered by T1 operator_stop", checks passed 4/4. | `05-hang-running.png`, `05-canceling.png`, `05-canceled.png`, `05-recovery-proposal.png` |
+| 6. Edit plan | PASS. Invalid edit: T2 to lidar_01. The binding moves T1–T4 together, giving rev 3 "deterministic checks failed 0/4" with per-task errors (`unsupported_assignment … cannot reach pickup_zone`, `no_route No route from lidar_post to pickup_zone.`, `over_payload red_block 0.1 kg exceeds 0.0 kg.`). Approve rev 3 is disabled: "This revision cannot run: its checks failed." Valid edit: T1 back to gripper_01 gives rev 4 "operator edit → deterministic checks passed 4/4" with the reassignment diff. | `06-edit-open.png`, `06-invalid-edit.png`, `06-valid-edit-rev4.png` |
+| 7. Refresh mid-mission | PASS. Rev 4 is running with T1 hung by hang_navigate. After a reload, the Chat main text and the Mission context aside are byte-identical to before (timers masked), and the header still reads "mission running · rev 4". The reload lands on the Fleet tab, because the view is not in the URL. Fleet already showed "gripper_01 executing t1 navigate_to". | `07-before-refresh.png`, `07-after-refresh-raw.png`, `07-after-refresh.png` |
+| 8. STOP ALL mid-mission | PASS. With the mock camera car connected, the STOP ALL results read "Camera car Stopped" and "Executive mission cancel accepted". The chat shows "Mission canceled · 3 min 28 s · 0 of 2 step(s) succeeded · Operator canceled; all active tasks confirmed terminal.". The launcher log has `POST /api/robots/drive` (the car stop) and `POST /api/exec/cancel`. | `08-camera-car-connected.png`, `08-stop-all-results.png`, `08-mission-canceled.png` |
+| 9. exec_v2 demo, LLM planner | PASS. Models page Test: groq OK 1.6 s (models ✓, chat ✓ 232 ms, schema ✓ 1.2 s). Mission m4-c1c912, run run-410b9d7c, Groq chip. Rev 1 (observation, 2 tasks) and rev 2 (continuation, 4 tasks) were both proposed by the LLM and passed checks. "Mission complete · 36 s · all 6 step(s) succeeded". The agent_commands files match step 3. PlannerRecords are below. | `09-models-test.png`, `09-chat-start-llm.png`, `09-thinking.png`, `09-awaiting-approval.png`, `09-proposal-{1,2}.png`, `09-tick-{0,3,7}.png`, `09-complete.png` |
+| 10. Car regression | PASS. Disconnect, then Connect the camera car from its Fleet panel: Live, link online. On its page, held W: "Driving forward". Released: "Connected · Stopped" and "Car confirmed 0,1,0,1". The activity log reads "drive stop #3: stop sent (zero Twist burst)" after "Released forward after 1.4 s (5 keepalives answered)". | `10-connected.png`, `10-robot-page.png`, `10-holding-w.png`, `10-released-stopped.png` |
+
+PlannerRecords for step 9 (from `GET /api/exec/state`):
+
+| Rev | Provider · model | Latency (provider) | Tokens prompt / completion / total (reasoning) | Est. input | Fallback | Repaired |
+|---|---|---|---|---|---|---|
+| 1 initial | groq · openai/gpt-oss-120b | 2050.9 ms (2049.2) | 3738 / 565 / 4303 (349) | 2960 | no | no, first pass ok |
+| 2 continuation | groq · openai/gpt-oss-120b | 2326.1 ms (2324.4) | 3801 / 836 / 4637 (552) | 3036 | no | no, first pass ok |
+
+Both use `prompt_version hive.prompt.v2` and `structured_mode json_schema`, with temperature
+0.7, top_p 0.8 and seed 1234.
+
+Key suffixes on the Models page were replaced with `…[masked]` in the DOM before
+`09-models-test.png` was taken. The browser console had only React DevTools info lines during
+the run. The `ERR_CONNECTION_REFUSED` lines came after the stack was stopped.
+
+### Seen during the run, not changed in prompt 10
+
+- **Gemini fails its Test:** `HTTP 400 … Unknown name "seed": Cannot find field.` (visible in
+  `09-models-test.png`). The hosted presets' sampling (`HOSTED_SAMPLING` in
+  `backend/hive_exec/llm/templates.py`) and the `Sampling.seed` default of 1234 send `seed`,
+  which Gemini's OpenAI endpoint rejects. Groq accepts it.
+- **Reload goes to Fleet:** the view tab is not in the URL, so a reload opens Fleet. The mission
+  state is unaffected.
+- **Header pill:** it shows the active revision ("rev 1") while a later proposal awaits
+  approval, as noted at Gate 8.
+
 ## Gate 9: Models page (prompt 9)
 
 Captured 2026-11-19 with Playwright (Chromium, dark theme). The viewport was 1440×2300 so the
