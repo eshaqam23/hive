@@ -1,7 +1,7 @@
 // One plan revision as the operator sees it (R1/R4): header with the deterministic checks, the task
 // table (what each robot was sent and where it stands), the latest report under each row, and the
 // buttons that apply to the revision's state. Edit mode uses only the Executive's typed edit ops.
-import React, { useMemo, useState } from "react";
+import React, { useId, useMemo, useState } from "react";
 import {
   LEGEND,
   REVISION_STATUS_TEXT,
@@ -69,19 +69,29 @@ const FIELD_LABEL = { location_id: "location", area_id: "area", route_id: "route
 // Object labels are open vocabulary, so the object picker offers, in this order and once each:
 // the task's own label and the draft's (the order stays put while editing), labels this
 // revision's tasks and goals name, the catalog's profiles, then labels of objects the robots
-// have observed. Labels without a profile can be found, not carried.
+// have observed. Labels without a profile, or heavier than the strongest gripper, can be found, not carried.
 const queryLabel = (x) => x?.object_query?.label;
 function revisionLabels(rev, state) {
   const p = rev?.proposal || {};
   const goals = [...(p.mission_goals || []), ...(p.stage_goals || []), ...(state?.mission?.canonical_goals || [])];
   return [...(rev?.tasks || []).map((t) => queryLabel(t.action)), ...goals.map(queryLabel)];
 }
-function objectOptions(current, rev, state) {
+// the heaviest payload any robot reports (0 = none known, so nothing is called too heavy)
+function maxPayloadKg(state) {
+  const robots = state?.catalog?.robots?.length ? state.catalog.robots : state?.robots || [];
+  return Math.max(0, ...robots.map((r) => Number(r?.payload_limit_kg) || 0));
+}
+function carryNote(label, profiles, payload) {
   // own keys only: `in` would also match prototype names such as "constructor"
-  const profiled = new Set(Object.keys(state?.catalog?.object_profiles || {}));
+  if (!Object.prototype.hasOwnProperty.call(profiles, label)) return " (no profile - cannot carry)";
+  return payload > 0 && Number(profiles[label]?.mass_kg) > payload ? " (too heavy - cannot carry)" : "";
+}
+function objectOptions(current, rev, state) {
+  const profiles = state?.catalog?.object_profiles || {};
+  const payload = maxPayloadKg(state);
   const observed = (state?.world?.objects || []).map((o) => o?.label);
-  const labels = [...current, ...revisionLabels(rev, state), ...profiled, ...observed].filter((l) => typeof l === "string" && l !== "");
-  return [...new Set(labels)].map((k) => ({ value: k, label: `${k.replaceAll("_", " ")}${profiled.has(k) ? "" : " (no profile - cannot carry)"}` }));
+  const labels = [...current, ...revisionLabels(rev, state), ...Object.keys(profiles), ...observed].filter((l) => typeof l === "string" && l !== "");
+  return [...new Set(labels)].map((k) => ({ value: k, label: `${k.replaceAll("_", " ")}${carryNote(k, profiles, payload)}` }));
 }
 
 function fieldOptions(field, catalog) {
@@ -332,6 +342,47 @@ function LockGlyph() {
   );
 }
 
+/* ------------------------------------------------------------------ why this plan */
+
+/* The planner's rationale: one item is the first line of the card; several fold behind a button.
+   Text only, never markup. Old outputs and empty lists render nothing. */
+function WhyThisPlan({ items }) {
+  const [open, setOpen] = useState(false);
+  const bodyId = useId();
+  if (items.length === 0) return null;
+  if (items.length === 1) {
+    return (
+      <section aria-label="Why this plan" className="border-b border-line px-4 py-2 text-[13px] leading-snug text-muted">
+        <span className="mr-1.5 font-semibold text-ink">Why this plan</span>
+        {items[0]}
+      </section>
+    );
+  }
+  return (
+    <section aria-label="Why this plan" className="border-b border-line px-4 py-2 text-[13px] leading-snug text-muted">
+      <button
+        aria-controls={bodyId}
+        aria-expanded={open}
+        className="inline-flex items-center gap-1.5 rounded-md font-semibold text-ink hover:text-coral"
+        onClick={() => setOpen(!open)}
+        type="button"
+      >
+        <span aria-hidden="true" className="inline-block w-3 text-[11px]">{open ? "▾" : "▸"}</span>
+        Why this plan <span className="font-normal text-faint">· {items.length} points</span>
+      </button>
+      <div id={bodyId}>
+        {open && (
+          <ul aria-label="Why this plan" className="mt-1.5 list-disc space-y-0.5 pl-9">
+            {items.map((item, i) => (
+              <li key={i}>{item}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
+
 /* ------------------------------------------------------------------ card */
 
 export default function PlanCard({ rev, state, mission, latest, readOnly = false, busy = false, act, header = null }) {
@@ -344,6 +395,7 @@ export default function PlanCard({ rev, state, mission, latest, readOnly = false
   const awaiting = !readOnly && latest && mission.status === "awaiting_approval";
   const approvable = awaiting && rev.status === "awaiting_approval";
   const edits = useMemo(() => draftEdits(rev, draft), [rev, draft]);
+  const why = (rev.proposal?.rationale || []).filter((x) => typeof x === "string" && x.trim() !== "").map((x) => x.trim());
 
   const approve = () => act(`/revisions/${rev.revision}/approve`, { proposal_hash: rev.proposal_hash }, `Revision ${rev.revision} approved.`);
   const reject = async () => {
@@ -384,6 +436,8 @@ export default function PlanCard({ rev, state, mission, latest, readOnly = false
         </div>
         <Legend />
       </header>
+
+      <WhyThisPlan items={why} />
 
       {checks.planErrors.length > 0 && (
         <div className="border-b border-line px-4 py-2">

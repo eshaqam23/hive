@@ -222,6 +222,34 @@ describe("edit plan", () => {
     expect(select.options[0].textContent).toBe("constructor (no profile - cannot carry)");
   });
 
+  it("marks profiled labels heavier than the gripper payload as too heavy", async () => {
+    const st = clone(awaiting);
+    st.catalog.object_profiles.rc_car = { label: "rc_car", mass_kg: 1.2, description: "remote-control toy car" };
+    st.catalog.object_profiles.duck = { label: "duck", mass_kg: 0.05, description: "rubber duck" };
+    st.catalog.object_profiles.cone = { label: "cone", mass_kg: 0.25, description: "exactly the payload" };
+    st.mission.revisions[0].tasks[0].action.object_query = { label: "rc_car" };
+    server.state = st;
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit plan" }));
+    const select = within(row("t1")).getByLabelText("object for T1");
+    const text = (v) => [...select.options].find((o) => o.value === v).textContent;
+    expect(select.options[0].textContent).toBe("rc car (too heavy - cannot carry)");
+    expect(text("duck")).toBe("duck");
+    expect(text("cone")).toBe("cone"); // equal to the payload is allowed
+    expect(text("red_block")).toBe("red block");
+  });
+
+  it("does not call anything too heavy while no robot reports a payload", async () => {
+    const st = clone(awaiting);
+    st.catalog.object_profiles.rc_car = { label: "rc_car", mass_kg: 1.2, description: "toy car" };
+    st.catalog.robots = st.catalog.robots.map((r) => ({ ...r, payload_limit_kg: 0 }));
+    st.robots = st.robots.map((r) => ({ ...r, payload_limit_kg: 0 }));
+    st.mission.revisions[0].tasks[0].action.object_query = { label: "rc_car" };
+    server.state = st;
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit plan" }));
+    expect(within(row("t1")).getByLabelText("object for T1").options[0].textContent).toBe("rc car");
+  });
 });
 
 describe("recovery", () => {
