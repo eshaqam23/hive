@@ -500,3 +500,132 @@ def test_sensors_and_localization_reach_as_dict_and_catalog_dict():
     by_id = {x["robot_id"]: x for x in catalog.catalog_dict()["robots"]}
     assert by_id["camera_01"]["sensors"] == ["rgb_camera"] and by_id["lidar_01"]["sensors"] == ["2d_lidar"]
     assert by_id["lidar_01"]["localization"]
+
+
+# ================================================== WS4: next-stage preview
+
+PREVIEW_TASKS = [
+    {"task_id": "t1", "binding_id": "carrier", "depends_on": [],
+     "action": {"kind": "navigate_to", "location_id": "pickup_zone", "route_id": "pickup_corridor"}},
+    {"task_id": "t2", "binding_id": "carrier", "depends_on": ["t1"],
+     "action": {"kind": "pick_object", "object_query": {"label": "red_block"}}},
+]
+PREVIEW = {"summary": "Carry the red block to the drop-off zone.", "tasks": PREVIEW_TASKS,
+           "waits_for": ["camera_01 sighting of red_block", "lidar_01 scan of pickup_corridor"]}
+
+
+def _staged(**kw):
+    return _plan_with(next_stage_preview=json.loads(json.dumps(PREVIEW)), **kw)
+
+
+def test_preview_is_optional_and_defaults_to_none():
+    p = PlanProposal.model_validate(APPENDIX_A)
+    assert p.next_stage_preview is None and p.preview_changes == []
+
+
+def test_observation_stage_plan_accepts_a_preview_with_object_queries():
+    p = PlanProposal.model_validate(_staged())
+    pv = p.next_stage_preview
+    assert pv.summary.startswith("Carry") and [t.task_id for t in pv.tasks] == ["t1", "t2"]
+    assert pv.tasks[1].action.object_query.label == "red_block" and len(pv.waits_for) == 2
+
+
+@pytest.mark.parametrize("override", [
+    {"scope": "full"},
+    {"disposition": "clarify", "scope": None, "tasks": [], "mission_goals": [], "stage_goals": [],
+     "clarification_question": "Which?"},
+    {"disposition": "reject", "scope": None, "tasks": [], "mission_goals": [], "stage_goals": []},
+    {"disposition": "answer", "scope": None, "tasks": [], "mission_goals": [], "stage_goals": [], "answer": "Hi."},
+])
+def test_preview_only_with_a_plan_in_observation_stage(override):
+    with pytest.raises(ValidationError, match="next_stage_preview"):
+        PlanProposal.model_validate(_staged(**override))
+
+
+def test_preview_limits_are_enforced():
+    def with_preview(**kw):
+        return _plan_with(next_stage_preview={**PREVIEW, **kw})
+
+    with pytest.raises(ValidationError):
+        PlanProposal.model_validate(with_preview(waits_for=["a", "b", "c", "d", "e"]))
+    with pytest.raises(ValidationError):
+        PlanProposal.model_validate(with_preview(waits_for=["x" * 161]))
+    with pytest.raises(ValidationError):
+        PlanProposal.model_validate(with_preview(waits_for=[""]))
+    with pytest.raises(ValidationError):
+        PlanProposal.model_validate(with_preview(summary=""))
+    PlanProposal.model_validate(with_preview(waits_for=["x" * 160, "b", "c", "d"]))
+    many = [{"task_id": f"t{i}", "binding_id": "b", "depends_on": [],
+             "action": {"kind": "capture_image", "area_id": "work_area"}} for i in range(1, 18)]
+    with pytest.raises(ValidationError):
+        PlanProposal.model_validate(with_preview(tasks=many))
+    with pytest.raises(ValidationError):  # unknown keys are refused like everywhere else
+        PlanProposal.model_validate(with_preview(allocated=True))
+
+
+def test_preview_tasks_must_have_unique_ids_and_known_dependencies():
+    dup = [PREVIEW_TASKS[0], dict(PREVIEW_TASKS[1], task_id="t1", depends_on=[])]
+    with pytest.raises(ValidationError, match="unique"):
+        PlanProposal.model_validate(_plan_with(next_stage_preview={**PREVIEW, "tasks": dup}))
+    bad = [PREVIEW_TASKS[0], dict(PREVIEW_TASKS[1], depends_on=["t9"])]
+    with pytest.raises(ValidationError, match="t9"):
+        PlanProposal.model_validate(_plan_with(next_stage_preview={**PREVIEW, "tasks": bad}))
+
+
+def test_preview_task_actions_are_validated_like_real_ones():
+    bad = [dict(PREVIEW_TASKS[0], action={"kind": "navigate_to", "location_id": "kitchen"})]
+    with pytest.raises(ValidationError):
+        PlanProposal.model_validate(_plan_with(next_stage_preview={**PREVIEW, "tasks": bad}))
+
+
+def test_a_preview_without_tasks_is_dropped_not_an_error():
+    p = PlanProposal.model_validate(_plan_with(next_stage_preview={**PREVIEW, "tasks": []}))
+    assert p.next_stage_preview is None
+    p = PlanProposal.model_validate_json(json.dumps(_plan_with(next_stage_preview=None)))
+    assert p.next_stage_preview is None
+
+
+def test_preview_does_not_make_the_preview_tasks_proposal_tasks():
+    p = PlanProposal.model_validate(_staged())
+    assert [t.task_id for t in p.tasks] == ["t1", "t2"]  # the plan's own two sensing tasks
+    assert p.tasks[0].action.kind == "inspect_area" and p.next_stage_preview.tasks[0].action.kind == "navigate_to"
+
+
+def test_preview_changes_limits_and_where_they_are_allowed():
+    ok = ["Object is at pickup_zone, not work_area.", "b", "c", "d"]
+    assert PlanProposal.model_validate(_plan_with(preview_changes=ok)).preview_changes == ok
+    for bad in (["a", "b", "c", "d", "e"], ["x" * 161], [1], "one"):
+        with pytest.raises(ValidationError):
+            PlanProposal.model_validate(_plan_with(preview_changes=bad))
+    with pytest.raises(ValidationError, match="preview_changes"):
+        PlanProposal.model_validate(_plan_with(disposition="reject", scope=None, tasks=[], mission_goals=[],
+                                               stage_goals=[], preview_changes=["x"]))
+    # allowed on a full plan too (a continuation that ends the staging explains what changed)
+    PlanProposal.model_validate(_plan_with(scope="full", preview_changes=["Carry goes ahead as previewed."]))
+
+
+def test_schema_has_an_optional_nested_preview_and_optional_changes():
+    schema = plan_proposal_json_schema()
+    assert "next_stage_preview" not in schema["required"] and "preview_changes" not in schema["required"]
+    prop = schema["properties"]["next_stage_preview"]
+    refs = [o.get("$ref") for o in prop["anyOf"]]
+    assert "#/$defs/NextStagePreview" in refs and {"type": "null"} in prop["anyOf"]
+    defn = schema["$defs"]["NextStagePreview"]
+    assert defn["properties"]["tasks"]["maxItems"] == catalog_max_tasks()
+    assert defn["properties"]["waits_for"]["maxItems"] == 4
+    assert defn["properties"]["waits_for"]["items"]["maxLength"] == 160
+    assert "summary" in defn["required"] and "tasks" not in defn["required"]
+    pc = schema["properties"]["preview_changes"]
+    assert pc["maxItems"] == 4 and pc["items"]["maxLength"] == 160
+
+
+def catalog_max_tasks():
+    from hive_exec.contracts import MAX_TASKS
+    return MAX_TASKS
+
+
+def test_execution_plan_and_report_defaults_for_the_preview_fields():
+    from hive_exec.contracts import ExecutionPlan, ValidationReport
+
+    assert ValidationReport(ok=True, world_version=1).preview_findings == []
+    assert ExecutionPlan.model_fields["preview_diff"].default is None

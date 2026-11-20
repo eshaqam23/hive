@@ -155,6 +155,34 @@ class TaskSpec(Strict):
         return self
 
 
+PreviewText = Annotated[str, Field(min_length=1, max_length=160)]
+
+
+class NextStagePreview(Strict):
+    """The likely next stage of an observation stage, shown to the operator and NEVER run.
+
+    It is not allocated, dispatched or approved with the revision. Its tasks may name objects by
+    ``object_query`` because the ids are not known yet; task ids and dependencies live in the
+    preview's own namespace. The backend only checks it to attach warning/info notes.
+    """
+
+    summary: ShortText
+    tasks: list[TaskSpec] = Field(default_factory=list, max_length=MAX_TASKS)
+    # What evidence the next stage depends on ("camera_01 sighting of red_block").
+    waits_for: list[PreviewText] = Field(default_factory=list, max_length=4)
+
+    @model_validator(mode="after")
+    def _own_ids(self):
+        ids = [t.task_id for t in self.tasks]
+        if len(set(ids)) != len(ids):
+            raise ValueError("preview task_id values must be unique")
+        for t in self.tasks:
+            for d in t.depends_on:
+                if d not in ids:
+                    raise ValueError(f"preview task {t.task_id} depends on unknown preview task {d}")
+        return self
+
+
 class PlanProposal(Strict):
     """What the planner (Qwen or Baseline) may propose. Nothing here is trusted."""
 
@@ -173,6 +201,19 @@ class PlanProposal(Strict):
     clarification_options: list[Annotated[str, Field(min_length=1, max_length=60)]] = Field(
         default_factory=list, max_length=4)
     answer: Optional[Annotated[str, Field(min_length=1, max_length=600)]] = None
+    # An observation stage may show what the next stage would likely be. Display only, never executable.
+    next_stage_preview: Optional[NextStagePreview] = None
+    # On a continuation: what the new evidence changed against the previous preview (model's own words;
+    # the backend computes its own preview_diff and never trusts these).
+    preview_changes: list[PreviewText] = Field(default_factory=list, max_length=4)
+
+    @field_validator("next_stage_preview", mode="before")
+    @classmethod
+    def _empty_preview_is_none(cls, v):
+        """A preview with no tasks says nothing the operator can read; drop it rather than fail the plan."""
+        if isinstance(v, dict) and not v.get("tasks"):
+            return None
+        return v
 
     @field_validator("clarification_options", mode="before")
     @classmethod
@@ -218,6 +259,11 @@ class PlanProposal(Strict):
                 raise ValueError("an answer cannot carry goals")
         elif self.answer:
             raise ValueError("answer text only allowed for disposition answer")
+        if self.next_stage_preview is not None and (self.disposition != "plan"
+                                                    or self.scope != "observation_stage"):
+            raise ValueError("next_stage_preview is only allowed for a plan with scope observation_stage")
+        if self.preview_changes and self.disposition != "plan":
+            raise ValueError("preview_changes is only allowed for disposition plan")
         ids = [t.task_id for t in self.tasks]
         if len(set(ids)) != len(ids):
             raise ValueError("task_id values must be unique")
@@ -247,6 +293,8 @@ class ValidationFinding(Strict):
 class ValidationReport(Strict):
     ok: bool
     findings: list[ValidationFinding] = Field(default_factory=list)
+    # Notes about the next-stage preview only (warning/info, never errors): they never affect ``ok``.
+    preview_findings: list[ValidationFinding] = Field(default_factory=list)
     world_version: int
     projected_energy_pct: dict[str, float] = Field(default_factory=dict)
 
@@ -300,6 +348,27 @@ class PlannerRecord(Strict):
         return normalize_planner_kind(value)
 
 
+class PreviewDiffItem(Strict):
+    """One line of a preview diff. ``what`` is the actual task (or the previewed one for removed)."""
+
+    preview_task: Optional[str] = None
+    task: Optional[str] = None
+    what: str
+    was: Optional[str] = None  # changed: the previewed form
+    differences: list[str] = Field(default_factory=list)  # changed: "location_id: pickup_zone -> dropoff_zone"
+
+
+class PreviewDiff(Strict):
+    """Backend-computed comparison of a continuation revision against the previous stage's preview."""
+
+    previous_revision: int
+    matches_preview: bool
+    kept: list[PreviewDiffItem] = Field(default_factory=list)
+    changed: list[PreviewDiffItem] = Field(default_factory=list)
+    added: list[PreviewDiffItem] = Field(default_factory=list)
+    removed: list[PreviewDiffItem] = Field(default_factory=list)
+
+
 class ExecutionPlan(Strict):
     schema_version: Literal["hive.execution-plan.v1"] = EXECUTION_PLAN_SCHEMA
     mission_id: str
@@ -322,6 +391,8 @@ class ExecutionPlan(Strict):
     ] = "awaiting_approval"
     approved_at: Optional[float] = None
     approved_by: Optional[str] = None
+    # A continuation revision compared with the previous stage's preview (None when there was none).
+    preview_diff: Optional[PreviewDiff] = None
 
 
 class TaskEnvelope(Strict):

@@ -119,6 +119,41 @@
       "title": "NavigateTo",
       "type": "object"
     },
+    "NextStagePreview": {
+      "additionalProperties": false,
+      "description": "The likely next stage of an observation stage, shown to the operator and NEVER run.\n\nIt is not allocated, dispatched or approved with the revision. Its tasks may name objects by\n``object_query`` because the ids are not known yet; task ids and dependencies live in the\npreview's own namespace. The backend only checks it to attach warning/info notes.",
+      "properties": {
+        "summary": {
+          "maxLength": 280,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "tasks": {
+          "items": {
+            "$ref": "#/$defs/TaskSpec"
+          },
+          "maxItems": 16,
+          "title": "Tasks",
+          "type": "array"
+        },
+        "waits_for": {
+          "items": {
+            "maxLength": 160,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 4,
+          "title": "Waits For",
+          "type": "array"
+        }
+      },
+      "required": [
+        "summary"
+      ],
+      "title": "NextStagePreview",
+      "type": "object"
+    },
     "ObjectAtGoal": {
       "additionalProperties": false,
       "properties": {
@@ -497,6 +532,27 @@
       },
       "maxItems": 4,
       "title": "Mission Goals",
+      "type": "array"
+    },
+    "next_stage_preview": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NextStagePreview"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "preview_changes": {
+      "items": {
+        "maxLength": 160,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 4,
+      "title": "Preview Changes",
       "type": "array"
     },
     "rationale": {
