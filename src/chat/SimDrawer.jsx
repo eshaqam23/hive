@@ -2,7 +2,7 @@
 // gateway is a simulation (fake world or fake fleet), collapsed by default, and labeled as such.
 // World: a seeded random world (default) or the fixed demo world; a seed replays a random world.
 // "Reveal world truth" shows the simulator's hidden state for debugging; planning never sees it.
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { execGet } from "../executive/api.js";
 import { TERMINAL_MISSION } from "../fleet/execStatus.js";
 import { SimTag } from "../shell/SimTag.jsx";
@@ -15,6 +15,14 @@ const WORLDS = [
 
 // A replay seed: empty (a fresh one) or a whole number the backend accepts (0..2^53).
 const seedError = (text) => (text === "" || (/^[0-9]+$/.test(text) && Number(text) <= 2 ** 53) ? null : "Seed must be a whole number, 0 or more.");
+
+// While the truth is shown it follows the run: a new fetch when the run, the observed world's
+// version, the mission status or any task state changes, at most one per TRUTH_MIN_MS.
+const TRUTH_MIN_MS = 1000;
+const truthKey = (state) => {
+  const tasks = (state?.mission?.revisions || []).flatMap((r) => Object.values(r.runtime || {}).map((t) => `${r.revision}.${t.task_id}:${t.state}`));
+  return [state?.run_id, state?.world?.version, state?.mission?.status, ...tasks].join("|");
+};
 
 const SCENARIOS = [
   { value: "unknown", label: "Unknown object/route" },
@@ -32,19 +40,28 @@ export default function SimDrawer({ state, busy, act }) {
   const [showTruth, setShowTruth] = useState(false);
   const [truth, setTruth] = useState(null);
   const [truthError, setTruthError] = useState(null);
-  const runId = state?.run_id;
+  const key = truthKey(state);
+  const lastTruthFetch = useRef(0);
 
   useEffect(() => {
     if (!open || !showTruth) return undefined;
     let alive = true;
-    setTruthError(null);
-    execGet("/debug/truth")
-      .then((data) => alive && setTruth(data?.truth ?? null))
-      .catch((err) => alive && setTruthError(err.message));
+    // a burst of changes collapses into one fetch, no sooner than TRUTH_MIN_MS after the last
+    const timer = setTimeout(() => {
+      lastTruthFetch.current = Date.now();
+      execGet("/debug/truth")
+        .then((data) => {
+          if (!alive) return;
+          setTruthError(null);
+          setTruth(data?.truth ?? null);
+        })
+        .catch((err) => alive && setTruthError(err.message));
+    }, Math.max(0, lastTruthFetch.current + TRUTH_MIN_MS - Date.now()));
     return () => {
       alive = false;
+      clearTimeout(timer);
     };
-  }, [open, showTruth, runId]);
+  }, [open, showTruth, key]);
 
   useEffect(() => {
     if (!open || faults) return undefined;

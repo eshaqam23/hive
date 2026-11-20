@@ -49,7 +49,10 @@ function fakeFetch(url, init = {}) {
   if (path === "/health") return Promise.resolve(reply(200, health));
   if (path === "/export") return Promise.resolve(reply(200, { schema_version: "hive.run-export.v1", ...server.state }));
   if (path === "/faults") return Promise.resolve(reply(200, { available: { route_blocked: "Pickup corridor reports blocked" }, active: [] }));
-  if (path === "/debug/truth") return Promise.resolve(reply(200, server.truth));
+  if (path === "/debug/truth") {
+    server.truthTimes.push(Date.now());
+    return Promise.resolve(reply(200, server.truth));
+  }
   return Promise.resolve(reply(503, { ok: false, error: "no map yet" }));
 }
 
@@ -65,7 +68,7 @@ const rowIn = (rev, task) => document.querySelector(`[data-revision="${rev}"] tr
 
 beforeEach(() => {
   localStorage.clear();
-  server = { state: clone(awaiting), calls: [], post: {} };
+  server = { state: clone(awaiting), calls: [], post: {}, truthTimes: [] };
   vi.stubGlobal("fetch", vi.fn(fakeFetch));
 });
 
@@ -479,6 +482,7 @@ describe("sim controls", () => {
     expect(reveal.getAttribute("aria-pressed")).toBe("false");
     fireEvent.click(reveal);
     const truth = await within(drawer).findByRole("region", { name: "World truth" });
+    await within(truth).findByText(/mystery_crate_1/); // the fetch runs on a timer tick (throttle)
     expect(truth.textContent).toMatch(/simulation only/i);
     expect(truth.textContent).toContain("mystery_crate_1");
     expect(truth.textContent).toContain("work_area");
@@ -487,6 +491,44 @@ describe("sim controls", () => {
     fireEvent.click(within(drawer).getByRole("button", { name: "Hide world truth" }));
     expect(within(drawer).queryByRole("region", { name: "World truth" })).toBeNull();
   });
+
+  it("refetches the revealed truth when mission or task state changes, at most once a second", async () => {
+    const truthWith = (heldBy) => ({
+      warning: "SIMULATOR TRUTH - debug only",
+      truth: {
+        world: "random", seed: 7, faults: [], obstacles: [], corridor: { pickup_corridor: "clear" },
+        objects: { red_block_1: { label: "red_block", location_id: heldBy ? null : "pickup_zone", held_by: heldBy } },
+        robots: { gripper_01: { location_id: "pickup_zone", battery_pct: 70 } },
+      },
+    });
+    server.state = clone(running);
+    server.truth = truthWith(null);
+    render(<Harness />);
+    const drawer = await screen.findByRole("region", { name: "Simulation controls" });
+    fireEvent.click(within(drawer).getByRole("button", { name: /Sim controls/ }));
+    fireEvent.click(within(drawer).getByRole("button", { name: "Reveal world truth" }));
+    await within(drawer).findByText(/red_block_1 \(red_block\) at pickup_zone/);
+    expect(server.truthTimes).toHaveLength(1);
+
+    // a task finishes and the world version moves on every poll: the truth follows, throttled
+    server.truth = truthWith("gripper_01");
+    let v = 0;
+    const tick = setInterval(() => {
+      const next = clone(running);
+      next.world.version = ++v;
+      next.mission.revisions.at(-1).runtime.t1.state = v % 2 ? "succeeded" : "running";
+      server.state = next;
+    }, 150);
+    try {
+      await within(drawer).findByText(/held by gripper_01/, {}, { timeout: 3000 });
+      await new Promise((r) => setTimeout(r, 1600));
+    } finally {
+      clearInterval(tick);
+    }
+    expect(server.truthTimes.length).toBeGreaterThanOrEqual(2);
+    const gaps = server.truthTimes.slice(1).map((t, i) => t - server.truthTimes[i]);
+    expect(Math.min(...gaps)).toBeGreaterThanOrEqual(950);
+  }, 10000);
 
   it("is hidden when the gateway says plainly it is not simulated", async () => {
     server.state = { ...clone(running), gateway: { ...running.gateway, simulated: false } };
