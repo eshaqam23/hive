@@ -3,7 +3,7 @@
 Generalizes exec_v2's QwenPlanner. The request bodies per provider kind and the
 scope-required schema patch live in ``llm.wire``; which provider answers lives
 in ``llm.router`` (ordered fallbacks, failover on transport errors only). This
-class keeps what QwenPlanner owned: the prompt (hive.prompt.v2), the token
+class keeps what QwenPlanner owned: the prompt (hive.prompt.v3), the token
 budget, one request at a time, schema validation, and the PlannerRecord.
 
 A schema or parse failure raises LLMParseError carrying the raw output; the

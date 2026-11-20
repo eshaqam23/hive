@@ -277,3 +277,76 @@ def test_catalog_text_presents_labels_as_open_vocabulary():
         assert f"{label} ({prof.mass_kg} kg" in text
     assert "rubber_duck" in text  # aliases are listed so the model can map synonyms
     assert RULES in system_prompt()
+
+
+# ---------------------------------------------------------------- WS2: prompt v3
+def _examples():
+    from hive_exec.contracts import PlanProposal
+    from hive_exec.planner.prompt import EXAMPLES
+
+    return [(cmd, PlanProposal.model_validate(out)) for cmd, _state, out in EXAMPLES]
+
+
+def _example(prefix):
+    return next(p for cmd, p in _examples() if cmd.startswith(prefix))
+
+
+def test_prompt_v3_rules_cover_find_answer_and_asking():
+    from hive_exec.planner.prompt import PROMPT_VERSION, RULES, system_prompt
+
+    assert PROMPT_VERSION == "hive.prompt.v3" and "hive.prompt.v3" in system_prompt()
+    for phrase in ["Write your own summary for this command; do not reuse example text.",
+                   "object_located", "no scan_route", "the field", "work_area", "ONE short question",
+                   "Never map an unnamed destination to dropoff_zone", "operator's own noun",
+                   "disposition=answer", "clarification_options", "Do not ask when one reading is clear"]:
+        assert phrase in RULES, phrase
+
+
+def test_prompt_v3_examples_validate_and_have_distinct_summaries():
+    examples = _examples()
+    assert {p.disposition for _, p in examples} == {"plan", "clarify", "reject", "answer"}
+    summaries = [p.summary for _, p in examples]
+    assert len(set(summaries)) == len(summaries)
+
+
+def test_prompt_v3_find_only_example_is_sensing_only():
+    p = _example("Find a red box in the field")
+    assert p.disposition == "plan" and p.scope == "full"
+    assert [(g.kind, g.object_query.label, g.area_id) for g in p.mission_goals] == \
+        [("object_located", "red_block", "work_area")]
+    assert [t.action.kind for t in p.tasks] == ["inspect_area"]
+
+
+def test_prompt_v3_fetch_example_is_staged_with_the_route_scan():
+    p = _example("Find the green block and bring it to the drop-off zone")
+    assert p.scope == "observation_stage"
+    assert [(g.kind, g.location_id) for g in p.mission_goals] == [("object_at", "dropoff_zone")]
+    assert {t.action.kind for t in p.tasks} == {"inspect_area", "scan_route"}
+
+
+def test_prompt_v3_examples_show_unknown_noun_answer_and_clarify():
+    duck = _example("Is there a duck")
+    assert duck.disposition == "plan" and duck.mission_goals[0].object_query.label == "duck"
+    ans = _example("What can the camera car do?")
+    assert ans.disposition == "answer" and ans.answer and not ans.tasks
+    dest = _example("Bring the blue block back to base")
+    assert dest.disposition == "clarify" and "dropoff_zone" not in json.dumps(dest.model_dump()["mission_goals"])
+    assert dest.clarification_options and dest.clarification_question.count("?") == 1
+    vague = _example("Bring the block over here")
+    assert vague.disposition == "clarify" and vague.clarification_question.count("?") == 1
+    assert len(vague.clarification_options) >= 2
+
+
+def test_prompt_v3_fits_the_token_budget_with_clarification_history():
+    from hive_exec.context import MAX_INPUT_TOKENS, build_context, estimate_tokens
+    from hive_exec.llm import wire
+    from hive_exec.planner.prompt import system_prompt, user_prompt
+    from hive_exec.world import ObservedWorld, initial_robot_states
+
+    hist = [{"question": "Which block should I bring?", "options": ["the red block", "the blue block"],
+             "answer": "the red block", "phase": "initial"}] * 3
+    ctx = build_context(phase="clarification_answer", command="Bring the block over here.",
+                        robots=initial_robot_states(), world=ObservedWorld(), clarifications=hist)
+    total = (estimate_tokens(system_prompt()) + estimate_tokens(user_prompt(ctx))
+             + estimate_tokens(json.dumps(wire.planning_schema())) // 4)
+    assert total < MAX_INPUT_TOKENS // 2
