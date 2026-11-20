@@ -111,9 +111,9 @@ hive-exec venv has FastAPI + pytest-asyncio but no cv2, so test_adapters.py fail
 System pytest 7.4 warns "Unknown config option: asyncio_mode"; that is expected.
 - live-data (system python3, expect 152):
   `python3 -m pytest backend/tests -q --ignore=backend/tests/test_api.py --ignore=backend/tests/test_contracts.py --ignore=backend/tests/test_executive.py --ignore=backend/tests/test_validator.py --ignore=backend/tests/test_operator_messages.py --ignore-glob='backend/tests/test_llm_*'`
-- exec (hive-exec venv, expect 587 after the WS5 fix batch 2; 569 after the WS5 fixes; 553 after WS5; 518 after WS4; 442 after WS3; 411 after the WS2 fixes; 390 after WS2; 308 after WS1; 244 after prompt 9):
+- exec (hive-exec venv, expect 604 after the WS5 fix batch 3; 587 after the WS5 fix batch 2; 569 after the WS5 fixes; 553 after WS5; 518 after WS4; 442 after WS3; 411 after the WS2 fixes; 390 after WS2; 308 after WS1; 244 after prompt 9):
   `~/.venvs/hive-exec/bin/python -m pytest backend/tests/test_api.py backend/tests/test_contracts.py backend/tests/test_executive.py backend/tests/test_validator.py backend/tests/test_operator_messages.py backend/tests/test_llm_*.py -q`
-- Also run `npm test` (Windows Node, expect 357 after the WS5 fix batch 2, 35 files; 356 after the WS5 fixes; 355 after WS5; 341 after WS4; 322 after WS3; 315 after the WS2 fixes; 313 after WS2; 305 after WS1; 297 before it) and the mock e2e from the Baseline section.
+- Also run `npm test` (Windows Node, expect 358 after the WS5 fix batch 3, 35 files; 357 after the WS5 fix batch 2; 356 after the WS5 fixes; 355 after WS5; 341 after WS4; 322 after WS3; 315 after the WS2 fixes; 313 after WS2; 305 after WS1; 297 before it) and the mock e2e from the Baseline section.
 - Prompt evaluation against a live model (WS2, not part of the suites): `backend/scripts/prompt_eval.py` runs the ten
   labelled commands through the Executive on the fake fleet with the `executive` role of an explicitly named provider
   store, prints a PASS/FAIL table and exits 1 on any failure (2 when the store or provider is unusable). Keys are never
@@ -135,23 +135,33 @@ terminal/canceling one. `mission.operator_messages` (state and export) keeps eve
   that lands is dropped unseen and the feedback re-plan runs with all held messages. executing + now: a live re-plan while
   the running revision continues; approving it marks the old revision's never-dispatched tasks `superseded` (dispatched ones
   finish, the stage end runs once); rejecting or ignoring it leaves the old revision running; if the stage ends first the
-  pending re-plan is superseded (`stage_ended`) and the feedback still reaches the continuation (`delivered_to_revision` then
-  names the revision that used it); a task the old revision left running that fails or is rejected takes the normal failure
+  pending re-plan is superseded (`stage_ended`) and the feedback still reaches the continuation; a task the old revision left running that fails or is rejected takes the normal failure
   path (one bounded recovery, history names the old revision, task and robot). queue: delivered at the next
   planning point (feedback, continuation, recovery) or on send-now. STOP ALL, cancel and every terminal outcome cancel queued
-  and held messages; a terminal outcome also cancels a delivered message no surviving revision used (note "Mission ended
-  before your message was applied..."). A held message that falls back to the queue after a live planner error gets a note.
+  and held messages (delivered ones: I3 below). A held message that falls back to the queue after a live planner error gets a note.
   The thread shows held, delivered and canceled messages with their note.
+- Message invariant (fix batch 3): I1 a delivered message is applied to revision N iff N was approved and N's planning
+  context included it; `delivered_to_revision` is the first such N, set at approval (`Mission.message_context`: revision ->
+  message ids; an edit keeps its base's). Before that it is delivered with no revision (tag "delivered - awaiting approval").
+  I2 a planning reply without a plan (answer / clarify / reject) consumes the messages its context had: delivered, no
+  revision, a note naming the reply ("The planner answered."); one a revision still awaiting approval carries is left alone.
+  I3 at a terminal state every delivered feedback message neither applied nor consumed is canceled with "Mission ended
+  before your message was applied; send it again as a new mission."
 - Stop current: `POST /api/exec/tasks/{task_id}/cancel {revision?}` (task ids repeat across revisions; default the active
   revision; 409 without a live attempt). A confirmed stop of an old revision's task is logged, not a fault (no recovery).
-- Failures: the first failure of a stage is the recovery `failure`; later ones are history lines. Tasks the executive cancels
+- Failures: the first failure of a stage is the recovery `failure`; later ones are history lines, except that a real
+  fault replaces an operator stop as the failure. An old revision's failed / rejected / uncertain / unrequested-cancel
+  result while recovering takes the same path (uncertain blocks); while the recovery is planned or awaits approval an
+  uncertain one blocks the mission, so the pending revision can never be approved (409). Tasks the executive cancels
   because of it are recorded `canceled (stopped after <task> failed)`, never as failures; a cancel nobody asked for still is.
 - The planner sees delivered feedback only inside the delimited `OPERATOR FEEDBACK` block (prompt hive.prompt.v3.4), capped
   at the 4 newest messages and 1200 ASCII-equivalent characters (`text_width`) of the rendered form (`(N earlier messages omitted)`);
   the newest is always shown, as a prefix marked ` [truncated]` if it alone is too long; state keeps the full text, plus `previous_proposal` for a feedback
   re-plan. Untrusted text (command, clarification Q/A, feedback) is JSON with non-ASCII kept (`safe_dumps`;
   U+0085/U+2028/U+2029 and lone surrogates escaped, so it cannot leave its line); `estimate_tokens` counts each
-  non-ASCII code point as 2 tokens; a repair pass's previous output is cut to the budget left. The baseline applies feedback by keyword rules only (find-only / camera-only, negated phrases dropped) and cannot
+  non-ASCII code point as one token per UTF-8 byte (2-4; ASCII unchanged at len/3.2); over the budget the planner refuses,
+  and planning ends planner_error "This request is too long for the planner..." with `outcome.retryable: false` (replan 409,
+  no Try again); lone surrogates in a repair pass's previous output become U+FFFD; a repair pass's previous output is cut to the budget left. The baseline applies feedback by keyword rules only (find-only / camera-only, negated phrases dropped) and cannot
   change approved goals of a later stage; it says so in issues.
 - Reject still ends the mission (the card says so); Edit is unchanged. Tests: `backend/tests/test_operator_messages.py`,
   `src/chat/ChatView.test.jsx` (operator messages) and `src/chat/chatModel.test.js`.
