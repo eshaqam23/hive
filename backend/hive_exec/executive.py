@@ -542,6 +542,7 @@ class Executive:
             if m.status != "awaiting_approval":
                 raise ExecError(f"Mission is {m.status}, not awaiting approval.")
             base = self._latest(m, revision)
+            self._check_edit_targets(base, edits)
             data = base.proposal.model_dump()
             constraints = dict(base.operator_constraints)
             for e in edits:
@@ -573,6 +574,8 @@ class Executive:
                 proposal = PlanProposal.model_validate(data)
             except Exception as exc:  # noqa: BLE001
                 raise ExecError(f"Edited plan is not a valid proposal: {exc}", 400) from exc
+            if _hash(proposal.model_dump(exclude=HASH_EXCLUDED)) == base.proposal_hash                     and constraints == base.operator_constraints:
+                raise ExecError("Edit changes nothing; no new revision was made.", 400)
             await self.refresh_status()
             alloc = self.allocator.allocate(proposal, self.robots, constraints)
             vres = validate(proposal, alloc, self.robots, self.world, m.canonical_goals, constraints)
@@ -582,6 +585,27 @@ class Executive:
                                        preview_from=self._previous_observation(m) if base.preview_diff else None)
             self.log("operator", f"Edited revision {revision} -> {plan.revision}.", edits=edits)
             return plan
+
+    @staticmethod
+    def _check_edit_targets(base: ExecutionPlan, edits: list[dict]) -> None:
+        """An edit may only name tasks and bindings that can run in this revision. The next-stage preview has
+        its own tasks; naming one (or something that does not exist) would change nothing real."""
+        tasks = {t.task_id for t in base.tasks}
+        bindings = {t.binding_id for t in base.tasks}
+        preview = base.proposal.next_stage_preview
+        in_preview_tasks = {t.task_id for t in preview.tasks} if preview else set()
+        in_preview_bindings = {t.binding_id for t in preview.tasks} if preview else set()
+        for e in edits:
+            op = e.get("op")
+            if op in ("remove_task", "set_param", "set_depends_on"):
+                tid, known, in_preview, what = e.get("task_id"), tasks, in_preview_tasks, "task"
+            elif op in ("set_robot", "clear_robot"):
+                tid, known, in_preview, what = e.get("binding_id"), bindings, in_preview_bindings, "binding"
+            else:
+                continue  # unsupported ops keep their own error below
+            if tid not in known:
+                hint = "; the next-stage preview cannot be edited" if tid in in_preview else ""
+                raise ExecError(f"{tid} is not a {what} in revision {base.revision}{hint}.", 400)
 
     async def cancel(self) -> None:
         async with self.lock:

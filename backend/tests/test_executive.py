@@ -1468,3 +1468,50 @@ async def test_preview_changes_on_a_continuation_without_a_preview_to_answer_are
     await finish_stage(ex)
     assert stub.contexts[1].previous_preview is None
     assert ex.mission.revisions[-1].proposal.preview_changes == []
+
+
+# ================================================== WS4 fix F3: edits must change something that can run
+
+async def refused_edit(ex, edits, revision=None):
+    n = len(ex.mission.revisions)
+    with pytest.raises(ExecError) as err:
+        await ex.edit(revision or ex.mission.revisions[-1].revision, edits)
+    assert 400 <= err.value.status < 500
+    assert len(ex.mission.revisions) == n and ex.mission.status == "awaiting_approval"  # no revision was made
+    return str(err.value)
+
+
+async def test_edit_naming_a_preview_only_task_or_binding_is_refused(make_exec):
+    ex, _ = await run_stage1(make_exec, [staged(), CARRY_FULL])
+    base = ex.mission.revisions[-1].proposal_hash
+    msg = await refused_edit(ex, [{"op": "remove_task", "task_id": "t4"}])  # only in the preview
+    assert "t4 is not a task in revision 1" in msg and "next-stage preview cannot be edited" in msg
+    msg = await refused_edit(ex, [{"op": "set_param", "task_id": "t3", "field": "location_id", "value": "pickup_zone"}])
+    assert "next-stage preview cannot be edited" in msg
+    msg = await refused_edit(ex, [{"op": "set_robot", "binding_id": "carrier", "robot_id": "gripper_01"}])
+    assert "carrier" in msg and "next-stage preview cannot be edited" in msg
+    assert ex.mission.revisions[-1].operator_constraints == {} and ex.mission.revisions[-1].proposal_hash == base
+
+
+async def test_edit_naming_nothing_that_exists_is_refused(make_exec):
+    ex, _ = await run_stage1(make_exec, [staged(), CARRY_FULL])
+    msg = await refused_edit(ex, [{"op": "set_param", "task_id": "t9", "field": "area_id", "value": "pickup_zone"}])
+    assert "t9 is not a task in revision 1" in msg and "preview" not in msg
+    assert "t9" in await refused_edit(ex, [{"op": "remove_task", "task_id": "t9"}])
+    assert "t9" in await refused_edit(ex, [{"op": "set_depends_on", "task_id": "t9", "value": []}])
+    assert "ghost" in await refused_edit(ex, [{"op": "set_robot", "binding_id": "ghost", "robot_id": "camera_01"}])
+    assert "ghost" in await refused_edit(ex, [{"op": "clear_robot", "binding_id": "ghost"}])
+
+
+async def test_edit_that_changes_nothing_is_refused_but_a_real_edit_still_makes_a_revision(make_exec):
+    ex, _ = await run_stage1(make_exec, [staged(), CARRY_FULL])
+    same = {"op": "set_param", "task_id": "t1", "field": "area_id", "value": "work_area"}
+    assert "Edit changes nothing" in await refused_edit(ex, [same])
+    assert "Edit changes nothing" in await refused_edit(ex, [{"op": "clear_robot", "binding_id": "observer"}])
+    plan = await ex.edit(1, [{"op": "set_param", "task_id": "t1", "field": "area_id", "value": "pickup_zone"}])
+    assert plan.revision == 2 and plan.proposal_hash != ex.mission.revisions[0].proposal_hash
+    plan = await ex.edit(2, [{"op": "set_robot", "binding_id": "observer", "robot_id": "camera_01"}])
+    assert plan.revision == 3 and plan.operator_constraints == {"observer": "camera_01"}  # same hash, new constraint
+    assert "Edit changes nothing" in await refused_edit(
+        ex, [{"op": "set_robot", "binding_id": "observer", "robot_id": "camera_01"}])
+
