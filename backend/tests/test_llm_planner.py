@@ -294,8 +294,8 @@ def _example(prefix):
 def test_prompt_v3_rules_cover_find_answer_and_asking():
     from hive_exec.planner.prompt import PROMPT_VERSION, RULES, system_prompt
 
-    assert PROMPT_VERSION == "hive.prompt.v3.1" and "hive.prompt.v3.1" in system_prompt()
-    for phrase in ["Write your own summary for this command; do not reuse example text.",
+    assert PROMPT_VERSION == "hive.prompt.v3.2" and "hive.prompt.v3.2" in system_prompt()
+    for phrase in ["Write your own summary and rationale for this command; do not reuse example text.",
                    "object_located", "no scan_route", "the field", "work_area", "ONE short question",
                    "Never map an unnamed destination to dropoff_zone", "operator's own noun",
                    "disposition=answer", "clarification_options", "Do not ask when one reading is clear"]:
@@ -349,7 +349,7 @@ def test_prompt_v3_fits_the_token_budget_with_clarification_history():
                         robots=initial_robot_states(), world=ObservedWorld(), clarifications=hist)
     total = (estimate_tokens(system_prompt()) + estimate_tokens(user_prompt(ctx))
              + estimate_tokens(json.dumps(wire.planning_schema())) // 4)
-    assert total < MAX_INPUT_TOKENS // 2
+    assert total < MAX_INPUT_TOKENS * 6 // 10  # WS4: was 50 %; the preview rules and schema need the room
 
 
 # ---------------------------------------------------------------- WS3: plan rationale and sensorless navigation
@@ -390,9 +390,10 @@ PROMPT_V3_CHARS = 10917  # len(system_prompt()) of hive.prompt.v3 at e6f94bf
 
 
 def test_prompt_growth_for_rationale_stays_under_600_chars():
+    # v3 -> v3.1 added < 600; v3.1 -> v3.2 (preview) may add PROMPT_WS4_BUDGET more (see the WS4 test below)
     from hive_exec.planner.prompt import system_prompt
 
-    assert len(system_prompt()) - PROMPT_V3_CHARS < 600
+    assert len(system_prompt()) - PROMPT_V3_CHARS < 600 + PROMPT_WS4_BUDGET
 
 
 def test_prompt_with_rationale_still_fits_the_token_budget():
@@ -400,3 +401,161 @@ def test_prompt_with_rationale_still_fits_the_token_budget():
 
     assert wire.planning_schema()["properties"]["rationale"]["maxItems"] == 4
     test_prompt_v3_fits_the_token_budget_with_clarification_history()
+
+
+# ---------------------------------------------------------------- WS4: next-stage preview in the prompt
+PROMPT_V31_CHARS = 11513  # len(system_prompt()) of hive.prompt.v3.1 at afd062e
+PROMPT_WS4_BUDGET = 900 + 200  # B (preview rules and example) < 900, G (carry-overs) <= 200 on top
+
+
+def _preview_context(preview=True):
+    from hive_exec.contracts import Observation, ObjectAtGoal
+    from hive_exec.context import build_context
+    from hive_exec.world import ObservedWorld, initial_robot_states
+
+    w = ObservedWorld()
+    w.accept(Observation(kind="object_seen", entity_id="green_block_1", label="green_block", area_id="work_area",
+                         location_id="pickup_zone"), source="camera_01")
+    goal = ObjectAtGoal(kind="object_at", object_query={"label": "green_block"}, location_id="dropoff_zone")
+    prev = None
+    if preview:
+        prev = {"from_revision": 1, "summary": "Carry the green block to the drop-off zone.",
+                "tasks": [{"task_id": "t1", "binding_id": "carrier",
+                           "action": {"kind": "navigate_to", "location_id": "pickup_zone",
+                                      "route_id": "pickup_corridor"}, "depends_on": []}],
+                "waits_for": ["camera_01 sighting of green_block"]}
+    return build_context(phase="continuation", command="Bring the green block to the drop-off zone.",
+                         robots=initial_robot_states(), world=w, canonical_goals=[goal], previous_preview=prev)
+
+
+def test_prompt_is_v3_2_and_says_so():
+    from hive_exec.planner.prompt import PROMPT_VERSION, system_prompt
+
+    assert PROMPT_VERSION == "hive.prompt.v3.2" and "hive.prompt.v3.2" in system_prompt()
+
+
+def test_prompt_rules_ask_for_a_preview_and_for_changes_on_continuation():
+    from hive_exec.planner.prompt import RULES
+
+    assert "next_stage_preview" in RULES and "waits_for" in RULES and "object_query" in RULES
+    rule = RULES[RULES.index("16. "):]
+    for phrase in ["previous_preview", "keep it where it still fits", "object elsewhere", "two matches",
+                   "route blocked", "robot battery low", "preview_changes", "max 4"]:
+        assert phrase in rule, phrase
+    assert "Only shown, never run" in RULES
+
+
+def test_fetch_example_shows_a_next_stage_preview_by_object_query_and_no_other_example_does():
+    p = _example("Find the green block and bring it to the drop-off zone")
+    pv = p.next_stage_preview
+    assert p.scope == "observation_stage" and pv is not None and len(pv.waits_for) >= 1
+    assert [t.action.kind for t in pv.tasks] == ["navigate_to", "pick_object", "navigate_to", "place_object"]
+    assert pv.tasks[1].action.object_query.label == "green_block" and pv.tasks[1].action.object_id is None
+    assert [c for c, e in _examples() if e.next_stage_preview is not None] == \
+        [next(c for c, _ in _examples() if c.startswith("Find the green block and bring"))]
+
+
+def test_continuation_example_explains_what_the_evidence_changed():
+    p = _example("(continuation)")
+    assert p.scope == "full" and p.next_stage_preview is None and p.preview_changes
+
+
+def test_continuation_user_prompt_carries_the_previous_preview_and_points_at_the_rule():
+    from hive_exec.planner.prompt import user_prompt
+
+    text = user_prompt(_preview_context())
+    assert '"previous_preview"' in text and "camera_01 sighting of green_block" in text
+    assert "previous_preview" in text.split("```")[2]  # the instruction line after the data block
+    without = user_prompt(_preview_context(preview=False))
+    assert "previous_preview" not in without
+
+
+def test_prompt_growth_for_preview_and_carry_overs_is_budgeted():
+    from hive_exec.planner.prompt import system_prompt
+
+    assert len(system_prompt()) - PROMPT_V31_CHARS < PROMPT_WS4_BUDGET
+
+
+def test_schema_with_a_nested_optional_preview_still_fits_the_structured_output_budget():
+    from hive_exec.context import MAX_INPUT_TOKENS, estimate_tokens
+    from hive_exec.llm import wire
+    from hive_exec.planner.prompt import system_prompt, user_prompt
+
+    schema = wire.planning_schema()
+    assert "next_stage_preview" in schema["properties"] and "next_stage_preview" not in schema["required"]
+    total = (estimate_tokens(system_prompt()) + estimate_tokens(user_prompt(_preview_context()))
+             + estimate_tokens(json.dumps(schema)) // 4)
+    assert total < MAX_INPUT_TOKENS * 6 // 10  # WS4: was 50 %; the preview rules and schema need the room
+
+
+async def test_llm_proposal_with_a_preview_becomes_a_revision_with_the_preview_never_allocated(make_exec):
+    from hive_exec.catalog import ROBOTS  # noqa: F401
+
+    staged = dict(OBS, next_stage_preview={
+        "summary": "Carry the red block to the drop-off zone.",
+        "tasks": [{"task_id": "t1", "binding_id": "carrier", "depends_on": [],
+                   "action": {"kind": "navigate_to", "location_id": "pickup_zone", "route_id": "pickup_corridor"}}],
+        "waits_for": ["camera_01 sighting of red_block"]})
+    planner, mock = scripted_planner([json.dumps(staged)])
+    ex = await make_exec(planners={"llm": planner})
+    await ex.create_mission(DEMO)
+    rev = ex.mission.revisions[-1]
+    assert rev.proposal.next_stage_preview.tasks[0].action.kind == "navigate_to"
+    assert set(rev.allocations) == {"observer", "surveyor"}
+    assert mock.requests[-1]["structured_outputs"]["json"] == planner.schema
+
+
+# ---------------------------------------------------------------- WS4 carry-overs (G): prompt hygiene
+def test_every_plan_example_has_its_own_rationale():
+    plans = [(cmd, p) for cmd, p in _examples() if p.disposition == "plan"]
+    assert plans
+    for cmd, p in plans:
+        assert p.rationale, cmd
+    texts = [r for _, p in plans for r in p.rationale]
+    assert len(set(texts)) == len(texts)  # no two examples share a rationale line
+
+
+def test_rule_11_also_forbids_copying_example_rationale():
+    from hive_exec.planner.prompt import RULES
+
+    assert "Write your own summary and rationale for this command; do not reuse example text." in RULES
+
+
+def _observed(line_text, verb_for):
+    import re
+
+    m = re.search(rf"observes {verb_for} ([a-z_, ]+?)(?:;|$)", line_text)
+    return {x.strip() for x in m.group(1).split(",")} if m else set()
+
+
+def test_prompt_observed_places_equal_the_catalog_for_every_robot():
+    from hive_exec.catalog import ROBOTS
+    from hive_exec.planner.prompt import _catalog_text
+
+    lines = {ln.split(":")[0][2:]: ln for ln in _catalog_text().splitlines() if ln.startswith("- ") and ": skills " in ln}
+    assert set(lines) == set(ROBOTS)
+    for rid, r in ROBOTS.items():
+        assert _observed(lines[rid], "areas") == set(r.observable_areas), rid
+        assert _observed(lines[rid], "routes") == set(r.observable_routes), rid
+        assert " sees " not in lines[rid] and " scans " not in lines[rid]  # one verb: observes
+
+
+def test_prompt_follows_the_catalog_when_a_robot_observes_something_else(monkeypatch):
+    import dataclasses
+
+    from hive_exec.catalog import ROBOTS
+    from hive_exec.planner import prompt
+
+    changed = dict(ROBOTS)
+    changed["camera_01"] = dataclasses.replace(ROBOTS["camera_01"], observable_areas=("dropoff_zone",))
+    monkeypatch.setattr(prompt, "ROBOTS", changed)
+    line = next(ln for ln in prompt._catalog_text().splitlines() if ln.startswith("- camera_01"))
+    assert _observed(line, "areas") == {"dropoff_zone"}
+
+
+def test_localization_texts_no_longer_repeat_what_a_robot_observes():
+    from hive_exec.catalog import ROBOTS
+
+    for r in ROBOTS.values():
+        for place in (*r.observable_areas, *r.observable_routes):
+            assert place not in r.localization, (r.robot_id, place)

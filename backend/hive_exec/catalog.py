@@ -100,7 +100,7 @@ ROBOTS: dict[str, RobotDescriptor] = {
             ros_action="/camera_01/execute_skill",
             notes="Identifies trusted object profiles; does not measure mass from pixels.",
             sensors=("rgb_camera",),
-            localization="fixed at camera_post; sees work_area and pickup_zone (synthetic)",
+            localization="fixed at camera_post (synthetic)",
         ),
         RobotDescriptor(
             "lidar_01", "LiDAR RC Car", "lidarRcCar",
@@ -109,7 +109,7 @@ ROBOTS: dict[str, RobotDescriptor] = {
             observable_routes=("pickup_corridor",),
             ros_action="/lidar_01/execute_skill",
             sensors=("2d_lidar",),
-            localization="fixed at lidar_post; scans pickup_corridor (synthetic)",
+            localization="fixed at lidar_post (synthetic)",
         ),
         RobotDescriptor(
             "gripper_01", "Gripper RC Car", "gripperRcCar",

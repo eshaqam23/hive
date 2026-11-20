@@ -482,9 +482,10 @@ def test_rationale_is_an_optional_array_of_strings_in_the_schema():
 def test_robot_descriptors_state_their_sensors_and_localization():
     r = catalog.ROBOTS
     assert r["camera_01"].sensors == ("rgb_camera",) and "camera_post" in r["camera_01"].localization
-    assert "work_area" in r["camera_01"].localization and "pickup_zone" in r["camera_01"].localization
     assert r["lidar_01"].sensors == ("2d_lidar",) and "lidar_post" in r["lidar_01"].localization
-    assert "pickup_corridor" in r["lidar_01"].localization
+    # what each one observes is not repeated here: it lives in observable_areas / observable_routes
+    assert r["camera_01"].observable_areas == ("work_area", "pickup_zone")
+    assert r["lidar_01"].observable_routes == ("pickup_corridor",)
     g = r["gripper_01"]
     assert g.sensors == ()
     for phrase in ["no onboard camera or LiDAR", "dead reckoning", "cannot detect obstacles",
