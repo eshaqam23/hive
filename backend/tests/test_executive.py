@@ -1389,3 +1389,60 @@ async def test_recovery_planning_exception_ends_planner_error_then_replan_recove
     assert ex.mission.status == "awaiting_approval"
     assert ex.mission.revisions[-1].revision == 2 and ex.mission.revisions[-1].validation.ok
     assert [t.skill for t in ex.mission.revisions[-1].tasks] == ["navigate_to", "place_object"]
+
+
+# ================================================== WS4 fix F5: a preview is consumed once
+
+FINISH_CARRY = {"schema_version": V1, "disposition": "plan", "scope": "full", "summary": "Finish the carry.",
+                "mission_goals": RED_AT_DROP, "stage_goals": [], "rationale": ["gripper_01 holds the block."],
+                "tasks": [_spec("t1", "carrier", {"kind": "navigate_to", "location_id": "dropoff_zone",
+                                                   "route_id": "pickup_corridor"}),
+                          _spec("t2", "carrier", {"kind": "place_object", "object_query": Q_RED,
+                                                   "location_id": "dropoff_zone"}, ["t1"])]}
+
+
+async def to_failed_full_stage(ex):
+    """stage 1 (with preview) runs, the carry is approved and fails after the pick; a recovery is planned."""
+    await finish_stage(ex)  # rev 1 done, rev 2 (the carry, a continuation) waits
+    assert ex.mission.revisions[-1].kind == "continuation" and ex.mission.revisions[-1].preview_diff.matches_preview
+    await approve_latest(ex)
+    await wait_for(ex, {"awaiting_approval"} | DONE)
+    return ex.mission.revisions[-1]
+
+
+async def test_recovery_after_a_consumed_preview_gets_no_previous_preview_and_no_diff(make_exec):
+    stub = StubPlanner([staged(), CARRY_FULL, FINISH_CARRY])
+    ex = await make_exec("unknown", ["nav_fault_after_pickup"], planners={"stub": stub})
+    await ex.create_mission("Find the red block and bring it to the drop-off zone.")
+    rec = await to_failed_full_stage(ex)
+    m = ex.mission
+    assert rec.kind == "recovery" and rec.revision == 3 and rec.preview_diff is None
+    assert [c.phase for c in stub.contexts] == ["initial", "continuation", "recovery"]
+    assert stub.contexts[2].previous_preview is None
+    assert m.revisions[0].preview_consumed_by == 2 and m.revisions[1].preview_consumed_by is None
+    # the failed full stage ran, so the stage-1 preview is behind us: nothing later may compare against it
+    assert Executive._previous_observation(m) is None
+    assert ex.state()["mission"]["revisions"][0]["preview_consumed_by"] == 2
+
+
+async def test_replan_after_a_recovery_planner_error_does_not_reuse_the_old_preview(make_exec):
+    planner = RaisingChecksPlanner([staged(), CARRY_FULL, BAD_PLAN, FINISH_CARRY])
+    ex = await make_exec("unknown", ["nav_fault_after_pickup"], planners={"stub": planner})
+    await ex.create_mission("Find the red block and bring it to the drop-off zone.")
+    await finish_stage(ex)
+    await approve_latest(ex)
+    assert await wait_for(ex, {"planner_error"} | DONE) == "planner_error"
+    await ex.replan()  # runs as a continuation: canonical goals exist
+    assert planner.contexts[3].phase == "continuation" and planner.contexts[3].previous_preview is None
+    rev = ex.mission.revisions[-1]
+    assert rev.revision == 3 and rev.kind == "continuation" and rev.preview_diff is None
+
+
+async def test_an_unapproved_continuation_leaves_the_preview_unconsumed(make_exec):
+    ex, stub = await run_stage1(make_exec, [staged(), CARRY_FULL])
+    await finish_stage(ex)
+    assert ex.mission.revisions[0].preview_consumed_by is None  # rev 2 only waits for approval
+    await ex.replan()
+    assert stub.contexts[2].previous_preview["from_revision"] == 1
+    await approve_latest(ex)
+    assert ex.mission.revisions[0].preview_consumed_by == 3

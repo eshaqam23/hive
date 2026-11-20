@@ -393,6 +393,9 @@ class ExecutionPlan(Strict):
     approved_by: Optional[str] = None
     # A continuation revision compared with the previous stage's preview (None when there was none).
     preview_diff: Optional[PreviewDiff] = None
+    # An observation stage's preview is answered once: the number of the approved revision that compared
+    # itself with it (set at approval; None while unanswered).
+    preview_consumed_by: Optional[int] = None
 
 
 class TaskEnvelope(Strict):

@@ -374,11 +374,18 @@ class Executive:
 
     @staticmethod
     def _previous_observation(m: Mission) -> Optional[ExecutionPlan]:
-        """The latest finished observation-stage revision: the stage whose preview a continuation answers.
+        """The observation stage whose preview a continuation answers, or None.
 
-        A later observation stage without a preview hides an older one (that preview is no longer current)."""
-        return next((p for p in reversed(m.revisions)
-                     if p.status == "finished" and p.proposal.scope == "observation_stage"), None)
+        It is the last revision that was approved (so it directly precedes this continuation), it finished,
+        it is an observation stage, and no approved revision has compared itself with it yet. A full stage
+        that ran (even a failed one) or a recovery after it ends the preview's life; an observation stage
+        without a preview hides an older one."""
+        ran = [p for p in m.revisions if p.approved_at is not None]
+        last = ran[-1] if ran else None
+        if (last is None or last.status != "finished" or last.proposal.scope != "observation_stage"
+                or last.preview_consumed_by is not None):
+            return None
+        return last
 
     @staticmethod
     def _preview_for_context(previous: Optional[ExecutionPlan]) -> Optional[dict]:
@@ -503,6 +510,8 @@ class Executive:
                 m.stage_count += 1
             for t in plan.tasks:
                 m.tasks[f"{revision}:{t.task_id}"] = TaskRuntime(t.task_id, revision, t.robot_id)
+            if plan.preview_diff is not None and plan.preview_diff.previous_revision <= len(m.revisions):
+                m.revisions[plan.preview_diff.previous_revision - 1].preview_consumed_by = revision
             self.log("approval", f"Operator approved revision {revision} ({plan.proposal_hash}).")
             await self._tick()
             return plan
