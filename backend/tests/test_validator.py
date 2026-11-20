@@ -1,3 +1,5 @@
+import pytest
+
 from hive_exec.allocator import CapabilityAllocator
 from hive_exec.contracts import Observation, PlanProposal
 from hive_exec.validator import validate
@@ -190,3 +192,52 @@ def test_sensing_accepts_any_label():
     goals = [{"kind": "object_located", "object_query": {"label": "mystery_crate"}, "area_id": "work_area"}]
     res, _ = run(_proposal(tasks, goals=goals))
     assert res.report.ok, res.report.findings
+
+
+# ================================================== WS3: missing_rationale for sensorless robots
+
+def _with_rationale(p, rationale):
+    return p.model_copy(update={"rationale": rationale})
+
+
+def _info(res, code):
+    return [f for f in res.report.findings if f.code == code]
+
+
+def test_missing_rationale_info_when_sensorless_robot_moves_without_rationale():
+    res, _ = run(_proposal(CARRY))
+    assert res.report.ok
+    (f,) = _info(res, "missing_rationale")
+    assert f.severity == "info" and f.task_id == "t1"  # the first move of the sensorless gripper car
+    assert "gripper_01" in f.message
+
+
+def test_no_missing_rationale_when_rationale_is_given():
+    res, _ = run(_with_rationale(_proposal(CARRY), ["Camera sees the block; lidar cleared the corridor."]))
+    assert not _info(res, "missing_rationale")
+
+
+@pytest.mark.parametrize("rationale", [[], [""], ["   ", "\t"]])
+def test_blank_rationale_counts_as_empty(rationale):
+    res, _ = run(_with_rationale(_proposal(CARRY), rationale))
+    assert _info(res, "missing_rationale")
+
+
+def test_no_missing_rationale_for_sensing_only_plans():
+    tasks = [_t("t1", "observer", {"kind": "inspect_area", "area_id": "work_area",
+                                   "object_query": {"label": "red_block"}})]
+    res, _ = run(_proposal(tasks, goals=[{"kind": "object_located", "object_query": {"label": "red_block"},
+                                          "area_id": "work_area"}]))
+    assert not _info(res, "missing_rationale")
+
+
+def test_no_missing_rationale_when_the_sensorless_robot_does_not_move():
+    # gripper already at dropoff_zone: a navigate_to the same place moves nothing
+    tasks = [_t("t1", "carrier", {"kind": "navigate_to", "location_id": "dropoff_zone"})]
+    res, _ = run(_proposal(tasks))
+    assert not _info(res, "missing_rationale")
+
+
+def test_missing_rationale_never_blocks_the_plan():
+    res, _ = run(_proposal(CARRY))
+    assert res.report.ok and "missing_rationale" not in codes(res)

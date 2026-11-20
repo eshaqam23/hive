@@ -149,6 +149,7 @@ def validate(
                       "fresh": world.is_fresh(b.fresh_until)} for oid, b in world.objects.items()}
     energy: dict[str, float] = {}
     resolved: dict[str, AllocatedTask] = {}
+    moves: dict[str, bool] = {}  # navigate_to task ids that actually change the robot's location
 
     def resolve(task: TaskSpec, allow_held: bool) -> Optional[str]:
         a = task.action
@@ -183,6 +184,7 @@ def validate(
         desc = ROBOTS[rid]
         if a.kind == "navigate_to":
             here = proj_loc.get(rid)
+            moves[t.task_id] = a.location_id != here
             if a.location_id != here:
                 route = route_between(here, a.location_id)
                 if route is None:
@@ -237,6 +239,16 @@ def validate(
                 proj_obj[oid].update({"held_by": None, "location_id": a.location_id})
         resolved[t.task_id] = AllocatedTask(task_id=t.task_id, binding_id=t.binding_id, robot_id=rid,
                                             action=action, depends_on=list(t.depends_on), skill=a.kind)
+
+    # --- rationale: a sensorless robot that moves should come with an explanation of how it gets there
+    if proposal.disposition == "plan" and not any(r.strip() for r in proposal.rationale):
+        for t in order:
+            rid = allocation.robots.get(t.binding_id)
+            if rid in ROBOTS and not ROBOTS[rid].sensors and t.action.kind == "navigate_to"                     and moves.get(t.task_id):
+                err("missing_rationale",
+                    f"{rid} has no sensors and moves, but the plan gives no rationale for how it reaches its target.",
+                    t.task_id, severity="info")
+                break
 
     # --- battery
     for rid, need in energy.items():
