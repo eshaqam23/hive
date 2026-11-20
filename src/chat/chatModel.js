@@ -146,6 +146,38 @@ export function describeWhat(action, catalog) {
   }
 }
 
+/* ------------------------------------------------------------------ next-stage preview */
+
+/* Which robots could do a previewed task, from the catalog (a preview is never allocated, so this is a hint
+   for the operator, not a plan). The preview's own preferred robot wins when it fits; no catalog, no hint. */
+export function likelyRobots(action, catalog, preferred = null) {
+  const robots = catalog?.robots;
+  if (!action || !Array.isArray(robots) || !robots.length) return preferred ? [preferred] : [];
+  const can = (r) => {
+    if (!(r.skills || []).includes(action.kind)) return false;
+    if (action.kind === "navigate_to" || action.kind === "place_object") return (r.reachable_locations || []).includes(action.location_id);
+    if (action.kind === "inspect_area" || action.kind === "capture_image") return (r.observable_areas || []).includes(action.area_id);
+    if (action.kind === "scan_route") return (r.observable_routes || []).includes(action.route_id);
+    return true;
+  };
+  const eligible = robots.filter(can).map((r) => r.robot_id);
+  return preferred && eligible.includes(preferred) ? [preferred] : eligible;
+}
+
+/* The rows of the "Changed from preview" list, from the backend's diff (never from the planner's words). */
+export function previewDiffRows(diff) {
+  if (!diff) return [];
+  return [
+    ...(diff.changed || []).map((c) => ({
+      kind: "changed",
+      sign: "~",
+      text: `${taskLabel(c.preview_task)} changed${c.task && c.task !== c.preview_task ? ` (now ${taskLabel(c.task)})` : ""}: ${(c.differences || []).join("; ") || c.what}`,
+    })),
+    ...(diff.added || []).map((a) => ({ kind: "added", sign: "+", text: `Added ${taskLabel(a.task)}: ${a.what}` })),
+    ...(diff.removed || []).map((r) => ({ kind: "removed", sign: "−", text: `Dropped ${taskLabel(r.preview_task)}: ${r.what}` })),
+  ];
+}
+
 function formatValue(key, value) {
   if (Array.isArray(value)) return `${key}: ${value.join(", ") || "none"}`;
   if (value === true) return key;

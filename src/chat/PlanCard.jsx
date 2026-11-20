@@ -2,6 +2,7 @@
 // table (what each robot was sent and where it stands), the latest report under each row, and the
 // buttons that apply to the revision's state. Edit mode uses only the Executive's typed edit ops.
 import React, { useId, useMemo, useState } from "react";
+import { describeAction } from "../executive/api.js";
 import {
   LEGEND,
   REVISION_STATUS_TEXT,
@@ -9,7 +10,9 @@ import {
   checkSummary,
   describeWhat,
   formatTaskList,
+  likelyRobots,
   planSource,
+  previewDiffRows,
   reportLine,
   rowFindings,
   taskLabel,
@@ -383,6 +386,90 @@ function WhyThisPlan({ items }) {
   );
 }
 
+/* ------------------------------------------------------------------ next stage */
+
+/* What the next stage would likely be if the evidence comes back as expected. Muted on purpose: it is not
+   approved, nothing in it runs, and the planner may change it once the evidence is in. No controls. */
+function NextStagePreview({ preview, notes, catalog }) {
+  const waits = (preview.waits_for || []).filter((w) => typeof w === "string" && w.trim() !== "");
+  return (
+    <section
+      aria-label="Likely next stage"
+      className="mx-4 my-3 min-w-0 break-words rounded-xl border border-dashed border-line bg-raised/40 px-3 py-2 text-[13px] leading-snug text-muted"
+    >
+      <h4 className="font-semibold text-ink">
+        Likely next stage - <span className="font-normal text-faint">not approved, may change</span>
+      </h4>
+      {preview.summary && <p className="mt-0.5">{preview.summary}</p>}
+      <ol aria-label="Previewed tasks" className="mt-1.5 space-y-1">
+        {(preview.tasks || []).map((t) => {
+          const robots = likelyRobots(t.action, catalog, t.preferred_robot_id);
+          return (
+            <li className="min-w-0" key={t.task_id}>
+              <span className="mr-1.5 font-mono text-[12px] text-faint">{taskLabel(t.task_id)}</span>
+              <span className="mr-1.5 font-mono text-[12px] text-ink">{robots.length ? robots.join(" or ") : catalog?.robots?.length ? "no robot can do this" : "robot decided later"}</span>
+              <span>{describeWhat(t.action, catalog)}</span>
+              <code className="mt-0.5 block break-words font-mono text-[12px] text-faint">{describeAction(t.action)}</code>
+            </li>
+          );
+        })}
+      </ol>
+      {waits.length > 0 && (
+        <div className="mt-1.5">
+          <span className="font-semibold text-ink">Waits for</span>
+          <ul aria-label="Waits for" className="mt-0.5 list-disc space-y-0.5 pl-5">
+            {waits.map((w, i) => (
+              <li key={i}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {notes.length > 0 && (
+        <ul aria-label="Notes on the preview" className="mt-1.5 space-y-0.5 text-faint">
+          {notes.map((f, i) => (
+            <li key={i}>Note: {f.message}</li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/* On a continuation: did the evidence leave the previewed stage as it was? The backend computed the diff;
+   the planner's own words (preview_changes) are shown only as its explanation. */
+function PreviewComparison({ diff, changes }) {
+  const rows = previewDiffRows(diff);
+  const kept = (diff.kept || []).length;
+  const words = (changes || []).filter((x) => typeof x === "string" && x.trim() !== "");
+  return (
+    <section aria-label="Compared with the preview" className="border-b border-line px-4 py-2 text-[13px] leading-snug text-muted">
+      <p>
+        <span className={`mr-1.5 font-semibold ${diff.matches_preview ? "text-live" : "text-warn"}`}>
+          {diff.matches_preview ? "Matches the preview" : "Changed from preview:"}
+        </span>
+        {kept > 0 && <span className="text-faint">{kept} task{kept === 1 ? "" : "s"} as previewed in rev {diff.previous_revision}</span>}
+      </p>
+      {rows.length > 0 && (
+        <ul aria-label="Changes from the preview" className="mt-1 space-y-0.5">
+          {rows.map((r, i) => (
+            <li className="min-w-0 break-words" data-diff={r.kind} key={i}>
+              <span className="mr-1.5 inline-block w-3 font-mono">{r.sign}</span>
+              {r.text}
+            </li>
+          ))}
+        </ul>
+      )}
+      {words.length > 0 && (
+        <ul aria-label="Planner's explanation" className="mt-1 list-disc space-y-0.5 pl-5 text-faint">
+          {words.map((w, i) => (
+            <li key={i}>{w}</li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 /* ------------------------------------------------------------------ card */
 
 export default function PlanCard({ rev, state, mission, latest, readOnly = false, busy = false, act, header = null }) {
@@ -396,6 +483,8 @@ export default function PlanCard({ rev, state, mission, latest, readOnly = false
   const approvable = awaiting && rev.status === "awaiting_approval";
   const edits = useMemo(() => draftEdits(rev, draft), [rev, draft]);
   const why = (rev.proposal?.rationale || []).filter((x) => typeof x === "string" && x.trim() !== "").map((x) => x.trim());
+  const preview = rev.proposal?.next_stage_preview || null;
+  const previewNotes = (rev.validation?.preview_findings || []).filter((f) => f && (f.severity === "warning" || f.severity === "info"));
 
   const approve = () => act(`/revisions/${rev.revision}/approve`, { proposal_hash: rev.proposal_hash }, `Revision ${rev.revision} approved.`);
   const reject = async () => {
@@ -438,6 +527,7 @@ export default function PlanCard({ rev, state, mission, latest, readOnly = false
       </header>
 
       <WhyThisPlan items={why} />
+      {rev.preview_diff && <PreviewComparison changes={rev.proposal?.preview_changes} diff={rev.preview_diff} />}
 
       {checks.planErrors.length > 0 && (
         <div className="border-b border-line px-4 py-2">
@@ -479,6 +569,8 @@ export default function PlanCard({ rev, state, mission, latest, readOnly = false
           </tbody>
         </table>
       </div>
+
+      {preview && <NextStagePreview catalog={state?.catalog} notes={previewNotes} preview={preview} />}
 
       {awaiting && !editing && (
         <footer className="border-t border-line px-4 py-3">

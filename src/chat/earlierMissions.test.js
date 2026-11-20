@@ -85,3 +85,19 @@ describe("storage", () => {
     expect(saveEarlier([{ id: "a" }])).toEqual([]);
   });
 });
+
+describe("missionRecord keeps the next-stage preview and its diff in the stored export", () => {
+  it("round-trips next_stage_preview, preview_changes and preview_diff through storage", () => {
+    const exp = JSON.parse(JSON.stringify({ schema_version: "hive.run-export.v1", run_id: complete.run_id, mission: complete.mission }));
+    const [first, second] = exp.mission.revisions;
+    first.proposal.next_stage_preview = { summary: "Carry it.", tasks: [], waits_for: ["camera_01 sighting"] };
+    second.proposal.preview_changes = ["Evidence as previewed."];
+    second.preview_diff = { previous_revision: 1, matches_preview: true, kept: [], changed: [], added: [], removed: [] };
+    const saved = saveEarlier(withMission([], missionRecord(complete, exp)));
+    const back = loadEarlier()[0].export.mission.revisions;
+    expect(saved).toHaveLength(1);
+    expect(back[0].proposal.next_stage_preview.waits_for).toEqual(["camera_01 sighting"]);
+    expect(back[1].proposal.preview_changes).toEqual(["Evidence as previewed."]);
+    expect(back[1].preview_diff.matches_preview).toBe(true);
+  });
+});

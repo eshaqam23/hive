@@ -17,11 +17,13 @@ import {
   durationText,
   formatResult,
   formatTaskList,
+  likelyRobots,
   livePlannerLabel,
   matchPlanningLog,
   pendingThinking,
   planSource,
   plannerLabel,
+  previewDiffRows,
   replanTrigger,
   repairNotes,
   reportLine,
@@ -399,5 +401,40 @@ describe("composer", () => {
   it("finds robot ids in a timeline message", () => {
     expect(robotsIn("gripper_01 accepted t3.", awaiting.robots).map((r) => r.robot_id)).toEqual(["gripper_01"]);
     expect(robotsIn("Mission created.", awaiting.robots)).toEqual([]);
+  });
+});
+
+describe("next-stage preview helpers", () => {
+  const catalog = {
+    robots: [
+      { robot_id: "camera_01", skills: ["inspect_area", "capture_image", "navigate_to"], reachable_locations: ["camera_post"], observable_areas: ["work_area", "pickup_zone"], observable_routes: [] },
+      { robot_id: "lidar_01", skills: ["scan_route", "navigate_to"], reachable_locations: ["lidar_post"], observable_areas: [], observable_routes: ["pickup_corridor"] },
+      { robot_id: "gripper_01", skills: ["pick_object", "place_object", "navigate_to"], reachable_locations: ["dropoff_zone", "pickup_zone"], observable_areas: [], observable_routes: [] },
+    ],
+  };
+  it("likelyRobots matches skill and reach, prefers the named robot when it fits, and hints nothing without a catalog", () => {
+    expect(likelyRobots({ kind: "navigate_to", location_id: "pickup_zone" }, catalog)).toEqual(["gripper_01"]);
+    expect(likelyRobots({ kind: "inspect_area", area_id: "work_area" }, catalog)).toEqual(["camera_01"]);
+    expect(likelyRobots({ kind: "scan_route", route_id: "pickup_corridor" }, catalog)).toEqual(["lidar_01"]);
+    expect(likelyRobots({ kind: "inspect_area", area_id: "dropoff_zone" }, catalog)).toEqual([]);
+    expect(likelyRobots({ kind: "pick_object", object_query: { label: "x" } }, catalog, "camera_01")).toEqual(["gripper_01"]);
+    expect(likelyRobots({ kind: "pick_object", object_query: { label: "x" } }, catalog, "gripper_01")).toEqual(["gripper_01"]);
+    expect(likelyRobots({ kind: "pick_object" }, null, "gripper_01")).toEqual(["gripper_01"]);
+    expect(likelyRobots({ kind: "pick_object" }, {}, null)).toEqual([]);
+    expect(likelyRobots(null, catalog)).toEqual([]);
+  });
+  it("previewDiffRows lists changed, added and removed in that order and nothing for a missing or matching diff", () => {
+    expect(previewDiffRows(null)).toEqual([]);
+    expect(previewDiffRows({ matches_preview: true, kept: [{}], changed: [], added: [], removed: [] })).toEqual([]);
+    const rows = previewDiffRows({
+      changed: [{ preview_task: "t3", task: "t3", what: "w", differences: ["a: 1 -> 2", "b: 3 -> 4"] }, { preview_task: "t1", task: "t2", what: "nav()", differences: [] }],
+      added: [{ task: "t5", what: "scan()" }],
+      removed: [{ preview_task: "t4", what: "place()" }],
+    });
+    expect(rows.map((r) => r.kind)).toEqual(["changed", "changed", "added", "removed"]);
+    expect(rows[0].text).toBe("T3 changed: a: 1 -> 2; b: 3 -> 4");
+    expect(rows[1].text).toBe("T1 changed (now T2): nav()");
+    expect(rows[2].text).toBe("Added T5: scan()");
+    expect(rows[3].text).toBe("Dropped T4: place()");
   });
 });
