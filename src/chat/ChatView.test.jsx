@@ -5,7 +5,7 @@
 // that exist.
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { EXEC_API_URL } from "../executive/api.js";
 import { useExecutive } from "../executive/useExecutive.js";
 import awaiting from "./__fixtures__/awaiting.json";
@@ -221,6 +221,7 @@ describe("edit plan", () => {
     expect(select.value).toBe("constructor");
     expect(select.options[0].textContent).toBe("constructor (no profile - cannot carry)");
   });
+
 });
 
 describe("recovery", () => {
@@ -558,34 +559,40 @@ describe("sim controls", () => {
         robots: { gripper_01: { location_id: "pickup_zone", battery_pct: 70 } },
       },
     });
-    server.state = clone(running);
-    server.truth = truthWith(null);
-    render(<Harness />);
-    const drawer = await screen.findByRole("region", { name: "Simulation controls" });
-    fireEvent.click(within(drawer).getByRole("button", { name: /Sim controls/ }));
-    fireEvent.click(within(drawer).getByRole("button", { name: "Reveal world truth" }));
-    await within(drawer).findByText(/red_block_1 \(red_block\) at pickup_zone/);
-    expect(server.truthTimes).toHaveLength(1);
-
-    // a task finishes and the world version moves on every poll: the truth follows, throttled
-    server.truth = truthWith("gripper_01");
-    let v = 0;
-    const tick = setInterval(() => {
-      const next = clone(running);
-      next.world.version = ++v;
-      next.mission.revisions.at(-1).runtime.t1.state = v % 2 ? "succeeded" : "running";
-      server.state = next;
-    }, 150);
+    const tick = (ms) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+    // fake timers drive the 500 ms state poll and the 1 s throttle (and Date), so the gaps are exact
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     try {
-      await within(drawer).findByText(/held by gripper_01/, {}, { timeout: 3000 });
-      await new Promise((r) => setTimeout(r, 1600));
+      server.state = clone(running);
+      server.truth = truthWith(null);
+      render(<Harness />);
+      await tick(50);
+      const drawer = screen.getByRole("region", { name: "Simulation controls" });
+      fireEvent.click(within(drawer).getByRole("button", { name: /Sim controls/ }));
+      fireEvent.click(within(drawer).getByRole("button", { name: "Reveal world truth" }));
+      await tick(50);
+      expect(within(drawer).getByText(/red_block_1 \(red_block\) at pickup_zone/)).toBeTruthy();
+      expect(server.truthTimes).toHaveLength(1);
+
+      // a task finishes and the world version moves on every poll: the truth follows, throttled
+      server.truth = truthWith("gripper_01");
+      let v = 0;
+      for (let i = 0; i < 24; i += 1) {
+        const next = clone(running);
+        next.world.version = ++v;
+        next.mission.revisions.at(-1).runtime.t1.state = v % 2 ? "succeeded" : "running";
+        server.state = next;
+        await tick(150);
+      }
+      await tick(1600);
+      expect(within(drawer).getByText(/held by gripper_01/)).toBeTruthy();
     } finally {
-      clearInterval(tick);
+      vi.useRealTimers();
     }
     expect(server.truthTimes.length).toBeGreaterThanOrEqual(2);
     const gaps = server.truthTimes.slice(1).map((t, i) => t - server.truthTimes[i]);
     expect(Math.min(...gaps)).toBeGreaterThanOrEqual(950);
-  }, 10000);
+  });
 
   it("is hidden when the gateway says plainly it is not simulated", async () => {
     server.state = { ...clone(running), gateway: { ...running.gateway, simulated: false } };
