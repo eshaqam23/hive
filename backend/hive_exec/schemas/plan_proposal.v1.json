@@ -412,6 +412,30 @@
   "additionalProperties": false,
   "description": "What the planner (Qwen or Baseline) may propose. Nothing here is trusted.",
   "properties": {
+    "answer": {
+      "anyOf": [
+        {
+          "maxLength": 600,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Answer"
+    },
+    "clarification_options": {
+      "items": {
+        "maxLength": 60,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 4,
+      "title": "Clarification Options",
+      "type": "array"
+    },
     "clarification_question": {
       "anyOf": [
         {
@@ -430,7 +454,8 @@
       "enum": [
         "plan",
         "clarify",
-        "reject"
+        "reject",
+        "answer"
       ],
       "title": "Disposition",
       "type": "string"

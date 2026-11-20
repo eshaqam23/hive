@@ -380,3 +380,62 @@ def test_world_from_args_defaults_to_fixed():
     assert fake_world.world_from_args({"world": None, "seed": None}).kind == "fixed"
     w = fake_world.world_from_args({"faults": ["route_blocked"], "world": "random", "seed": 3})
     assert w.kind == "random" and w.seed == 3 and "route_blocked" in w.faults
+
+
+# ------------------------------------------------------------ WS2: answer + clarification options
+
+ANSWER = {"schema_version": "hive.plan-proposal.v1", "disposition": "answer", "summary": "Gripper car abilities.",
+          "answer": "The gripper car can pick, place and drive to the pickup and drop-off zones."}
+CLARIFY = {"schema_version": "hive.plan-proposal.v1", "disposition": "clarify", "summary": "Destination unclear.",
+           "clarification_question": "Where should it go?"}
+
+
+def test_answer_disposition_parses():
+    p = PlanProposal.model_validate(ANSWER)
+    assert p.disposition == "answer" and p.answer.startswith("The gripper car") and p.scope is None
+
+
+@pytest.mark.parametrize("bad", [
+    {k: v for k, v in ANSWER.items() if k != "answer"},                  # answer missing
+    dict(ANSWER, answer=""),                                              # empty answer
+    dict(ANSWER, answer="x" * 601),                                       # too long
+    dict(ANSWER, scope="full"),                                           # scope must be null
+    dict(ANSWER, tasks=APPENDIX_A["tasks"]),                              # no tasks
+    dict(ANSWER, mission_goals=APPENDIX_A["mission_goals"]),              # no goals
+    dict(ANSWER, stage_goals=APPENDIX_A["stage_goals"]),
+    dict(ANSWER, clarification_question="Which?"),
+    dict(APPENDIX_A, answer="not for plans"),                             # answer only with answer
+    dict(CLARIFY, answer="not for clarify"),
+])
+def test_answer_rules(bad):
+    with pytest.raises(ValidationError):
+        PlanProposal.model_validate(bad)
+
+
+def test_answer_max_length_is_600():
+    assert PlanProposal.model_validate(dict(ANSWER, answer="x" * 600)).answer == "x" * 600
+
+
+def test_clarification_options():
+    p = PlanProposal.model_validate(dict(CLARIFY, clarification_options=["the drop-off zone", "the pickup zone"]))
+    assert p.clarification_options == ["the drop-off zone", "the pickup zone"]
+    assert PlanProposal.model_validate(CLARIFY).clarification_options == []
+    assert PlanProposal.model_validate(dict(CLARIFY, clarification_options=["o" * 60] * 4))
+
+
+@pytest.mark.parametrize("bad", [
+    dict(CLARIFY, clarification_options=["a", "b", "c", "d", "e"]),       # more than 4
+    dict(CLARIFY, clarification_options=["o" * 61]),                      # longer than 60
+    dict(CLARIFY, clarification_options=[""]),                            # empty option
+    dict(APPENDIX_A, clarification_options=["red_block_1"]),              # only with clarify
+    dict(ANSWER, clarification_options=["yes"]),
+])
+def test_clarification_options_rules(bad):
+    with pytest.raises(ValidationError):
+        PlanProposal.model_validate(bad)
+
+
+def test_schema_offers_answer_and_options():
+    schema = plan_proposal_json_schema()
+    assert "answer" in schema["properties"]["disposition"]["enum"]
+    assert "answer" in schema["properties"] and "clarification_options" in schema["properties"]

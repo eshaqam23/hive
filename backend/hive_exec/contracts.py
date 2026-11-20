@@ -159,7 +159,7 @@ class PlanProposal(Strict):
     """What the planner (Qwen or Baseline) may propose. Nothing here is trusted."""
 
     schema_version: Literal["hive.plan-proposal.v1"]
-    disposition: Literal["plan", "clarify", "reject"]
+    disposition: Literal["plan", "clarify", "reject", "answer"]
     scope: Optional[Literal["full", "observation_stage"]] = None
     summary: ShortText
     mission_goals: list[Goal] = Field(default_factory=list, max_length=4)
@@ -167,6 +167,9 @@ class PlanProposal(Strict):
     tasks: list[TaskSpec] = Field(default_factory=list, max_length=MAX_TASKS)
     issues: list[Annotated[str, Field(max_length=200)]] = Field(default_factory=list, max_length=8)
     clarification_question: Optional[ShortText] = None
+    clarification_options: list[Annotated[str, Field(min_length=1, max_length=60)]] = Field(
+        default_factory=list, max_length=4)
+    answer: Optional[Annotated[str, Field(min_length=1, max_length=600)]] = None
 
     @model_validator(mode="after")
     def _disposition_rules(self):
@@ -181,11 +184,20 @@ class PlanProposal(Strict):
             if self.scope is not None:
                 raise ValueError("scope must be null unless disposition is plan")
             if self.tasks:
-                raise ValueError("clarify/reject proposals cannot contain executable tasks")
+                raise ValueError("clarify/reject/answer proposals cannot contain executable tasks")
         if self.disposition == "clarify" and not self.clarification_question:
             raise ValueError("clarify requires clarification_question")
         if self.disposition != "clarify" and self.clarification_question:
             raise ValueError("clarification_question only allowed for clarify")
+        if self.disposition != "clarify" and self.clarification_options:
+            raise ValueError("clarification_options only allowed for clarify")
+        if self.disposition == "answer":
+            if not self.answer:
+                raise ValueError("answer requires answer text")
+            if self.mission_goals or self.stage_goals:
+                raise ValueError("an answer cannot carry goals")
+        elif self.answer:
+            raise ValueError("answer text only allowed for disposition answer")
         ids = [t.task_id for t in self.tasks]
         if len(set(ids)) != len(ids):
             raise ValueError("task_id values must be unique")
