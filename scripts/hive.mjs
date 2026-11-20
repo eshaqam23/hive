@@ -25,7 +25,7 @@ if (plan.error) {
 // Unbuffered so banners and logs appear at once through the pipes. HIVE_GATEWAY is set so the
 // Executive gets the launcher's default. WSLENV carries these variables across into WSL on Windows,
 // with paths such as HIVE_ROS_SETUP turned into WSL paths first.
-const baseEnv = { ...process.env, PYTHONUNBUFFERED: "1", HIVE_GATEWAY: plan.gateway };
+const baseEnv = { ...process.env, PYTHONUNBUFFERED: "1", HIVE_GATEWAY: plan.gateway, HIVE_SIM_WORLD: plan.simWorld };
 const env = isWin ? withWslPaths(baseEnv) : baseEnv;
 if (isWin) env.WSLENV = withWslEnv(process.env.WSLENV, env);
 

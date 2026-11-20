@@ -78,6 +78,14 @@ describe("launchPlan", () => {
   it("--backend-only runs the car backend alone, as before", () => {
     expect(names(launchPlan({ argv: ["--backend-only"], env: {} }))).toEqual(["backend"]);
   });
+  it("defaults HIVE_SIM_WORLD to random and keeps a world the caller already set", () => {
+    expect(launchPlan({ argv: [], env: {} }).simWorld).toBe("random");
+    expect(launchPlan({ argv: [], env: { HIVE_SIM_WORLD: "fixed" } }).simWorld).toBe("fixed");
+    expect(launchPlan({ argv: ["--backend-only"], env: {} }).simWorld).toBe("random");
+  });
+  it("rejects an unknown HIVE_SIM_WORLD", () => {
+    expect(launchPlan({ argv: [], env: { HIVE_SIM_WORLD: "chaos" } }).error).toMatch(/HIVE_SIM_WORLD/);
+  });
   it("rejects an unknown gateway and an unknown flag", () => {
     expect(launchPlan({ argv: [], env: { HIVE_GATEWAY: "ros" } }).error).toMatch(/HIVE_GATEWAY/);
     expect(launchPlan({ argv: ["--no-exec"], env: {} }).error).toMatch(/--no-exec/);
@@ -176,6 +184,9 @@ describe("withWslEnv", () => {
   });
   it("carries HIVE_ROS_SETUP so the car backend can run against the mock ROS", () => {
     expect(withWslEnv(undefined, { HIVE_ROS_SETUP: "/mnt/c/hive/backend/test/mock_ros/setup.bash" })).toBe("HIVE_ROS_SETUP");
+  });
+  it("carries HIVE_SIM_WORLD so the Executive and the fake fleet in WSL see the launcher's world", () => {
+    expect(withWslEnv(undefined, { HIVE_SIM_WORLD: "random" })).toBe("HIVE_SIM_WORLD");
   });
 });
 

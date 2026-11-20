@@ -56,8 +56,9 @@ const STEPS = {
 };
 const FLAGS = new Set(["--backend-only", "--no-executive", "--no-bridge"]);
 const GATEWAYS = ["synapse", "fake"];
+const SIM_WORLDS = ["fixed", "random"];
 
-// argv: the launcher's own arguments. Returns { gateway, steps } or { error }.
+// argv: the launcher's own arguments. Returns { gateway, simWorld, steps } or { error }.
 // HIVE_GATEWAY=synapse (default): the fake fleet + bridge carry the Executive's actions over ROS 2.
 // HIVE_GATEWAY=fake: the Executive's in-process sim, no ROS. --no-bridge: an Executive that talks to
 // a bridge you run yourself. --no-executive: live-data's backend + Vite. --backend-only: the car
@@ -67,21 +68,24 @@ export function launchPlan({ argv = [], env = {} }) {
   if (unknown) return { error: `unknown option ${unknown} (use --backend-only, --no-executive or --no-bridge)` };
   const gateway = env.HIVE_GATEWAY || "synapse";
   if (!GATEWAYS.includes(gateway)) return { error: `HIVE_GATEWAY must be "synapse" or "fake" (got "${gateway}")` };
+  // The launcher is for people trying the app, so it starts a seeded random world unless told otherwise.
+  const simWorld = env.HIVE_SIM_WORLD || "random";
+  if (!SIM_WORLDS.includes(simWorld)) return { error: `HIVE_SIM_WORLD must be "fixed" or "random" (got "${simWorld}")` };
   const has = (f) => argv.includes(f);
-  if (has("--backend-only")) return { gateway, steps: [STEPS.backend] };
+  if (has("--backend-only")) return { gateway, simWorld, steps: [STEPS.backend] };
   const executive = !has("--no-executive");
   const synapse = executive && gateway === "synapse" && !has("--no-bridge");
   const steps = [STEPS.backend];
   if (synapse) steps.push(STEPS.fleet, STEPS.bridge);
   if (executive) steps.push(STEPS.exec);
   steps.push(STEPS.vite);
-  return { gateway, steps };
+  return { gateway, simWorld, steps };
 }
 
 // Variables that must reach the WSL side (WSLENV lists them; plain names, no path translation).
 // Only the ones set in env: WSL turns a listed but unset variable into an empty string, which
 // float("") and friends then reject.
-const WSL_VARS = ["PYTHONUNBUFFERED", "HIVE_GATEWAY", "HIVE_PROVIDERS_FILE", "HIVE_SIM_TIME_SCALE", "HIVE_EXEC_PYTHON", "HIVE_ROS_SETUP"];
+const WSL_VARS = ["PYTHONUNBUFFERED", "HIVE_GATEWAY", "HIVE_PROVIDERS_FILE", "HIVE_SIM_TIME_SCALE", "HIVE_EXEC_PYTHON", "HIVE_ROS_SETUP", "HIVE_SIM_WORLD"];
 export function withWslEnv(existing, env) {
   const parts = (existing || "").split(":").filter(Boolean);
   const names = new Set(parts.map((p) => p.split("/")[0]));
