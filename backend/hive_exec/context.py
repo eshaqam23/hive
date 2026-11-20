@@ -21,7 +21,14 @@ RESERVED_OUTPUT_TOKENS = 3_072
 MAX_INPUT_TOKENS = TOTAL_WINDOW_TOKENS - RESERVED_OUTPUT_TOKENS
 # Operator feedback in the prompt (WS5): the most recent messages only; state/export keep every one.
 FEEDBACK_MAX_MESSAGES = 4
-FEEDBACK_MAX_CHARS = 1200
+FEEDBACK_MAX_CHARS = 1200  # measured on the rendered (ASCII-escaped JSON) form the prompt shows
+FEEDBACK_TRUNCATED = " [truncated]"
+
+
+def render_feedback(text: str) -> str:
+    """How one operator message appears in the prompt: one JSON string, ASCII-escaped, so no text can break
+    out of its line. The prompt and the cap both use this, so the cap measures what the model reads."""
+    return json.dumps(text)
 
 
 class ContextBudgetExceeded(RuntimeError):
@@ -136,15 +143,33 @@ def build_context(
     )
 
 
+def _fit_prefix(text: str, budget: int) -> str:
+    """The longest prefix of text, marked FEEDBACK_TRUNCATED, whose rendered form fits budget. Slicing a str
+    cuts between code points, so an escape sequence or a surrogate pair is never split."""
+    lo, hi = 0, len(text)
+    while lo < hi:  # largest n with len(render(text[:n] + mark)) <= budget
+        mid = (lo + hi + 1) // 2
+        if len(render_feedback(text[:mid] + FEEDBACK_TRUNCATED)) <= budget:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo] + FEEDBACK_TRUNCATED
+
+
 def cap_feedback(messages: list[str]) -> dict[str, Any]:
-    """The most recent messages that fit FEEDBACK_MAX_MESSAGES and FEEDBACK_MAX_CHARS, oldest first, plus
-    how many older ones were left out. A message is kept whole or not at all (each is at most 500 chars)."""
+    """The most recent messages whose rendered form fits FEEDBACK_MAX_CHARS (at most FEEDBACK_MAX_MESSAGES),
+    oldest first, plus how many older ones were left out. The newest message is always represented: whole if
+    it fits, else a marked prefix that fits; older ones are kept whole or not at all. State keeps every text."""
     kept: list[str] = []
     used = 0
     for text in reversed(messages):
-        if len(kept) >= FEEDBACK_MAX_MESSAGES or used + len(text) > FEEDBACK_MAX_CHARS:
+        size = len(render_feedback(text))
+        if not kept and size > FEEDBACK_MAX_CHARS:
+            text = _fit_prefix(text, FEEDBACK_MAX_CHARS)
+            size = len(render_feedback(text))
+        if len(kept) >= FEEDBACK_MAX_MESSAGES or used + size > FEEDBACK_MAX_CHARS:
             break
         kept.append(text)
-        used += len(text)
+        used += size
     kept.reverse()
     return {"operator_feedback": kept, "feedback_omitted": len(messages) - len(kept)}

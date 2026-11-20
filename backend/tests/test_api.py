@@ -93,6 +93,21 @@ def test_http_task_stop_one_task_then_recovery():
         assert c.post("/api/exec/tasks/t99/cancel").status_code == 409  # nothing executing now
 
 
+def test_http_task_stop_names_its_revision():
+    with _client(time_scale=0.2) as c:
+        c.post("/api/exec/reset", json={"scenario": "unknown", "faults": ["hang_scan"]})
+        s = c.post("/api/exec/missions", json={"command": DEMO, "planner": "baseline"}).json()
+        rev = s["mission"]["revisions"][-1]
+        scan = next(t["task_id"] for t in rev["tasks"] if t["action"]["kind"] == "scan_route")
+        c.post(f"/api/exec/revisions/{rev['revision']}/approve", json={"proposal_hash": rev["proposal_hash"]})
+        _wait(c, {"executing"})
+        assert c.post(f"/api/exec/tasks/{scan}/cancel", json={"revision": "one"}).status_code == 422
+        assert c.post(f"/api/exec/tasks/{scan}/cancel", json={"revision": 1, "x": 1}).status_code == 422
+        assert c.post(f"/api/exec/tasks/{scan}/cancel", json={"revision": 9}).status_code == 404
+        r = c.post(f"/api/exec/tasks/{scan}/cancel", json={"revision": rev["revision"]})
+        assert r.status_code == 200 and _runtime(r.json(), scan)["state"] in ("canceling", "canceled")
+
+
 def test_http_health_reports_each_dependency():
     with _client() as c:
         h = c.get("/api/exec/health").json()

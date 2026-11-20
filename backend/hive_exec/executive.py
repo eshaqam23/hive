@@ -49,6 +49,8 @@ from .world import ObservedWorld, RobotState, initial_robot_states
 log = logging.getLogger(__name__)
 
 SIM_WORLDS = ("fixed", "random")
+UNAPPLIED_NOTE = "Mission ended before your message was applied; send it again as a new mission."
+HELD_REQUEUED_NOTE = "Live replan failed; your message is queued for the next planning step."
 TERMINAL_MISSION = {"completed", "blocked", "rejected", "canceled", "planner_error", "answered"}
 MAX_CLARIFICATIONS = 3  # clarify rounds per mission; one more ends the mission blocked
 CLARIFY_CAP_REASON = f"The planner still could not resolve the request after {MAX_CLARIFICATIONS} questions."
@@ -166,6 +168,8 @@ class Executive:
         # A live feedback replan (operator message while executing); at most one at a time.
         self._live: Optional[asyncio.Task] = None
         self._gen = 0  # bumps on reset/cancel/abandoned live replan; stale async results are discarded
+        # "<mission_id>:<message id>" of delivered feedback that a non-live planning read and answered (F4).
+        self._feedback_read: set[str] = set()
 
     # ================================================================ setup
     async def start(self, scenario: str = "unknown") -> None:
@@ -388,13 +392,39 @@ class Executive:
 
     def _deliver(self, m: Mission, ids: set[str], as_: str = "feedback") -> None:
         if ids:
-            self._update_messages(m, ids, status="delivered", delivered_at=self.clock(), delivered_as=as_)
+            now = self.clock()
+            m.operator_messages = [
+                {**{k: v for k, v in x.items() if k != "note"}, "status": "delivered", "delivered_at": now,
+                 "delivered_as": as_} if x["id"] in ids else x for x in m.operator_messages]
 
     def _close_messages(self, m: Mission, why: str) -> None:
-        """Queued and held messages never outlive the mission (STOP ALL, cancel, any terminal outcome)."""
+        """Queued and held messages never outlive the mission (STOP ALL, cancel, any terminal outcome). A
+        delivered message that no landed planning read and no surviving revision used (its live re-plan was
+        still in flight, or dropped when the stage ended) is canceled too, so the operator knows to resend."""
         ids = {x["id"] for x in m.operator_messages if x["status"] in OPEN_MESSAGE}
         if ids:
             self._update_messages(m, ids, status="canceled", note=f"Not delivered: {why}"[:300])
+        unused = {x["id"] for x in m.operator_messages if x["status"] == "delivered"
+                  and x["delivered_as"] == "feedback" and f"{m.mission_id}:{x['id']}" not in self._feedback_read
+                  and self._dropped(m, x["delivered_to_revision"])}
+        if unused:
+            self._update_messages(m, unused, status="canceled", note=UNAPPLIED_NOTE)
+
+    @staticmethod
+    def _dropped(m: Mission, revision: Optional[int]) -> bool:
+        """No revision, or one dropped unapproved because its stage ended first."""
+        if revision is None:
+            return True
+        plan = m.revisions[revision - 1] if 0 < revision <= len(m.revisions) else None
+        return plan is not None and plan.status == "superseded" and plan.superseded_reason == "stage_ended"
+
+    def _mark_read(self, m: Mission, ids: set[str]) -> None:
+        """A non-live planning landed with these delivered messages in its context. One whose live revision
+        was dropped (stage_ended) now belongs to whatever this planning produces (_make_revision tags it)."""
+        self._feedback_read |= {f"{m.mission_id}:{i}" for i in ids}
+        moved = {x["id"] for x in m.operator_messages if x["id"] in ids and x["delivered_to_revision"] is not None
+                 and self._dropped(m, x["delivered_to_revision"])}
+        self._update_messages(m, moved, delivered_to_revision=None)
 
     def _note_delivered(self, m: Mission, note: str) -> None:
         """Explain a delivered message whose planning produced no revision (the running plan continues)."""
@@ -511,6 +541,7 @@ class Executive:
         previous = (self._previous_observation(m)
                     if phase == "continuation" or (phase == "feedback" and not live
                                                    and m.stage_phase == "continuation") else None)
+        read = {x["id"] for x in m.operator_messages if x["status"] == "delivered" and x["delivered_as"] == "feedback"}
         ctx = build_context(phase=phase, command=m.command, robots=self.robots, world=self.world,
                             canonical_goals=m.canonical_goals, stage_history=m.history,
                             failure=failure, clarification=clarification,
@@ -589,6 +620,7 @@ class Executive:
                 return
             if live:
                 return self._apply_live(m, out.proposal, record, vres, alloc)
+            self._mark_read(m, read)
             self._apply_proposal(m, out.proposal, record, vres, alloc, phase, rev_kind, previous)
 
     def _apply_live(self, m: Mission, proposal: PlanProposal, record: PlannerRecord,
@@ -601,6 +633,9 @@ class Executive:
                                     f"{m.active_revision} keeps running.")
             self.log("planning", f"Live re-plan returned {str(proposal.disposition)[:40]}; revision "
                                  f"{m.active_revision} keeps running.")
+            # answered: the messages were applied, never "ended before applied" (F4)
+            self._feedback_read |= {f"{m.mission_id}:{x['id']}" for x in m.operator_messages
+                                    if x["status"] == "delivered" and x["delivered_to_revision"] is None}
             return
         try:
             self._make_revision(m, proposal, record, vres, alloc, "feedback", {})
@@ -617,7 +652,7 @@ class Executive:
                                "error": message, "attempts": attempts, "live": True})
         self._note_delivered(m, f"Planner error: {message[:200]}; revision {m.active_revision} keeps running.")
         held = {x["id"] for x in m.operator_messages if x["status"] == "held"}
-        self._update_messages(m, held, status="queued")
+        self._update_messages(m, held, status="queued", note=HELD_REQUEUED_NOTE)
         self.log("planning", f"Live re-plan failed ({message[:200]}); revision {m.active_revision} keeps running.")
 
     @staticmethod
@@ -903,16 +938,19 @@ class Executive:
                 await self.gateway.cancel(self.run_id, a.attempt_id)
             self._check_cancel_settled(m)
 
-    async def cancel_task(self, task_id: str) -> TaskRuntime:
-        """Stop one task's live attempt. The task shows "canceling" until the robot confirms; the
-        confirmed cancel then takes the task-failure path (bounded recovery) while other tasks keep running."""
+    async def cancel_task(self, task_id: str, revision: Optional[int] = None) -> TaskRuntime:
+        """Stop one task's live attempt. Task ids repeat across revisions, so the caller names the revision
+        (default: the active one). The task shows "canceling" until the robot confirms; a confirmed stop of an
+        active-revision task then takes the task-failure path (bounded recovery) while other tasks keep running;
+        a stop of a task left running by a replaced revision is not a fault (see _handle_event)."""
         async with self.lock:
             m = self._require_mission()
             if m.status not in ("executing", "recovering"):
                 raise ExecError(f"Mission is {m.status}; no task is running.")
-            rt = m.tasks.get(f"{m.active_revision}:{task_id}")
+            rev = m.active_revision if revision is None else revision
+            rt = m.tasks.get(f"{rev}:{task_id}")
             if rt is None:
-                raise ExecError(f"No task {task_id} in revision {m.active_revision}.", 404)
+                raise ExecError(f"No task {task_id} in revision {rev}.", 404)
             att = self.attempts.get(rt.attempt_ids[-1]) if rt.attempt_ids else None
             if att is None or att.status in TERMINAL_STATUSES:
                 raise ExecError(f"Task {task_id} is {rt.state}; nothing to stop.")
@@ -1106,13 +1144,21 @@ class Executive:
             self.log("reconcile", f"Late result for revision {att.revision} reconciled without advancing the plan.")
             if m.status == "recovering":
                 await self._maybe_recover(m)
+            elif m.status == "executing" and rt is not None and att.task_stop_requested \
+                    and ev.status == "canceled":
+                # The operator stopped a task a replaced revision left running: not a fault, no recovery.
+                m.history.append(f"rev {rt.revision} (replaced by rev {m.active_revision}): {rt.task_id} on "
+                                 f"{rt.robot_id} stopped by the operator")
+                self.log("cancel", f"{rt.task_id} of replaced revision {rt.revision} on {rt.robot_id} stopped "
+                                   "by the operator; the active revision continues.")
+                await self._tick()
+            elif m.status == "executing" and rt is not None and ev.status in ("failed", "rejected", "uncertain",
+                                                                              "canceled"):
+                # A task a replaced revision left running failed: same failure path as the active revision
+                # (one bounded recovery); an unrequested cancel counts as a failure there too.
+                await self._on_task_failure(m, rt, "failed" if ev.status == "canceled" else ev.status)
             elif m.status == "executing":
-                # A task of a revision replaced mid-stage settled: an uncertain outcome stops the stage like any
-                # other; otherwise its robot is free again and the stage-end check may now pass.
-                if ev.status == "uncertain" and rt is not None:
-                    await self._on_task_failure(m, rt, "uncertain")
-                else:
-                    await self._tick()
+                await self._tick()  # its robot is free again and the stage-end check may now pass
             return
         if ev.status in ("failed", "rejected", "uncertain"):
             await self._on_task_failure(m, rt, ev.status)
@@ -1183,9 +1229,16 @@ class Executive:
         self.log("failure", f"{rt.task_id} {status}; new dispatch stopped, "
                  + ("settling active tasks." if cancel_siblings else "other active tasks keep running."))
         for a in self.attempts.values():
-            if cancel_siblings and a.status not in TERMINAL_STATUSES and a.revision == plan.revision:
+            # every live attempt belongs to this stage (a stage ends only once none is live), including tasks a
+            # replaced revision left running
+            if cancel_siblings and a.status not in TERMINAL_STATUSES:
                 await self.gateway.cancel(self.run_id, a.attempt_id)
-        m.history.append(f"rev {plan.revision}: {rt.task_id} {status} ({(rt.error or {}).get('code', '')})")
+        code = (rt.error or {}).get("code", "")
+        if rt.revision == plan.revision:
+            m.history.append(f"rev {plan.revision}: {rt.task_id} {status} ({code})")
+        else:
+            m.history.append(f"rev {rt.revision} (replaced by rev {plan.revision}): {rt.task_id} on {rt.robot_id} "
+                             f"{status} ({code})")
         await self._maybe_recover(m, failed=rt)
 
     async def _maybe_recover(self, m: Mission, failed: Optional[TaskRuntime] = None) -> None:

@@ -68,6 +68,11 @@ class MessageIn(Body):
     mode: Literal["now", "queue"]
 
 
+class CancelTaskIn(Body):
+    """Which revision's task to stop: task ids repeat across revisions. None: the active revision."""
+    revision: Optional[int] = Field(default=None, ge=1)
+
+
 class ResetIn(Body):
     scenario: Literal["unknown", "known"] = "unknown"
     faults: list[str] = Field(default_factory=list)
@@ -215,9 +220,10 @@ def create_app(settings: Optional[ExecSettings] = None, gateway: Optional[RobotG
         return ex.state()
 
     @app.post("/api/exec/tasks/{task_id}/cancel")
-    async def cancel_task(task_id: str):
-        """Stop one task of the active revision; never gated on planner or transport health."""
-        await ex.cancel_task(task_id)
+    async def cancel_task(task_id: str, body: Optional[CancelTaskIn] = None):
+        """Stop one task (of body.revision, default the active revision); never gated on planner or transport
+        health."""
+        await ex.cancel_task(task_id, body.revision if body is not None else None)
         return ex.state()
 
     @app.post("/api/exec/reset")

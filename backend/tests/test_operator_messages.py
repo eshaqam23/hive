@@ -111,12 +111,25 @@ class GatedGateway(FakeGateway):
         await super()._run(env)
 
 
+class HoldingGateway(GatedGateway):
+    """GatedGateway that also holds scan_route attempts (lidar_01) until ``release`` or a cancel."""
+
+    async def _run(self, env):
+        if env.skill == "scan_route":
+            cancel = self._cancel[env.attempt_id]
+            waits = [asyncio.ensure_future(self.release.wait()), asyncio.ensure_future(cancel.wait())]
+            _, pending = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+            for p in pending:
+                p.cancel()
+        await super()._run(env)
+
+
 @pytest.fixture
 async def gated():
     made = []
 
-    async def factory(planner, scenario="unknown"):
-        ex = Executive(GatedGateway(time_scale=0.005), {"stub": planner}, default_planner="stub")
+    async def factory(planner, scenario="unknown", gateway=None):
+        ex = Executive((gateway or GatedGateway)(time_scale=0.005), {"stub": planner}, default_planner="stub")
         await ex.gateway.start(ex.handle_event)
         await ex.reset(scenario)
         made.append(ex)
@@ -641,3 +654,254 @@ async def test_stop_right_after_send_now_never_starts_the_feedback_planning(make
         await asyncio.sleep(0)
     assert ex.mission.status == "canceled" and len(stub.contexts) == 1
     assert [r.status for r in ex.mission.revisions] == ["superseded"]
+
+
+
+# ================================================================ WS5 fix batch (verifier findings F1-F5)
+SCAN = lambda tid="t1", deps=(): task(tid, "scan_route", "lidar_01", deps, binding="surveyor",  # noqa: E731
+                                      route_id="pickup_corridor")
+LIVE = {"dispatched", "accepted", "running"}
+UNAPPLIED = "Mission ended before your message was applied; send it again as a new mission."
+
+
+async def _old_camera_and_new_lidar_running(gated, after):
+    """rev 1 t1 (inspect, camera_01) dispatched; a message re-plans live to rev 2 t1 (scan, lidar_01); approved."""
+    stub = StubPlanner([OBSERVE_THEN_PICTURE, plan(SCAN("t1"), summary="Scan instead."), *after])
+    ex = await gated(stub, gateway=HoldingGateway)
+    await ex.create_mission("Look around")
+    await approve_latest(ex)
+    await until(lambda: rt(ex, 1, "t1").state == "dispatched")
+    await ex.post_message("Scan the corridor instead.", "now")
+    await until(lambda: len(ex.mission.revisions) == 2)
+    await approve_latest(ex)
+    await until(lambda: rt(ex, 2, "t1").state in LIVE)
+    assert rt(ex, 1, "t1").robot_id == "camera_01" and rt(ex, 2, "t1").robot_id == "lidar_01"
+    return ex, stub
+
+
+async def test_f1_stop_names_the_revision_so_an_old_row_stops_its_own_robot(gated):
+    ex, stub = await _old_camera_and_new_lidar_running(gated, [ANSWER])
+    r = await ex.cancel_task("t1", revision=1)
+    assert (r.revision, r.robot_id, r.state) == (1, "camera_01", "canceling")
+    assert attempt_of(ex, 1, "t1").task_stop_requested and not attempt_of(ex, 2, "t1").task_stop_requested
+    await until(lambda: rt(ex, 1, "t1").state == "canceled")
+    # a confirmed stop of a replaced revision's task is not a fault: no recovery, the new revision runs on
+    assert ex.mission.status == "executing" and not ex.mission.recovery_used
+    assert rt(ex, 2, "t1").state in LIVE and rt(ex, 1, "t1").error["code"] == "operator_stop"
+    assert any(h.startswith("rev 1") and "t1" in h and "camera_01" in h and "stopped" in h
+               for h in ex.mission.history)
+    ex.gateway.release.set()
+    assert await wait_for(ex, DONE) == "completed"  # rev 2's scan met the goal once the stage ended
+    assert [c.phase for c in stub.contexts] == ["initial", "feedback"] and not ex.mission.recovery_used
+    assert sum("finished" in h for h in ex.mission.history) == 1
+
+
+async def test_f1_stop_without_a_revision_still_means_the_active_one(gated):
+    ex, _ = await _old_camera_and_new_lidar_running(gated, [ANSWER])
+    r = await ex.cancel_task("t1")
+    assert (r.revision, r.robot_id) == (2, "lidar_01")
+    assert not attempt_of(ex, 1, "t1").task_stop_requested
+
+
+async def test_f1_stop_refuses_a_revision_task_with_no_live_attempt(gated):
+    ex, _ = await _old_camera_and_new_lidar_running(gated, [ANSWER])
+    with pytest.raises(ExecError) as e:
+        await ex.cancel_task("t2", revision=1)  # superseded, never dispatched
+    assert e.value.status == 409
+    with pytest.raises(ExecError) as e:
+        await ex.cancel_task("t1", revision=7)
+    assert e.value.status == 404
+
+
+async def test_f3_old_revision_task_failing_after_a_live_supersede_runs_recovery(gated):
+    from hive_exec.contracts import TaskEvent
+
+    ex, stub = await _executing_with_inspect_dispatched(gated, [OBSERVE_THEN_PICTURE, PICTURE_ONLY, PICTURE_ONLY])
+    await ex.post_message("Just take a picture.", "now")
+    await until(lambda: len(ex.mission.revisions) == 2)
+    await approve_latest(ex)
+    att = attempt_of(ex, 1, "t1")
+    await ex.handle_event(TaskEvent(event_id="f1", run_id=ex.run_id, attempt_id=att.attempt_id,
+                                    robot_id="camera_01", seq=900, status="failed",
+                                    error={"code": "camera_fault", "message": "injected"}))
+    assert await wait_for(ex, {"awaiting_approval"} | DONE) == "awaiting_approval"
+    assert ex.mission.recovery_used and ex.mission.revisions[-1].kind == "recovery"
+    assert [c.phase for c in stub.contexts] == ["initial", "feedback", "recovery"]
+    line = next(h for h in ex.mission.history if "camera_fault" in h)
+    assert line.startswith("rev 1") and "t1" in line and "camera_01" in line
+    assert line in stub.contexts[2].stage_history and stub.contexts[2].failure["task_id"] == "t1"
+    assert rt(ex, 2, "t1").state == "skipped"
+
+
+async def test_f3_two_old_revision_tasks_failing_recover_once(gated):
+    from hive_exec.contracts import TaskEvent
+
+    stub = StubPlanner([plan(INSPECT("t1"), SCAN("t2"), summary="Inspect and scan."), PICTURE_ONLY, PICTURE_ONLY])
+    ex = await gated(stub, gateway=HoldingGateway)
+    await ex.create_mission("Look around")
+    await approve_latest(ex)
+    await until(lambda: rt(ex, 1, "t1").state in LIVE and rt(ex, 1, "t2").state in LIVE)
+    await ex.post_message("Just take a picture.", "now")
+    await until(lambda: len(ex.mission.revisions) == 2)
+    await approve_latest(ex)
+    for i, (tid, robot) in enumerate([("t1", "camera_01"), ("t2", "lidar_01")]):
+        att = attempt_of(ex, 1, tid)
+        await ex.handle_event(TaskEvent(event_id=f"f{i}", run_id=ex.run_id, attempt_id=att.attempt_id,
+                                        robot_id=robot, seq=900, status="failed",
+                                        error={"code": f"fault_{tid}", "message": "injected"}))
+    assert await wait_for(ex, {"awaiting_approval"} | DONE) == "awaiting_approval"
+    await asyncio.sleep(0.05)
+    assert [c.phase for c in stub.contexts].count("recovery") == 1
+    assert ex.mission.status == "awaiting_approval" and ex.mission.revisions[-1].kind == "recovery"
+    assert any("fault_t1" in h for h in ex.mission.history)
+
+
+async def test_f4_feedback_carried_into_a_continuation_names_the_revision_that_used_it(gated):
+    ex, stub = await _executing_with_inspect_dispatched(gated, [OBSERVE_THEN_PICTURE, PICTURE_ONLY, PICTURE_ONLY])
+    m = await ex.post_message("Just take a picture.", "now")
+    await until(lambda: len(ex.mission.revisions) == 2)
+    ex.gateway.release.set()  # the old revision ends first; rev 2 is dropped (stage_ended)
+    assert await wait_for(ex, {"awaiting_approval"} | DONE) == "awaiting_approval"
+    assert ex.mission.revisions[1].superseded_reason == "stage_ended"
+    assert stub.contexts[2].phase == "continuation" and stub.contexts[2].operator_feedback == ["Just take a picture."]
+    assert msg(ex, m["id"])["delivered_to_revision"] == 3
+
+
+FIND = {"kind": "object_located", "area_id": "work_area", "object_query": {"label": "red_block"}}
+
+
+async def _find_mission(gated, gate_calls=(), live_reply=PICTURE_ONLY):
+    p1 = dict(plan(INSPECT("t1"), PICTURE("t2", ["t1"])), mission_goals=[FIND])
+    stub = StubPlanner([p1, live_reply], gate_calls=gate_calls)
+    ex = await gated(stub, "known")
+    await ex.create_mission("Find the red block")
+    await approve_latest(ex)
+    await until(lambda: rt(ex, 1, "t1").state == "dispatched")
+    return ex, stub
+
+
+async def test_f4_completion_while_the_live_replan_is_in_flight_cancels_the_message(gated):
+    ex, stub = await _find_mission(gated, gate_calls={1})
+    m = await ex.post_message("Also check the corridor.", "now")
+    await stub.entered.wait()
+    ex.gateway.release.set()
+    assert await wait_for(ex, DONE) == "completed"
+    stub.release.set()
+    await asyncio.sleep(0.02)
+    assert msg(ex, m["id"])["status"] == "canceled" and msg(ex, m["id"])["note"] == UNAPPLIED
+
+
+async def test_f4_completion_while_the_live_revision_awaits_approval_cancels_the_message(gated):
+    ex, stub = await _find_mission(gated)
+    m = await ex.post_message("Also check the corridor.", "now")
+    await until(lambda: len(ex.mission.revisions) == 2)
+    ex.gateway.release.set()
+    assert await wait_for(ex, DONE) == "completed"
+    assert ex.mission.revisions[1].superseded_reason == "stage_ended"
+    assert msg(ex, m["id"])["status"] == "canceled" and msg(ex, m["id"])["note"] == UNAPPLIED
+
+
+async def test_f4_an_approved_live_revision_keeps_its_message_delivered(gated):
+    ex, stub = await _find_mission(gated)
+    m = await ex.post_message("Just take a picture.", "now")
+    await until(lambda: len(ex.mission.revisions) == 2)
+    await approve_latest(ex)
+    ex.gateway.release.set()
+    await wait_for(ex, DONE)
+    assert msg(ex, m["id"])["status"] == "delivered" and msg(ex, m["id"])["delivered_to_revision"] == 2
+
+
+async def test_f4_a_live_reply_without_a_plan_keeps_its_message_delivered(gated):
+    ex, stub = await _find_mission(gated, live_reply=ANSWER)
+    m = await ex.post_message("What can the gripper do?", "now")
+    await until(lambda: "did not re-plan" in (msg(ex, m["id"]).get("note") or ""))
+    ex.gateway.release.set()
+    assert await wait_for(ex, DONE) == "completed"
+    assert msg(ex, m["id"])["status"] == "delivered" and "did not re-plan" in msg(ex, m["id"])["note"]
+
+
+async def test_f5_a_held_message_falling_back_to_the_queue_says_why(gated):
+    ex, stub = await _executing_with_inspect_dispatched(
+        gated, [OBSERVE_THEN_PICTURE, PlannerError("model down"), ANSWER], gate_calls={1})
+    a = await ex.post_message("A", "now")
+    await stub.entered.wait()
+    b = await ex.post_message("B", "now")
+    assert b["status"] == "held"
+    stub.release.set()
+    await until(lambda: msg(ex, b["id"])["status"] == "queued")
+    assert msg(ex, b["id"])["note"] == "Live replan failed; your message is queued for the next planning step."
+    assert "model down" in msg(ex, a["id"])["note"]
+    ex.gateway.release.set()
+    assert await wait_for(ex, DONE) == "blocked"
+    assert msg(ex, b["id"])["status"] == "delivered" and "note" not in msg(ex, b["id"])  # stale note dropped
+
+
+# ---------------------------------------------------------------- F2: rendered feedback budget
+def _heavy_context(feedback, command=None):
+    from hive_exec.contracts import Observation
+    from hive_exec.context import build_context
+    from hive_exec.world import ObservedWorld, initial_robot_states
+
+    w = ObservedWorld()
+    for lab in ["red_block", "blue_block", "green_block", "duck", "traffic_cone", "toy_car"]:
+        w.accept(Observation(kind="object_seen", entity_id=f"{lab}_1", label=lab, area_id="work_area",
+                             location_id="pickup_zone"), source="camera_01")
+    hist = [{"question": "Which block should I bring, the red one or the blue one?",
+             "options": ["the red block", "the blue block", "the green block", "the duck"],
+             "answer": "the red block, the one closest to the corridor", "phase": "initial"}] * 3
+    nav = lambda loc: {"kind": "navigate_to", "location_id": loc, "route_id": "pickup_corridor"}  # noqa: E731
+    ref = {"object_query": {"label": "red_block"}}
+    tasks = [{"task_id": "t1", "binding_id": "carrier", "action": nav("pickup_zone"), "depends_on": []},
+             {"task_id": "t2", "binding_id": "carrier", "action": {"kind": "pick_object", **ref}, "depends_on": ["t1"]},
+             {"task_id": "t3", "binding_id": "carrier", "action": nav("dropoff_zone"), "depends_on": ["t2"]},
+             {"task_id": "t4", "binding_id": "carrier",
+              "action": {"kind": "place_object", **ref, "location_id": "dropoff_zone"}, "depends_on": ["t3"]}]
+    prev = {"from_revision": 1, "summary": "Carry the red block to the drop-off zone once the evidence is in.",
+            "tasks": tasks, "waits_for": ["camera_01 sighting of red_block in work_area",
+                                          "lidar_01 scan: pickup_corridor clear"]}
+    command = command or ("Find the red block in the work area, check the pickup corridor, and bring the block "
+                          "to the drop-off area. " * 6)[:500]
+    proposal = {"revision": 2, "scope": "full", "summary": "Carry the red block to the drop-off zone.",
+                "tasks": tasks}
+    return build_context(phase="feedback", command=command, robots=initial_robot_states(), world=w,
+                         clarifications=hist, previous_preview=prev, operator_feedback=feedback,
+                         previous_proposal=proposal)
+
+
+def _passes(ctx):
+    from hive_exec.context import estimate_tokens
+    from hive_exec.llm import wire
+    from hive_exec.planner.prompt import system_prompt, user_prompt
+
+    fixed = estimate_tokens(system_prompt()) + estimate_tokens(json.dumps(wire.planning_schema())) // 4
+    first = fixed + estimate_tokens(user_prompt(ctx))
+    repair = fixed + estimate_tokens(user_prompt(ctx, [f"e{i}: " + "y" * 190 for i in range(20)], "x" * 50000))
+    return first, repair
+
+
+WIDE = {
+    "emoji": [chr(0x1F600 + i) * 500 for i in range(4)],
+    "cjk": [chr(0x4E00 + i) * 500 for i in range(4)],
+    "quote": ['"' * 499 + str(i) for i in range(4)],
+    "backslash": [chr(92) * 499 + str(i) for i in range(4)],
+}
+
+
+@pytest.mark.parametrize("kind", sorted(WIDE))
+def test_f2_wide_feedback_is_capped_on_its_rendered_form_and_keeps_the_newest(kind):
+    from hive_exec.context import FEEDBACK_MAX_CHARS, FEEDBACK_TRUNCATED, MAX_INPUT_TOKENS
+    from hive_exec.planner.prompt import user_prompt
+
+    newest = WIDE[kind][-1]
+    ctx = _heavy_context(WIDE[kind])
+    first, repair = _passes(ctx)
+    assert first < MAX_INPUT_TOKENS and repair < MAX_INPUT_TOKENS, (kind, first, repair)
+    assert sum(len(json.dumps(x)) for x in ctx.operator_feedback) <= FEEDBACK_MAX_CHARS
+    lines = user_prompt(ctx).splitlines()
+    block = lines[lines.index("BEGIN OPERATOR FEEDBACK") + 1:lines.index("END OPERATOR FEEDBACK")]
+    shown = json.loads(block[-1][2:])
+    shown.encode("utf-8")  # no lone surrogate: an escape or a pair was never split
+    assert shown == newest or (shown.endswith(FEEDBACK_TRUNCATED)
+                               and newest.startswith(shown[:-len(FEEDBACK_TRUNCATED)])
+                               and len(shown) > len(FEEDBACK_TRUNCATED) + 50)
+    assert ctx.feedback_omitted == 4 - len(ctx.operator_feedback)

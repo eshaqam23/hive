@@ -12,7 +12,7 @@ import json
 from typing import Optional
 
 from ..catalog import LOCATIONS, OBJECT_PROFILES, ROBOTS, ROUTES, SKILLS
-from ..context import PlanningContext
+from ..context import PlanningContext, render_feedback
 
 PROMPT_VERSION = "hive.prompt.v3.3"
 
@@ -236,5 +236,5 @@ def feedback_block(ctx: PlanningContext) -> str:
     if ctx.feedback_omitted:
         n = ctx.feedback_omitted
         lines.append(f"({n} earlier message{'s' if n != 1 else ''} omitted)")
-    lines += ["- " + json.dumps(m) for m in ctx.operator_feedback]
+    lines += ["- " + render_feedback(m) for m in ctx.operator_feedback]
     return "\n".join(lines + ["END OPERATOR FEEDBACK"]) + "\n"
