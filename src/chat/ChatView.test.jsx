@@ -35,8 +35,8 @@ function fakeFetch(url, init = {}) {
   const method = init.method ?? "GET";
   const body = init.body ? JSON.parse(init.body) : null;
   server.calls.push({ path, method, body });
-  if (method === "POST") {
-    const handler = server.post[path];
+  if (method === "POST" || method === "DELETE") {
+    const handler = (method === "POST" ? server.post : server.del)[path];
     if (!handler) return Promise.resolve(reply(404, { ok: false, error: `No route ${path}` }));
     const res = handler(body);
     // a successful POST returns the new state; later polls must serve it, as the Executive would
@@ -68,7 +68,7 @@ const rowIn = (rev, task) => document.querySelector(`[data-revision="${rev}"] tr
 
 beforeEach(() => {
   localStorage.clear();
-  server = { state: clone(awaiting), calls: [], post: {}, truthTimes: [] };
+  server = { state: clone(awaiting), calls: [], post: {}, del: {}, truthTimes: [] };
   vi.stubGlobal("fetch", vi.fn(fakeFetch));
 });
 
@@ -627,5 +627,180 @@ describe("sim controls", () => {
     render(<Harness />);
     await waitFor(() => expect(row("t1")).toBeTruthy());
     expect(screen.queryByRole("region", { name: "Simulation controls" })).toBeNull();
+  });
+});
+
+describe("operator messages", () => {
+  const message = (id, extra = {}) => ({
+    id,
+    text: `message ${id}`,
+    mode: "now",
+    status: "queued",
+    created_at: awaiting.mission.created_at + 1,
+    delivered_at: null,
+    delivered_to_revision: null,
+    delivered_as: null,
+    ...extra,
+  });
+  const withMessages = (base, messages) => {
+    const next = clone(base);
+    next.mission.operator_messages = messages;
+    return next;
+  };
+  /* rev 1 replaced by the operator's message; rev 2 is the feedback re-plan waiting for approval */
+  function superseded() {
+    const next = clone(awaiting);
+    const r1 = next.mission.revisions[0];
+    r1.status = "superseded";
+    r1.superseded_reason = "operator_message";
+    r1.superseded_by = 2;
+    const r2 = { ...clone(r1), revision: 2, kind: "feedback", status: "awaiting_approval", superseded_reason: null, superseded_by: null, created_at: r1.created_at + 5 };
+    next.mission.revisions = [r1, r2];
+    next.mission.operator_messages = [
+      message("msg-1", { text: "use the camera only", status: "delivered", delivered_at: r1.created_at + 2, delivered_to_revision: 2, delivered_as: "feedback" }),
+    ];
+    return next;
+  }
+  const box = () => document.getElementById("mission-input");
+
+  it("keeps the composer open during a mission: Enter sends now, Shift+Enter is a new line", async () => {
+    server.post["/mission/messages"] = (body) => reply(200, { ...withMessages(awaiting, [message("msg-1", { text: body.text, status: "delivered" })]), message: {} });
+    render(<Harness />);
+    await screen.findByRole("button", { name: "Approve & run" });
+    expect(box().disabled).toBe(false);
+    expect(screen.getByRole("button", { name: "Send now" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Queue" })).toBeTruthy();
+    expect(screen.getByText("Enter sends now · Shift+Enter new line")).toBeTruthy();
+    expect(document.querySelector("[data-composer-block]")).toBeNull();
+    fireEvent.change(box(), { target: { value: "use the camera only" } });
+    fireEvent.keyDown(box(), { key: "Enter", shiftKey: true });
+    expect(posts("/mission/messages")).toHaveLength(0);
+    fireEvent.keyDown(box(), { key: "Enter" });
+    await waitFor(() => expect(posts("/mission/messages")).toHaveLength(1));
+    expect(posts("/mission/messages")[0].body).toEqual({ text: "use the camera only", mode: "now" });
+    expect(posts("/missions")).toHaveLength(0);
+    await waitFor(() => expect(box().value).toBe(""));
+  });
+
+  it("queues a message as a chip that can be removed or sent now", async () => {
+    server.post["/mission/messages"] = (body) => reply(200, { ...withMessages(awaiting, [message("msg-1", { text: body.text, mode: "queue" })]), message: {} });
+    server.post["/mission/messages/msg-1/send-now"] = () => reply(200, withMessages(awaiting, [message("msg-1", { status: "delivered" })]));
+    server.del["/mission/messages/msg-1"] = () => reply(200, withMessages(awaiting, [message("msg-1", { status: "canceled" })]));
+    render(<Harness />);
+    await screen.findByRole("button", { name: "Approve & run" });
+    fireEvent.change(box(), { target: { value: "then check the corridor" } });
+    fireEvent.click(screen.getByRole("button", { name: "Queue" }));
+    await waitFor(() => expect(posts("/mission/messages")).toHaveLength(1));
+    expect(posts("/mission/messages")[0].body).toEqual({ text: "then check the corridor", mode: "queue" });
+
+    const chips = await screen.findByRole("list", { name: "Queued messages" });
+    expect(within(chips).getByText("then check the corridor")).toBeTruthy();
+    expect(within(chips).getByText("Queued - delivered at next planning step")).toBeTruthy();
+    fireEvent.click(within(chips).getByRole("button", { name: "Send now: then check the corridor" }));
+    await waitFor(() => expect(posts("/mission/messages/msg-1/send-now")).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByRole("list", { name: "Queued messages" })).toBeNull());
+
+    server.state = withMessages(awaiting, [message("msg-1", { text: "then check the corridor" })]);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove queued message: then check the corridor" }));
+    await waitFor(() => expect(server.calls.filter((c) => c.method === "DELETE" && c.path === "/mission/messages/msg-1")).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByRole("list", { name: "Queued messages" })).toBeNull());
+  });
+
+  it("folds a revision superseded by a message and tags the message with the revision it reached", async () => {
+    server.state = superseded();
+    render(<Harness />);
+    const fold = await screen.findByRole("button", { name: /Superseded by your message/ });
+    expect(fold.getAttribute("aria-expanded")).toBe("false");
+    expect(document.querySelector('[data-revision="1"]')).toBeNull();
+    const bubble = document.querySelector('[data-message="msg-1"]');
+    expect(bubble.textContent).toContain("use the camera only");
+    expect(bubble.textContent).toContain("delivered to revision 2");
+    // the message sits between the folded rev 1 and the feedback rev 2 it produced
+    const order = [...document.querySelectorAll("[data-message], [data-revision], [data-fold]")].map(
+      (el) => el.dataset.message || el.dataset.fold || el.dataset.revision,
+    );
+    expect(order).toEqual(["1", "msg-1", "2"]);
+    expect(screen.getByRole("button", { name: "Approve rev 2" })).toBeTruthy();
+    expect(screen.getByText("your message")).toBeTruthy();
+    fireEvent.click(fold);
+    const old = document.querySelector('[data-revision="1"]');
+    expect(old).toBeTruthy();
+    expect(within(old).queryByRole("button", { name: /Approve/ })).toBeNull();
+  });
+
+  it("shows a held message with its tag while the planner works", async () => {
+    const next = clone(awaiting);
+    next.mission.status = "planning";
+    next.mission.operator_messages = [message("msg-1", { status: "held", text: "skip the corridor" })];
+    server.state = next;
+    render(<Harness />);
+    await waitFor(() => expect(document.querySelector('[data-message="msg-1"]')).toBeTruthy());
+    expect(document.querySelector('[data-message="msg-1"]').textContent).toContain("held");
+    expect(screen.queryByRole("list", { name: "Queued messages" })).toBeNull();
+  });
+
+  it("offers approve and reject for a live re-plan while the running revision keeps going", async () => {
+    const next = clone(running);
+    const r1 = next.mission.revisions[0];
+    const r2 = { ...clone(r1), revision: 2, kind: "feedback", status: "awaiting_approval", runtime: {}, created_at: r1.created_at + 5 };
+    next.mission.revisions = [r1, r2];
+    next.mission.operator_messages = [];
+    server.state = next;
+    server.post["/revisions/2/approve"] = () => reply(200, next);
+    render(<Harness />);
+    const approve = await screen.findByRole("button", { name: "Approve rev 2" });
+    const card = document.querySelector('[data-revision="2"]');
+    expect(within(card).queryByRole("button", { name: "Edit" })).toBeNull();
+    fireEvent.click(within(card).getByRole("button", { name: "Reject" }));
+    expect(within(card).getByText(/rev 1 keeps running/)).toBeTruthy();
+    fireEvent.click(within(card).getByRole("button", { name: "Back" }));
+    fireEvent.click(within(card).getByRole("button", { name: "Approve rev 2" }));
+    await waitFor(() => expect(posts("/revisions/2/approve")).toHaveLength(1));
+    expect(posts("/revisions/2/approve")[0].body).toEqual({ proposal_hash: r2.proposal_hash });
+    expect(approve).toBeTruthy();
+  });
+
+  it("says Reject ends the mission and points to messages instead", async () => {
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole("button", { name: "Reject" }));
+    expect(screen.getByText("Reject ends this mission. To change the plan, send a message instead.")).toBeTruthy();
+  });
+
+  it("keeps the text and shows the server's reason when a message is refused", async () => {
+    server.state = withMessages(awaiting, [message("msg-1", { text: "wait" })]);
+    server.post["/mission/messages"] = () => reply(409, { error: "Mission is completed; start a new mission instead." });
+    render(<Harness />);
+    expect((await screen.findByRole("button", { name: "Remove queued message: wait" })).tagName).toBe("BUTTON");
+    fireEvent.change(box(), { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send now" }));
+    expect(await screen.findByText("Mission is completed; start a new mission instead.")).toBeTruthy();
+    expect(box().value).toBe("hello");
+  });
+
+  it("says why a live re-plan was dropped when its stage ended first", async () => {
+    const next = clone(complete);
+    const last = next.mission.revisions.at(-1);
+    next.mission.revisions.push({
+      ...clone(last),
+      revision: last.revision + 1,
+      kind: "feedback",
+      status: "superseded",
+      superseded_reason: "stage_ended",
+      runtime: {},
+      created_at: last.created_at + 1,
+    });
+    server.state = next;
+    render(<Harness />);
+    expect(await screen.findByText("Superseded: the running stage ended before this re-plan was approved.")).toBeTruthy();
+  });
+
+  it("keeps the new-mission composer when no mission is active", async () => {
+    server.state = { ...clone(awaiting), mission: null, timeline: [] };
+    render(<Harness />);
+    await screen.findByRole("button", { name: "Try the demo mission" });
+    expect(screen.getByPlaceholderText("Describe a mission")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send mission" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Queue" })).toBeNull();
+    expect(screen.getByText("Enter sends · Shift+Enter new line")).toBeTruthy();
   });
 });

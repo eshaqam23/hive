@@ -17,9 +17,14 @@ import {
   durationText,
   formatResult,
   formatTaskList,
+  isLiveRevision,
+  messageTag,
+  queuedMessages,
+  threadMessages,
   likelyRobots,
   livePlannerLabel,
   matchPlanningLog,
+  previousRevision,
   pendingThinking,
   planSource,
   plannerLabel,
@@ -387,7 +392,9 @@ describe("composer", () => {
   it("explains why a mission cannot be sent", () => {
     expect(composerBlock({ reachable: false, error: "timeout" }).reason).toMatch(/unreachable \(timeout\)/);
     expect(composerBlock({ reachable: true, state: null }).reason).toMatch(/Connecting/);
-    expect(composerBlock({ reachable: true, state: awaiting }).reason).toMatch(/in progress/);
+    // an active mission keeps the composer open for operator messages; only a stopping one blocks it
+    expect(composerBlock({ reachable: true, state: awaiting })).toBeNull();
+    expect(composerBlock({ reachable: true, state: { ...awaiting, mission: { ...awaiting.mission, status: "canceling" } } }).reason).toMatch(/Stopping/);
     expect(composerBlock({ reachable: true, state: complete })).toMatchObject({ newRun: true });
     const idle = { ...awaiting, mission: null };
     expect(composerBlock({ reachable: true, state: idle, health, planner: "baseline" })).toBeNull();
@@ -436,5 +443,68 @@ describe("next-stage preview helpers", () => {
     expect(rows[1].text).toBe("T1 changed (now T2): nav()");
     expect(rows[2].text).toBe("Added T5: scan()");
     expect(rows[3].text).toBe("Dropped T4: place()");
+  });
+});
+
+describe("operator messages", () => {
+  const msg = (id, extra) => ({ id, text: `text ${id}`, mode: "now", status: "delivered", created_at: 10, delivered_at: 11, delivered_to_revision: null, delivered_as: "feedback", ...extra });
+
+  it("lists queued messages oldest first and tags the rest", () => {
+    const m = { operator_messages: [msg("msg-2", { status: "queued", created_at: 20 }), msg("msg-1", { status: "queued", created_at: 5 }), msg("msg-3")] };
+    expect(queuedMessages(m).map((x) => x.id)).toEqual(["msg-1", "msg-2"]);
+    expect(queuedMessages(null)).toEqual([]);
+    expect(messageTag(msg("a", { status: "held" }))).toBe("held");
+    expect(messageTag(msg("a", { delivered_to_revision: 3 }))).toBe("delivered to revision 3");
+    expect(messageTag(msg("a"))).toBe("delivered");
+    expect(messageTag(msg("a", { status: "canceled" }))).toBe("canceled");
+  });
+
+  it("places held and delivered messages before the revision that consumed them", () => {
+    const m = {
+      revisions: [{ revision: 1, created_at: 1 }, { revision: 2, created_at: 30 }, { revision: 3, created_at: 60 }],
+      operator_messages: [
+        msg("msg-1", { delivered_to_revision: 2 }),
+        msg("msg-2", { created_at: 40, delivered_at: 41 }), // delivered, no revision of its own: before the next one
+        msg("msg-3", { status: "queued", delivered_at: null }), // a chip, not a bubble
+        msg("msg-4", { status: "canceled" }),
+        msg("msg-5", { delivered_as: "answer" }), // shown as the clarification answer already
+        msg("msg-6", { status: "held", created_at: 70, delivered_at: null }),
+      ],
+    };
+    const { before, tail } = threadMessages(m);
+    expect(before.get(2).map((x) => x.id)).toEqual(["msg-1"]);
+    expect(before.get(3).map((x) => x.id)).toEqual(["msg-2"]);
+    expect(before.has(1)).toBe(false);
+    expect(tail.map((x) => x.id)).toEqual(["msg-6"]);
+  });
+
+  it("names the source and trigger of a feedback revision and spots a live one", () => {
+    expect(planSource({ kind: "feedback", planner: { kind: "llm" } })).toBe("LLM proposed · from your message");
+    expect(planSource({ kind: "feedback", planner: { kind: "baseline" } })).toBe("Baseline · from your message");
+    const m = { status: "executing", active_revision: 1, revisions: [{ revision: 1, status: "executing", tasks: [] }, { revision: 2, kind: "feedback", status: "awaiting_approval", tasks: [] }] };
+    expect(replanTrigger(m, m.revisions[1])).toBe("your message");
+    expect(isLiveRevision(m, m.revisions[1])).toBe(true);
+    expect(isLiveRevision(m, m.revisions[0])).toBe(false);
+    expect(isLiveRevision({ ...m, status: "awaiting_approval" }, m.revisions[1])).toBe(false);
+  });
+
+  it("skips a live re-plan dropped at the stage end when naming what a revision follows", () => {
+    const m = {
+      revisions: [
+        { revision: 1, status: "finished", tasks: [] },
+        { revision: 2, kind: "feedback", status: "superseded", superseded_reason: "stage_ended", tasks: [] },
+        { revision: 3, kind: "continuation", status: "awaiting_approval", tasks: [] },
+        { revision: 4, kind: "feedback", status: "awaiting_approval", tasks: [] },
+      ],
+    };
+    expect(previousRevision(m, m.revisions[2]).revision).toBe(1);
+    expect(replanTrigger(m, m.revisions[2])).toBe("rev 1 finished");
+    expect(previousRevision(m, m.revisions[3]).revision).toBe(3);
+    expect(previousRevision(m, m.revisions[0])).toBeNull();
+  });
+
+  it("shows a never-dispatched task of a replaced revision as superseded", () => {
+    const r = { status: "superseded", runtime: { t1: { state: "superseded" } } };
+    expect(taskStatus({ task_id: "t1" }, r)).toMatchObject({ key: "superseded", label: "superseded", tone: "faint" });
   });
 });

@@ -40,6 +40,7 @@ export const STATUS_META = {
   uncertain: { label: "uncertain", tone: "warn" },
   skipped: { label: "skipped", tone: "faint" },
   not_run: { label: "not run", tone: "faint" },
+  superseded: { label: "superseded", tone: "faint" },
 };
 
 export const LEGEND = ["queued", "blocked", "in_progress", "done", "failed", "canceled", "uncertain", "skipped"];
@@ -56,6 +57,7 @@ const RUNTIME_KEY = {
   canceled: "canceled",
   uncertain: "uncertain",
   skipped: "skipped",
+  superseded: "superseded",
 };
 
 /* revisions whose tasks may still run; any other revision without a runtime never ran */
@@ -101,11 +103,12 @@ export function checkSummary(rev) {
   return { passed, total: tasks.length, ok: Boolean(rev?.validation?.ok), planErrors };
 }
 
-/* LLM proposed | Baseline | operator edit | recovery */
+/* LLM proposed | Baseline | operator edit | recovery, plus "· from your message" for a feedback re-plan */
 export function planSource(rev) {
   if (rev?.kind === "edit") return "operator edit";
   if (rev?.kind === "recovery") return "recovery";
-  return rev?.planner?.kind === "llm" ? "LLM proposed" : "Baseline";
+  const who = rev?.planner?.kind === "llm" ? "LLM proposed" : "Baseline";
+  return rev?.kind === "feedback" ? `${who} · from your message` : who;
 }
 
 export const REVISION_STATUS_TEXT = {
@@ -430,12 +433,19 @@ export function failingTask(rev) {
   return rows.find((r) => r.rt && ENDED_BADLY.has(r.rt.state)) || null;
 }
 
+/* The revision rev follows, skipping live re-plans dropped unapproved when their stage ended. */
+export function previousRevision(mission, rev) {
+  const earlier = (mission?.revisions || []).filter((r) => r.revision < rev.revision).sort((a, b) => b.revision - a.revision);
+  return earlier.find((r) => !(r.status === "superseded" && r.superseded_reason === "stage_ended")) || null;
+}
+
 /* "triggered by …" for revision rev (rev > 1), from the revision before it. */
 export function replanTrigger(mission, rev) {
-  const prev = (mission?.revisions || []).find((r) => r.revision === rev.revision - 1);
+  const prev = previousRevision(mission, rev);
   if (!prev) return null;
   if (rev.kind === "edit") return `operator edit of rev ${prev.revision}`;
   if (rev.kind === "clarification") return "your clarification answer";
+  if (rev.kind === "feedback") return "your message";
   const bad = failingTask(prev);
   if (bad) return `${taskLabel(bad.task.task_id)} ${bad.rt.error?.code ?? bad.rt.state}`;
   if (prev.status === "finished") return `rev ${prev.revision} finished`;
@@ -527,7 +537,9 @@ export function composerBlock({ reachable, error, state, health, planner }) {
   if (reachable === false) return { reason: `Executive unreachable (${error || "no answer"}). Start it with npm run hive.` };
   if (!state) return { reason: "Connecting to the Executive…" };
   const m = state.mission;
-  if (m && !TERMINAL_MISSION.has(m.status)) return { reason: "A mission is in progress. The Executive runs one mission at a time." };
+  // an active mission keeps the composer open: what the operator types goes to it as a message
+  if (m && m.status === "canceling") return { reason: "Stopping the mission. Messages are closed until it ends." };
+  if (m && !TERMINAL_MISSION.has(m.status)) return null;
   if (m) return { reason: "This run is finished. Start a new run to send another mission.", newRun: true };
   if (health) {
     const reasons = [];
@@ -542,6 +554,54 @@ export function composerBlock({ reachable, error, state, health, planner }) {
     if (reasons.length) return { reason: reasons.join("; ") };
   }
   return null;
+}
+
+/* ------------------------------------------------------------------ operator messages */
+
+/* True while the composer talks to the running mission (messages) instead of starting one. */
+export function messagesOpen(mission) {
+  return Boolean(mission) && !TERMINAL_MISSION.has(mission.status) && mission.status !== "canceling";
+}
+
+const byCreated = (a, b) => (a.created_at ?? 0) - (b.created_at ?? 0);
+
+/* Messages waiting for the next planning point (the chips above the composer), oldest first. */
+export function queuedMessages(mission) {
+  return (mission?.operator_messages || []).filter((x) => x.status === "queued").sort(byCreated);
+}
+
+/* The small tag under a message bubble. */
+export function messageTag(msg) {
+  if (msg.status === "delivered" && msg.delivered_to_revision != null) return `delivered to revision ${msg.delivered_to_revision}`;
+  return msg.status;
+}
+
+/* Held and delivered messages for the thread: {before: Map(revision -> messages), tail}. A message sits
+   before the revision it produced, else before the first revision made after it was delivered, else at
+   the end. A clarification answer is already shown with its question; queued ones are chips. */
+export function threadMessages(mission) {
+  const revisions = mission?.revisions || [];
+  const before = new Map();
+  const tail = [];
+  const shown = (mission?.operator_messages || []).filter(
+    (x) => (x.status === "held" || x.status === "delivered") && x.delivered_as !== "answer",
+  );
+  for (const msg of [...shown].sort(byCreated)) {
+    const at = msg.delivered_at ?? msg.created_at ?? 0;
+    const anchor =
+      revisions.find((r) => msg.delivered_to_revision != null && r.revision === msg.delivered_to_revision) ||
+      (msg.status === "delivered" ? revisions.find((r) => (r.created_at ?? 0) > at) : null);
+    if (anchor) before.set(anchor.revision, [...(before.get(anchor.revision) || []), msg]);
+    else tail.push(msg);
+  }
+  return { before, tail };
+}
+
+/* A re-plan proposed while an older revision keeps running: approvable without stopping the mission. */
+export function isLiveRevision(mission, rev) {
+  return (
+    mission?.status === "executing" && rev?.status === "awaiting_approval" && Number(rev.revision) > Number(mission.active_revision ?? 0)
+  );
 }
 
 export const normalizePlanner = (kind) => (kind === "qwen" ? "llm" : kind);

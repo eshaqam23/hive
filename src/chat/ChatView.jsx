@@ -4,7 +4,7 @@
 // this tab is visible) or from the state a POST returned, so a browser refresh repaints exactly the
 // same thread. Every failed POST lands in a toast with the server's own error text.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { execGet, execPost } from "../executive/api.js";
+import { EXEC_API_URL, errorText, execGet, execPost } from "../executive/api.js";
 import { TERMINAL_MISSION, isSimulated } from "../fleet/execStatus.js";
 import { HiveMark } from "../shell/icons.jsx";
 import {
@@ -14,10 +14,15 @@ import {
   composerBlock,
   finishedAt,
   livePlannerLabel,
+  messageTag,
+  messagesOpen,
   normalizePlanner,
   pendingThinking,
+  previousRevision,
+  queuedMessages,
   replanTrigger,
   revisionThinking,
+  threadMessages,
 } from "./chatModel.js";
 import Composer from "./Composer.jsx";
 import { loadEarlier, missionRecord, saveEarlier, withMission } from "./earlierMissions.js";
@@ -45,10 +50,21 @@ const ACTION_NAME = [
   [/^\/mission\/replan$/, "Replan"],
   [/^\/mission\/clarify$/, "Answer"],
   [/^\/missions$/, "Send mission"],
+  [/^\/mission\/messages$/, "Send message"],
+  [/^\/mission\/messages\/[^/]+\/send-now$/, "Send now"],
+  [/^\/mission\/messages\/[^/]+$/, "Remove message"],
   [/^\/reset$/, "Reset"],
   [/^\/faults$/, "Fault injection"],
 ];
 const actionName = (path) => ACTION_NAME.find(([re]) => re.test(path))?.[1] ?? path;
+
+/* DELETE /mission/messages/{id}: execPost's twin for the one call that is not a POST */
+async function execDelete(path) {
+  const response = await fetch(`${EXEC_API_URL}${path}`, { method: "DELETE" });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(errorText(data, response.status));
+  return data;
+}
 
 /* revisions that never ran and were replaced fold into one line */
 const FOLDED = new Set(["superseded", "rejected", "invalid"]);
@@ -86,18 +102,47 @@ function Hero({ onDemo }) {
   );
 }
 
+/* An operator message in the thread: the user's bubble with where it went (held / delivered to rev N). */
+function MessageBubble({ msg }) {
+  return (
+    <div className="flex flex-col items-end gap-1" data-message={msg.id}>
+      <p className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl bg-card px-4 py-2.5 text-[15px] leading-relaxed text-ink">{msg.text}</p>
+      <p className="flex flex-wrap justify-end gap-x-2 text-[12px] text-faint">
+        <span className={`rounded-full border px-2 font-mono ${msg.status === "held" ? "border-warn/50 text-warn" : "border-line"}`} data-message-tag>
+          {messageTag(msg)}
+        </span>
+        {msg.note && <span>{msg.note}</span>}
+      </p>
+    </div>
+  );
+}
+
+const byMessage = (rev) => rev.status === "superseded" && rev.superseded_reason === "operator_message";
+
+/* why a revision that stays open in the thread was superseded */
+function supersededNote(rev) {
+  if (rev.superseded_reason === "operator_message") {
+    return `Superseded by your message${rev.superseded_by ? ` · rev ${rev.superseded_by} took over; its tasks that never started are superseded` : ""}`;
+  }
+  if (rev.superseded_reason === "stage_ended") return "Superseded: the running stage ended before this re-plan was approved.";
+  return null;
+}
+
 function FoldedRevision({ rev, children }) {
   const [open, setOpen] = useState(false);
   return (
-    <div>
+    <div data-fold={rev.revision}>
       <button
         aria-expanded={open}
         className="flex w-full items-center gap-2 rounded-xl border border-dashed border-line px-4 py-2 text-left text-[13px] text-faint hover:text-muted"
         onClick={() => setOpen(!open)}
         type="button"
       >
-        <span className="font-mono">rev {rev.revision}</span> · {rev.status} · {rev.tasks.length} task{rev.tasks.length === 1 ? "" : "s"}
-        <span className="ml-auto">{open ? "hide" : "show"}</span>
+        <span className="flex-none whitespace-nowrap font-mono">rev {rev.revision}</span>
+        <span className="min-w-0">
+          · {byMessage(rev) ? "Superseded by your message" : rev.status} · {rev.tasks.length} task{rev.tasks.length === 1 ? "" : "s"}
+        </span>
+        <span className="ml-auto flex-none">{open ? "hide" : "show"}</span>
       </button>
       {open && <div className="mt-3 space-y-3">{children}</div>}
     </div>
@@ -116,6 +161,7 @@ export function Thread({ state, readOnly = false, busy = false, act, pending = n
   const rounds = clarificationRounds(mission);
   const asking = mission?.clarifications?.at(-1);
   const options = asking && asking.answer == null ? asking.options || [] : [];
+  const messages = threadMessages(mission);
 
   if (!mission && !pending) return null;
   return (
@@ -135,7 +181,7 @@ export function Thread({ state, readOnly = false, busy = false, act, pending = n
       {revisions.map((rev) => {
         const latest = rev.revision === latestNo;
         const ran = rev.runtime && Object.keys(rev.runtime).length > 0;
-        const prev = revisions.find((r) => r.revision === rev.revision - 1);
+        const prev = previousRevision(mission, rev);
         const replan = latest && prev && ASKING.has(rev.status) && !readOnly;
         const body = (
           <>
@@ -154,19 +200,29 @@ export function Thread({ state, readOnly = false, busy = false, act, pending = n
             />
           </>
         );
-        if (!latest && !ran && FOLDED.has(rev.status)) {
+        const said = (messages.before.get(rev.revision) || []).map((msg) => <MessageBubble key={msg.id} msg={msg} />);
+        // a revision the operator's message replaced folds even while the re-plan is still coming
+        if (!ran && ((!latest && FOLDED.has(rev.status)) || byMessage(rev))) {
           return (
-            <FoldedRevision key={rev.revision} rev={rev}>
-              {body}
-            </FoldedRevision>
+            <React.Fragment key={rev.revision}>
+              {said}
+              <FoldedRevision rev={rev}>{body}</FoldedRevision>
+            </React.Fragment>
           );
         }
         return (
-          <div className="space-y-3" key={rev.revision}>
-            {body}
-          </div>
+          <React.Fragment key={rev.revision}>
+            {said}
+            <div className="space-y-3">
+              {rev.status === "superseded" && supersededNote(rev) && <p className="text-[13px] text-faint">{supersededNote(rev)}</p>}
+              {body}
+            </div>
+          </React.Fragment>
         );
       })}
+      {messages.tail.map((msg) => (
+        <MessageBubble key={msg.id} msg={msg} />
+      ))}
 
       <ClarificationRounds label="Questions during the mission" rounds={rounds.after} />
       {live && <ThinkingCard thinking={live} />}
@@ -216,10 +272,10 @@ export default function ChatView({ exec, robots = [], showMap = true }) {
   const currentId = mission && state?.run_id ? `${state.run_id}:${mission.mission_id}` : null;
 
   const act = useCallback(
-    async (path, body, okText) => {
+    async (path, body, okText, method = "POST") => {
       setBusy(true);
       try {
-        const next = await execPost(path, body);
+        const next = method === "DELETE" ? await execDelete(path) : await execPost(path, body);
         accept(next);
         if (okText) push({ text: okText });
         return { ok: true, state: next };
@@ -250,12 +306,20 @@ export default function ChatView({ exec, robots = [], showMap = true }) {
   }, [currentId, mission, state]);
 
   /* follow the thread as it grows */
-  const growth = `${currentId}:${mission?.status}:${mission?.revisions?.length ?? 0}:${pending ? 1 : 0}`;
+  const growth = `${currentId}:${mission?.status}:${mission?.revisions?.length ?? 0}:${mission?.operator_messages?.length ?? 0}:${pending ? 1 : 0}`;
   useEffect(() => {
     if (!viewing) endRef.current?.scrollIntoView?.({ block: "end" });
   }, [growth, viewing]);
 
-  const send = async (command) => {
+  const messaging = messagesOpen(mission);
+
+  const send = async (command, mode = "now") => {
+    if (messaging) {
+      setSending(true);
+      const res = await act("/mission/messages", { text: command, mode }, mode === "queue" ? "Message queued for the next planning step." : null);
+      setSending(false);
+      return res.ok;
+    }
     setSending(true);
     setPending({ command, at: Date.now() / 1000 });
     const res = await act("/missions", { command, planner }, null);
@@ -331,11 +395,15 @@ export default function ChatView({ exec, robots = [], showMap = true }) {
           block={viewed ? { reason: "Viewing an earlier mission (read-only)." } : block}
           busy={busy}
           healthPlanners={health?.planners}
+          messaging={messaging && !viewed}
           onNewRun={newRun}
+          onRemoveQueued={(id) => act(`/mission/messages/${encodeURIComponent(id)}`, null, "Queued message removed.", "DELETE")}
+          onSendQueued={(id) => act(`/mission/messages/${encodeURIComponent(id)}/send-now`, {}, null)}
           onPlanner={setPlannerChoice}
           onSend={send}
           planner={planner}
           planners={state?.planners}
+          queued={queuedMessages(mission)}
           sending={sending}
           setText={setText}
           text={text}

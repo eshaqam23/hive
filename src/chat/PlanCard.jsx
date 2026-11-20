@@ -10,6 +10,7 @@ import {
   checkSummary,
   describeWhat,
   formatTaskList,
+  isLiveRevision,
   likelyRobots,
   planSource,
   previewDiffRows,
@@ -479,7 +480,9 @@ export default function PlanCard({ rev, state, mission, latest, readOnly = false
   const [reason, setReason] = useState("");
   const [editError, setEditError] = useState(null);
   const checks = checkSummary(rev);
-  const awaiting = !readOnly && latest && mission.status === "awaiting_approval";
+  // a live re-plan (from an operator message) is approvable while the older revision keeps running
+  const live = !readOnly && latest && isLiveRevision(mission, rev);
+  const awaiting = (!readOnly && latest && mission.status === "awaiting_approval") || live;
   const approvable = awaiting && rev.status === "awaiting_approval";
   const edits = useMemo(() => draftEdits(rev, draft), [rev, draft]);
   const why = (rev.proposal?.rationale || []).filter((x) => typeof x === "string" && x.trim() !== "").map((x) => x.trim());
@@ -599,6 +602,11 @@ export default function PlanCard({ rev, state, mission, latest, readOnly = false
               <button className="btn btn-secondary px-4 py-1.5 text-[14px]" onClick={() => setRejecting(false)} type="button">
                 Back
               </button>
+              <p className="w-full text-[13px] text-faint">
+                {live
+                  ? `Rejecting drops rev ${rev.revision}; rev ${mission.active_revision} keeps running unchanged.`
+                  : "Reject ends this mission. To change the plan, send a message instead."}
+              </p>
             </form>
           ) : (
             <div className="flex flex-wrap items-center gap-2">
@@ -611,14 +619,20 @@ export default function PlanCard({ rev, state, mission, latest, readOnly = false
               >
                 {rev.revision > 1 ? `Approve rev ${rev.revision}` : "Approve & run"}
               </button>
-              <button className="btn btn-secondary px-4 py-1.5 text-[14px]" disabled={busy} onClick={() => setEditing(true)} type="button">
-                {rev.revision > 1 ? "Edit" : "Edit plan"}
-              </button>
+              {!live && (
+                <button className="btn btn-secondary px-4 py-1.5 text-[14px]" disabled={busy} onClick={() => setEditing(true)} type="button">
+                  {rev.revision > 1 ? "Edit" : "Edit plan"}
+                </button>
+              )}
               <button className="btn btn-secondary px-4 py-1.5 text-[14px]" disabled={busy} onClick={() => setRejecting(true)} type="button">
                 Reject
               </button>
               <span className="ml-auto text-[13px] text-faint">
-                {approvable && checks.ok ? "Nothing moves until you approve." : "This revision cannot run: its checks failed."}
+                {!(approvable && checks.ok)
+                  ? "This revision cannot run: its checks failed."
+                  : live
+                    ? `Rev ${mission.active_revision} keeps running; approving swaps in rev ${rev.revision} (tasks already sent finish).`
+                    : "Nothing moves until you approve."}
               </span>
             </div>
           )}
