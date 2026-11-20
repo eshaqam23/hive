@@ -205,3 +205,16 @@ async def test_main_live_path_exits_1_on_a_failure(capsys):
     out = capsys.readouterr().out
     assert code == 1 and "16/17 passed" in out and "FAIL" in out and KEY not in out
     assert json.loads(outputs[0])["disposition"] == "reject"
+
+
+async def test_sampling_lines_print_the_effective_num_ctx_for_an_ollama_row(capsys):
+    from hive_exec.llm.router import Router
+
+    save_chain([mock_row(), mock_row("local-ollama", "ollama.local", kind="ollama", structured_mode="ollama_format",
+                                    base_url="http://ollama.local:11434", model="qwen3:8b",
+                                    sampling=Sampling(max_tokens=2048))])
+    lines = pe.sampling_lines(Router())
+    openai_line = next(x for x in lines if x.startswith("sampling scripted-mock:"))
+    ollama_line = next(x for x in lines if x.startswith("sampling local-ollama:"))
+    assert "num_ctx" not in openai_line or "not sent" in openai_line
+    assert ollama_line.endswith("num_ctx 11264")  # 9216 + the row's 2048

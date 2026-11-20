@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from hive_exec.executive import Executive  # noqa: E402
 from hive_exec.gateway.fake import FakeGateway  # noqa: E402
+from hive_exec.llm import wire  # noqa: E402
 from hive_exec.llm.router import Candidate, Router  # noqa: E402
 from hive_exec.planner.baseline import BaselinePlanner  # noqa: E402
 from hive_exec.planner.llm import LLMPlanner  # noqa: E402
@@ -200,8 +201,9 @@ def sampling_lines(router: Router) -> list[str]:
     lines = []
     for c in cands:
         s = c.row.sampling
+        ctx = f" num_ctx {wire.ollama_num_ctx(c.row)}" if c.row.kind == "ollama" else " num_ctx not sent"
         lines.append(f"sampling {c.row.id}: temperature {s.temperature} top_p {s.top_p} top_k {s.top_k} "
-                     f"seed {s.seed}")
+                     f"seed {s.seed}{ctx}")
         if s.temperature > HOT_TEMPERATURE:
             lines.append(f"WARNING: {c.row.id} plans at temperature {s.temperature} (> {HOT_TEMPERATURE}); "
                          "re-save the executive row in Settings to plan at 0.2.")

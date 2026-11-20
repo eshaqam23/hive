@@ -122,3 +122,4 @@ System pytest 7.4 warns "Unknown config option: asyncio_mode"; that is expected.
   (run r samples with seed 1234 + r - 1; the store file is read by the script, never printed). It prints each
   executive row's effective sampling first and a separate pass rate for unseen paraphrases (`in_prompt: false`).
 - Settings > re-save the executive row if prompt_eval shows temperature 0.7.
+- Ollama: the backend sends num_ctx=<input limit + max_tokens> (`MAX_INPUT_TOKENS` in `context.py` + the row's `max_tokens`, 12288 by default, on every request for a row including probes); qwen3:8b at 12288 needs about 2 GB of extra VRAM for the KV cache. prompt_eval prints the effective num_ctx.

@@ -95,7 +95,8 @@ async def test_ollama_format_body_is_exec_v2s_native_chat():
     body = rec.bodies()[0]
     assert body["format"] == SCHEMA and body["stream"] is False and body["think"] is False
     assert body["messages"] == [{"role": "system", "content": "SYSTEM"}, {"role": "user", "content": "USER"}]
-    assert body["options"] == {"temperature": 0.2, "top_p": 0.8, "seed": 1234, "num_predict": 3072, "top_k": 20}
+    assert body["options"] == {"temperature": 0.2, "top_p": 0.8, "seed": 1234, "num_predict": 3072, "num_ctx": 12288,
+                               "top_k": 20}
     assert "authorization" not in req.headers
     assert result.row.id == "ollama-local" and result.fallback_used is False
 
@@ -319,3 +320,47 @@ def test_planning_sampling_is_low_temperature():
     assert QWEN_SAMPLING["temperature"] == 0.2 and HOSTED_SAMPLING["temperature"] == 0.2
     assert all(t["sampling"]["temperature"] == 0.2 for t in TEMPLATES)
     assert Sampling().temperature == 0.2  # rows saved without explicit sampling plan at 0.2 too
+
+
+# -- WS4 fix F1: Ollama must be told its context window ---------------------------------
+def _ollama_row(max_tokens=None):
+    make_store(["ollama-local"])
+    row = Router().chain("executive")[0].row
+    if max_tokens is not None:
+        row = row.model_copy(update={"sampling": row.sampling.model_copy(update={"max_tokens": max_tokens})})
+    return row
+
+
+def test_ollama_body_always_carries_num_ctx_from_the_planner_input_limit_and_max_tokens():
+    from hive_exec.context import MAX_INPUT_TOKENS
+
+    body = wire.chat_body(_ollama_row(), "SYSTEM", "USER", SCHEMA)
+    assert body["options"]["num_ctx"] == MAX_INPUT_TOKENS + 3072 == 12288
+    assert wire.chat_body(_ollama_row(), "S", "U", None)["options"]["num_ctx"] == 12288  # free text too
+    assert wire.chat_body(_ollama_row(), "S", "U", SCHEMA, probe=True)["options"]["num_ctx"] == 12288
+
+
+def test_ollama_num_ctx_follows_the_rows_max_tokens():
+    body = wire.chat_body(_ollama_row(2048), "SYSTEM", "USER", SCHEMA)
+    assert body["options"]["num_ctx"] == 9216 + 2048
+    assert body["options"]["num_predict"] == 2048
+
+
+def test_probe_and_planning_calls_send_the_same_num_ctx_for_a_row():
+    row = _ollama_row(2048)
+    planning = wire.chat_body(row, "SYSTEM", "USER", SCHEMA)
+    ping = wire.chat_body(row, "", "ping", None, max_tokens=wire.PROBE_MAX_TOKENS)
+    schema_probe = wire.chat_body(row, "SYSTEM", "USER", SCHEMA, probe=True, max_tokens=wire.PROBE_MAX_TOKENS)
+    assert planning["options"]["num_ctx"] == ping["options"]["num_ctx"] == schema_probe["options"]["num_ctx"]
+    assert ping["options"]["num_predict"] == wire.PROBE_MAX_TOKENS  # the output limit still differs; the window must not
+
+
+@pytest.mark.parametrize("pid", ["arc", "ollama-json"])
+def test_only_ollama_bodies_have_num_ctx_in_options(pid):
+    make_store([pid])
+    row = Router().chain("executive")[0].row
+    body = wire.chat_body(row, "SYSTEM", "USER", SCHEMA)
+    if row.kind == "ollama":
+        assert "num_ctx" in body["options"]
+    else:
+        assert "num_ctx" not in json.dumps(body) and "options" not in body

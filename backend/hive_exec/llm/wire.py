@@ -13,6 +13,7 @@ from typing import Any, Optional
 import httpx
 from pydantic import ValidationError
 
+from ..context import MAX_INPUT_TOKENS
 from ..contracts import plan_proposal_json_schema
 from .providers import ProviderRow, key_hint
 
@@ -20,6 +21,15 @@ from .providers import ProviderRow, key_hint
 #: (gpt-oss) spend completion tokens before the JSON, so the probe allows more.
 PROBE_MAX_TOKENS = 1024
 VLLM_MODES = ("structured_outputs", "guided_json")
+
+
+def ollama_num_ctx(row: ProviderRow) -> int:
+    """The context window Ollama is told to use: the planner's input limit plus the row's output limit.
+
+    Without it Ollama falls back to its own default (often 4096) and silently cuts a long prompt from the
+    front. It depends on the row only, never on the call (probe or planning): a different num_ctx makes
+    Ollama reload the model."""
+    return MAX_INPUT_TOKENS + row.sampling.max_tokens
 
 
 def planning_schema() -> dict:
@@ -68,6 +78,7 @@ def chat_body(row: ProviderRow, system: str, user: str, schema: Optional[dict], 
         if s.seed is not None:
             options["seed"] = s.seed
         options["num_predict"] = limit  # Ollama's name for the output-token limit
+        options["num_ctx"] = ollama_num_ctx(row)  # the same on every request for this row
         if s.top_k is not None:
             options["top_k"] = s.top_k
         body: dict[str, Any] = {"model": row.model, "messages": messages, "stream": False}
