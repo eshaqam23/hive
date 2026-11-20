@@ -49,6 +49,7 @@ function fakeFetch(url, init = {}) {
   if (path === "/health") return Promise.resolve(reply(200, health));
   if (path === "/export") return Promise.resolve(reply(200, { schema_version: "hive.run-export.v1", ...server.state }));
   if (path === "/faults") return Promise.resolve(reply(200, { available: { route_blocked: "Pickup corridor reports blocked" }, active: [] }));
+  if (path === "/debug/truth") return Promise.resolve(reply(200, server.truth));
   return Promise.resolve(reply(503, { ok: false, error: "no map yet" }));
 }
 
@@ -392,7 +393,61 @@ describe("sim controls", () => {
     fireEvent.change(within(drawer).getByRole("combobox"), { target: { value: "known" } });
     fireEvent.click(within(drawer).getByRole("button", { name: "Reset simulation" }));
     await waitFor(() => expect(posts("/reset")).toHaveLength(1));
-    expect(posts("/reset")[0].body).toEqual({ scenario: "known", faults: ["route_blocked"] });
+    expect(posts("/reset")[0].body).toEqual({ scenario: "known", faults: ["route_blocked"], world: "random" });
+  });
+
+  it("resets a random world with a replay seed or the fixed demo world, and shows the current seed", async () => {
+    server.state = { ...clone(awaiting), sim: { world: "random", seed: 3141 } };
+    server.post["/reset"] = () => reply(200, { ...clone(awaiting), mission: null, timeline: [], sim: { world: "random", seed: 42 } });
+    render(<Harness />);
+    const drawer = await screen.findByRole("region", { name: "Simulation controls" });
+    fireEvent.click(within(drawer).getByRole("button", { name: /Sim controls/ }));
+    expect(within(drawer).getByText(/seed 3141/)).toBeTruthy();
+    expect(within(drawer).getByRole("radio", { name: /Random/ }).checked).toBe(true);
+
+    fireEvent.change(within(drawer).getByRole("combobox"), { target: { value: "unknown" } });
+    const seed = within(drawer).getByRole("spinbutton", { name: /Replay seed/ });
+    fireEvent.change(seed, { target: { value: "-1" } });
+    expect(within(drawer).getByRole("alert").textContent).toMatch(/whole number/);
+    expect(within(drawer).getByRole("button", { name: "Reset simulation" }).disabled).toBe(true);
+    fireEvent.change(seed, { target: { value: "42" } });
+    fireEvent.click(within(drawer).getByRole("button", { name: "Reset simulation" }));
+    await waitFor(() => expect(posts("/reset")).toHaveLength(1));
+    expect(posts("/reset")[0].body).toEqual({ scenario: "unknown", faults: [], world: "random", seed: 42 });
+    await waitFor(() => expect(within(drawer).getByText(/seed 42/)).toBeTruthy());
+
+    fireEvent.click(within(drawer).getByRole("radio", { name: /Fixed demo/ }));
+    expect(within(drawer).getByRole("spinbutton", { name: /Replay seed/ }).disabled).toBe(true);
+    fireEvent.click(within(drawer).getByRole("button", { name: "Reset simulation" }));
+    await waitFor(() => expect(posts("/reset")).toHaveLength(2));
+    expect(posts("/reset")[1].body).toEqual({ scenario: "unknown", faults: [], world: "fixed" });
+  });
+
+  it("reveals the simulator's hidden truth only on request, labeled simulation only", async () => {
+    server.truth = {
+      warning: "SIMULATOR TRUTH - debug only",
+      truth: {
+        world: "random", seed: 7, faults: [], obstacles: ["pickup_corridor"],
+        corridor: { pickup_corridor: "blocked" },
+        objects: { mystery_crate_1: { label: "mystery_crate", location_id: "work_area", held_by: null } },
+        robots: { gripper_01: { location_id: "dropoff", battery_pct: 61.5 } },
+      },
+    };
+    render(<Harness />);
+    const drawer = await screen.findByRole("region", { name: "Simulation controls" });
+    fireEvent.click(within(drawer).getByRole("button", { name: /Sim controls/ }));
+    expect(server.calls.some((c) => c.path === "/debug/truth")).toBe(false);
+    const reveal = within(drawer).getByRole("button", { name: "Reveal world truth" });
+    expect(reveal.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(reveal);
+    const truth = await within(drawer).findByRole("region", { name: "World truth" });
+    expect(truth.textContent).toMatch(/simulation only/i);
+    expect(truth.textContent).toContain("mystery_crate_1");
+    expect(truth.textContent).toContain("work_area");
+    expect(truth.textContent).toMatch(/pickup_corridor.*blocked/);
+    expect(truth.textContent).toMatch(/gripper_01.*dropoff.*61\.5%/);
+    fireEvent.click(within(drawer).getByRole("button", { name: "Hide world truth" }));
+    expect(within(drawer).queryByRole("region", { name: "World truth" })).toBeNull();
   });
 
   it("is hidden when the gateway says plainly it is not simulated", async () => {
