@@ -340,8 +340,12 @@ class Executive:
             if out.proposal.disposition != "plan":
                 first_ok = first_ok if first_ok is not None else True
                 break
-            alloc = self.allocator.allocate(out.proposal, self.robots, {})
-            vres = validate(out.proposal, alloc, self.robots, self.world, m.canonical_goals)
+            try:
+                alloc = self.allocator.allocate(out.proposal, self.robots, {})
+                vres = validate(out.proposal, alloc, self.robots, self.world, m.canonical_goals)
+            except Exception as exc:  # noqa: BLE001 - a malformed proposal must not strand the mission in planning
+                return self._planner_failed(m, gen, f"Plan checks could not run: {type(exc).__name__}: "
+                                            f"{str(exc)[:300]}", record, attempts)
             if first_ok is None:
                 first_ok = vres.report.ok
             if vres.report.ok or attempts >= 2 or planner.kind == "baseline":

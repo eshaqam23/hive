@@ -970,3 +970,39 @@ async def test_missing_rationale_shows_as_an_info_finding_for_a_moving_gripper(m
     (f,) = [f for f in rev.validation.findings if f.code == "missing_rationale"]
     assert f.severity == "info"
     assert ROBOTS["gripper_01"].sensors == ()
+
+
+# ================================================== WS3 (H): checks that raise end the mission planner_error
+
+class RaisingChecksPlanner(StubPlanner):
+    """Scripted proposals; a dict with tasks=None is built without validation, so allocate/validate raise."""
+
+    async def propose(self, ctx, repair_feedback=None, previous_output=None):
+        self.contexts.append(ctx)
+        raw = self.proposals.pop(0) if len(self.proposals) > 1 else self.proposals[0]
+        proposal = PlanProposal.model_construct(**raw) if raw.get("tasks", 0) is None             else PlanProposal.model_validate(raw)
+        return PlannerOutput(proposal, PlannerRecord(kind="baseline", label="stub", latency_ms=0.0))
+
+
+BAD_PLAN = dict(PHOTO_FOR_FIND, tasks=None, issues=[], clarification_question=None, clarification_options=[],
+                answer=None, rationale=[])
+
+
+async def test_initial_planning_exception_ends_planner_error_and_dispatches_nothing(make_exec):
+    ex = await make_exec("unknown", planners={"stub": RaisingChecksPlanner([BAD_PLAN])})
+    await ex.create_mission("Find the red block.")
+    m = ex.mission
+    assert m.status == "planner_error" and m.outcome["status"] == "planner_error"
+    assert "TypeError" in m.outcome["reason"] and not m.revisions and not ex.attempts
+    assert any(e["kind"] == "planner_error" and "TypeError" in e["message"] for e in ex.timeline)
+    assert m.planning_log[-1]["error"] == m.outcome["reason"]
+
+
+async def test_clarification_answer_planning_exception_ends_planner_error(make_exec):
+    ex = await make_exec("unknown", planners={"stub": RaisingChecksPlanner([ask("Which object?"), BAD_PLAN])})
+    await ex.create_mission("Find it.")
+    assert ex.mission.status == "clarification"
+    await ex.answer_clarification("the red block")
+    m = ex.mission
+    assert m.status == "planner_error" and "TypeError" in m.outcome["reason"]
+    assert not m.revisions and not ex.attempts
