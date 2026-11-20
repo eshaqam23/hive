@@ -191,7 +191,7 @@ async function handle(msg) {
     case "status":
       return control("status");
     case "reset": {
-      const r = await control("reset", { run_id: msg.run_id, faults: msg.faults || [] });
+      const r = await control("reset", { run_id: msg.run_id, faults: msg.faults || [], world: msg.world ?? "fixed", seed: msg.seed ?? null });
       for (const [id, a] of attempts) if (a.env.run_id !== msg.run_id) attempts.delete(id);
       return r;
     }

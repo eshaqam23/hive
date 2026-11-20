@@ -28,7 +28,7 @@ from hive_interfaces.action import ExecuteSkill
 from hive_interfaces.srv import FleetControl
 
 sys.path.insert(0, os.environ.get("HIVE_BACKEND_DIR", os.getcwd()))
-from hive_exec.sim.fake_world import DURATION_S, KNOWN_FAULTS, FakeWorld  # noqa: E402
+from hive_exec.sim.fake_world import DURATION_S, KNOWN_FAULTS, FakeWorld, world_from_args  # noqa: E402
 
 ROBOTS = ("camera_01", "lidar_01", "gripper_01")
 STEPS = 4
@@ -159,6 +159,7 @@ class FakeFleet(Node):
                 return {"run_id": self.run_id, "active": dict(self.busy),
                         "robots": {r: dict(self.world.status(r), current_attempt_id=self.busy.get(r)) for r in ROBOTS}}
         if command == "reset":
+            world = world_from_args(args)  # validates world/seed/faults before anything is torn down
             with self.lock:
                 self.generation += 1
             deadline = time.monotonic() + 5.0
@@ -167,12 +168,13 @@ class FakeFleet(Node):
             with self.lock:
                 settled = not self.busy
                 self.busy.clear()
-                self.world = FakeWorld(args.get("faults") or [])
+                self.world = world
                 self.run_id = args["run_id"]
                 self.seen_attempts.clear()
                 self.rejections.clear()
-            self.get_logger().info(f"reset to {self.run_id} faults={args.get('faults')} settled={settled}")
-            return {"run_id": self.run_id, "settled": settled}
+            self.get_logger().info(f"reset to {self.run_id} faults={args.get('faults')} world={world.kind} "
+                                   f"seed={world.seed} settled={settled}")
+            return {"run_id": self.run_id, "settled": settled, "world": world.kind, "seed": world.seed}
         if command == "inject_fault":
             if args.get("fault") not in KNOWN_FAULTS:
                 raise ValueError(f"unknown fault {args.get('fault')}")
