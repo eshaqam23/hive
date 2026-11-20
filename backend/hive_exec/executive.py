@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import itertools
 import json
+import logging
 import os
 import random
 import time
@@ -44,6 +45,8 @@ from .planner.base import Planner, PlannerError
 from .planner.preview import compute_preview_diff
 from .validator import ValidationResult, validate, validate_preview
 from .world import ObservedWorld, RobotState, initial_robot_states
+
+log = logging.getLogger(__name__)
 
 SIM_WORLDS = ("fixed", "random")
 TERMINAL_MISSION = {"completed", "blocked", "rejected", "canceled", "planner_error", "answered"}
@@ -345,6 +348,11 @@ class Executive:
             if gen != self._gen:
                 return
             record = out.record
+            if out.proposal.preview_changes and ctx.previous_preview is None:
+                # preview_changes answers a previous preview; with none in the context it is noise.
+                log.debug("dropped preview_changes %r: the planning context had no previous_preview",
+                          out.proposal.preview_changes)
+                out.proposal = out.proposal.model_copy(update={"preview_changes": []})
             if out.proposal.disposition != "plan":
                 first_ok = first_ok if first_ok is not None else True
                 break

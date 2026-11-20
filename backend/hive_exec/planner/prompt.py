@@ -87,7 +87,7 @@ RULES = """RULES
     the evidence comes back as expected. Only shown, never run; name objects by object_query. Omit for scope=full.
 16. A continuation may hold previous_preview. Use the new evidence: keep it where it still fits, change it where
     it differs (object elsewhere, two matches, route blocked, robot battery low), and list what changed in
-    preview_changes (max 4 short strings)."""
+    preview_changes (max 4 short strings). Without previous_preview leave preview_changes empty."""
 
 V1 = "hive.plan-proposal.v1"
 EMPTY = {"mission_goals": [], "stage_goals": [], "tasks": []}
@@ -141,7 +141,7 @@ EXAMPLES = [
                              "tasks": _carry({"object_query": {"label": "green_block"}}, robot=False),
                              "waits_for": ["camera_01 sees green_block", "lidar_01 sees pickup_corridor clear"]}}),
     ("(continuation) canonical goal green_block at dropoff_zone",
-     "green_block_1 at pickup_zone (fresh); pickup_corridor clear; gripper_01 at dropoff_zone",
+     "green_block_1 at pickup_zone (fresh); pickup_corridor clear; gripper_01 at dropoff_zone; previous_preview: carry to dropoff_zone",
      {"schema_version": V1, "disposition": "plan", "scope": "full",
       "summary": "Carry green_block_1 from the pickup zone to the drop-off zone.",
       "mission_goals": [{"kind": "object_at", "object_query": {"label": "green_block"},

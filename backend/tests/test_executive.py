@@ -1446,3 +1446,25 @@ async def test_an_unapproved_continuation_leaves_the_preview_unconsumed(make_exe
     assert stub.contexts[2].previous_preview["from_revision"] == 1
     await approve_latest(ex)
     assert ex.mission.revisions[0].preview_consumed_by == 3
+
+
+# ================================================== WS4 fix F6: preview_changes only answers a previous preview
+
+async def test_preview_changes_without_a_previous_preview_are_dropped_and_logged(make_exec, caplog):
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="hive_exec.executive")
+    ex, stub = await run_stage1(make_exec, [staged(preview_changes=["Evidence as previewed."])])
+    assert stub.contexts[0].previous_preview is None
+    rev = ex.mission.revisions[-1]
+    assert rev.proposal.preview_changes == [] and rev.proposal.next_stage_preview is not None
+    assert ex.state()["mission"]["revisions"][-1]["proposal"]["preview_changes"] == []
+    assert any(r.levelno == logging.DEBUG and "preview_changes" in r.getMessage() for r in caplog.records)
+
+
+async def test_preview_changes_on_a_continuation_without_a_preview_to_answer_are_dropped(make_exec):
+    plain = {k: v for k, v in staged().items() if k != "next_stage_preview"}
+    ex, stub = await run_stage1(make_exec, [plain, dict(CARRY_FULL, preview_changes=["x"])])
+    await finish_stage(ex)
+    assert stub.contexts[1].previous_preview is None
+    assert ex.mission.revisions[-1].proposal.preview_changes == []

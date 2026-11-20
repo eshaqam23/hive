@@ -393,7 +393,7 @@ def test_prompt_growth_for_rationale_stays_under_600_chars():
     # v3 -> v3.1 added < 600; v3.1 -> v3.2 (preview) may add PROMPT_WS4_BUDGET more (see the WS4 test below)
     from hive_exec.planner.prompt import system_prompt
 
-    assert len(system_prompt()) - PROMPT_V3_CHARS < 600 + PROMPT_WS4_BUDGET
+    assert len(system_prompt()) - PROMPT_V3_CHARS < 600 + PROMPT_WS4_BUDGET + PROMPT_FIX_BUDGET
 
 
 def test_prompt_with_rationale_still_fits_the_token_budget():
@@ -406,6 +406,8 @@ def test_prompt_with_rationale_still_fits_the_token_budget():
 # ---------------------------------------------------------------- WS4: next-stage preview in the prompt
 PROMPT_V31_CHARS = 11513  # len(system_prompt()) of hive.prompt.v3.1 at afd062e
 PROMPT_WS4_BUDGET = 900 + 200  # B (preview rules and example) < 900, G (carry-overs) <= 200 on top
+PROMPT_V32_WS4_CHARS = 12572  # len(system_prompt()) when WS4 landed (a24f8f0)
+PROMPT_FIX_BUDGET = 120  # WS4 fix F6 (preview_changes only with a previous preview) may add this much
 
 
 def _preview_context(preview=True):
@@ -440,7 +442,8 @@ def test_prompt_rules_ask_for_a_preview_and_for_changes_on_continuation():
     assert "next_stage_preview" in RULES and "waits_for" in RULES and "object_query" in RULES
     rule = RULES[RULES.index("16. "):]
     for phrase in ["previous_preview", "keep it where it still fits", "object elsewhere", "two matches",
-                   "route blocked", "robot battery low", "preview_changes", "max 4"]:
+                   "route blocked", "robot battery low", "preview_changes", "max 4",
+                   "Without previous_preview leave preview_changes empty"]:
         assert phrase in rule, phrase
     assert "Only shown, never run" in RULES
 
@@ -456,8 +459,13 @@ def test_fetch_example_shows_a_next_stage_preview_by_object_query_and_no_other_e
 
 
 def test_continuation_example_explains_what_the_evidence_changed():
+    from hive_exec.planner.prompt import EXAMPLES
+
     p = _example("(continuation)")
     assert p.scope == "full" and p.next_stage_preview is None and p.preview_changes
+    state = next(st for cmd, st, _ in EXAMPLES if cmd.startswith("(continuation)"))
+    assert "previous_preview" in state  # the example's context shows the preview it answers
+    assert not [c for c, e in _examples() if e.preview_changes and not c.startswith("(continuation)")]
 
 
 def test_continuation_user_prompt_carries_the_previous_preview_and_points_at_the_rule():
@@ -473,7 +481,7 @@ def test_continuation_user_prompt_carries_the_previous_preview_and_points_at_the
 def test_prompt_growth_for_preview_and_carry_overs_is_budgeted():
     from hive_exec.planner.prompt import system_prompt
 
-    assert len(system_prompt()) - PROMPT_V31_CHARS < PROMPT_WS4_BUDGET
+    assert len(system_prompt()) - PROMPT_V31_CHARS < PROMPT_WS4_BUDGET + PROMPT_FIX_BUDGET
 
 
 def test_schema_with_a_nested_optional_preview_still_fits_the_structured_output_budget():
@@ -559,3 +567,9 @@ def test_localization_texts_no_longer_repeat_what_a_robot_observes():
     for r in ROBOTS.values():
         for place in (*r.observable_areas, *r.observable_routes):
             assert place not in r.localization, (r.robot_id, place)
+
+
+def test_prompt_growth_for_the_f6_fix_is_small():
+    from hive_exec.planner.prompt import system_prompt
+
+    assert PROMPT_V32_WS4_CHARS < len(system_prompt()) <= PROMPT_V32_WS4_CHARS + PROMPT_FIX_BUDGET
