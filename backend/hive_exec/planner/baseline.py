@@ -191,6 +191,16 @@ def parse_goals(text: str) -> tuple[list[dict], list[str], Optional[str]]:
     return goals, [], None
 
 
+def _why_observers(tasks: list[dict]) -> list[str]:
+    """Deterministic reasons for the sensing tasks: only these robots observe these places."""
+    out = []
+    if any(t["preferred_robot_id"] == "camera_01" for t in tasks):
+        out.append("camera_01 is the only car with a camera, so it does the looking.")
+    if any(t["preferred_robot_id"] == "lidar_01" for t in tasks):
+        out.append("lidar_01 is the only car that scans pickup_corridor, so it checks the route.")
+    return out
+
+
 def plan_for_goals(goals: list[dict], ctx: PlanningContext) -> PlanProposal:
     objects = [o for o in ctx.observed["objects"] if o["fresh"] or o["held_by"]]
     routes = ctx.observed["routes"]
@@ -223,7 +233,8 @@ def plan_for_goals(goals: list[dict], ctx: PlanningContext) -> PlanProposal:
         if not free and not held and any(a["label"] == label for a in absences):
             return _p(disposition="reject", summary=f"No {label} was found where it was inspected.",
                       mission_goals=goals, issues=["object not found"])
-        route = routes.get("pickup_corridor", "unknown")
+        route_id = "pickup_corridor"
+        route = routes.get(route_id, "unknown")
         if route == "blocked":
             return _p(disposition="reject", summary="The pickup corridor is observed blocked.", mission_goals=goals,
                       issues=["route blocked"])
@@ -238,9 +249,11 @@ def plan_for_goals(goals: list[dict], ctx: PlanningContext) -> PlanProposal:
                 tasks.append(_task(f"t{len(tasks) + 1}", "surveyor", {"kind": "scan_route", "route_id": "pickup_corridor"},
                                    robot="lidar_01"))
                 stage.append({"kind": "route_observed", "route_id": "pickup_corridor"})
+            why = _why_observers(tasks) + [
+                "gripper_01 has no camera or LiDAR, so it waits; transport is planned once these results arrive."]
             return _p(disposition="plan", scope="observation_stage",
                       summary="Gather missing evidence before transport.", mission_goals=goals, stage_goals=stage,
-                      tasks=tasks)
+                      tasks=tasks, rationale=why)
         oid = target["object_id"]
         tasks, loc, n = [], carrier["location_id"], 0
 
@@ -257,8 +270,11 @@ def plan_for_goals(goals: list[dict], ctx: PlanningContext) -> PlanProposal:
         if loc != dest:
             add({"kind": "navigate_to", "location_id": dest, "route_id": "pickup_corridor"})
         add({"kind": "place_object", "object_id": oid, "location_id": dest})
+        why = [f"gripper_01 is the only car that picks and places, so it carries {oid}.",
+               "It has no camera or LiDAR and drives by dead reckoning (simulation); it relies on the earlier "
+               f"camera_01 sighting and the lidar_01 clear scan of {route_id}."]
         return _p(disposition="plan", scope="full", summary=f"Carry {oid} to {dest}.", mission_goals=goals,
-                  tasks=tasks)
+                  tasks=tasks, rationale=why)
 
     tasks, n = [], 0
     for g in goals:
@@ -277,7 +293,7 @@ def plan_for_goals(goals: list[dict], ctx: PlanningContext) -> PlanProposal:
         cur["binding_id"] = prev["binding_id"]
         cur["depends_on"] = [prev["task_id"]]
     return _p(disposition="plan", scope="full", summary="Run the requested observations.", mission_goals=goals,
-              tasks=tasks)
+              tasks=tasks, rationale=_why_observers(tasks))
 
 
 BASELINE_LABEL = "Baseline (no LLM)"

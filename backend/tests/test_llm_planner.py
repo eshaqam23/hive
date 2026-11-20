@@ -294,7 +294,7 @@ def _example(prefix):
 def test_prompt_v3_rules_cover_find_answer_and_asking():
     from hive_exec.planner.prompt import PROMPT_VERSION, RULES, system_prompt
 
-    assert PROMPT_VERSION == "hive.prompt.v3" and "hive.prompt.v3" in system_prompt()
+    assert PROMPT_VERSION == "hive.prompt.v3.1" and "hive.prompt.v3.1" in system_prompt()
     for phrase in ["Write your own summary for this command; do not reuse example text.",
                    "object_located", "no scan_route", "the field", "work_area", "ONE short question",
                    "Never map an unnamed destination to dropoff_zone", "operator's own noun",
@@ -350,3 +350,53 @@ def test_prompt_v3_fits_the_token_budget_with_clarification_history():
     total = (estimate_tokens(system_prompt()) + estimate_tokens(user_prompt(ctx))
              + estimate_tokens(json.dumps(wire.planning_schema())) // 4)
     assert total < MAX_INPUT_TOKENS // 2
+
+
+# ---------------------------------------------------------------- WS3: plan rationale and sensorless navigation
+def test_prompt_catalog_lists_each_robots_sensors_and_localization():
+    from hive_exec.catalog import ROBOTS
+    from hive_exec.planner.prompt import _catalog_text
+
+    text = _catalog_text()
+    assert "rgb_camera" in text and "2d_lidar" in text
+    for r in ROBOTS.values():
+        assert r.localization.replace(" (synthetic)", "") in text, r.robot_id  # the label is dropped to save tokens
+    gripper_line = next(ln for ln in text.splitlines() if ln.startswith("- gripper_01"))
+    assert "sensors none" in gripper_line and "no onboard camera or LiDAR" in gripper_line
+
+
+def test_prompt_rule_asks_the_planner_to_decide_and_explain_sensorless_navigation():
+    from hive_exec.planner.prompt import RULES
+
+    rule = RULES[RULES.index("14. "):]
+    for phrase in ["rationale", "sensors none", "dead reckoning", "Every plan", "decide"]:
+        assert phrase in rule, phrase
+    # the planner decides: no hard-coded escort rule in the rules or the validator
+    assert "must be escorted" not in RULES and "always scan" not in RULES.lower()
+
+
+def test_prompt_examples_explain_every_plan_that_moves_the_sensorless_robot():
+    moving = [(cmd, p) for cmd, p in _examples()
+              if p.disposition == "plan" and any(t.preferred_robot_id == "gripper_01" for t in p.tasks)]
+    assert moving
+    for cmd, p in moving:
+        assert p.rationale, cmd
+        assert any("gripper_01" in item and ("dead" in item or "lidar" in item or "camera" in item)
+                   for item in p.rationale), cmd
+    assert _example("Find a red box in the field").rationale  # sensing plans carry one too
+
+
+PROMPT_V3_CHARS = 10917  # len(system_prompt()) of hive.prompt.v3 at e6f94bf
+
+
+def test_prompt_growth_for_rationale_stays_under_600_chars():
+    from hive_exec.planner.prompt import system_prompt
+
+    assert len(system_prompt()) - PROMPT_V3_CHARS < 600
+
+
+def test_prompt_with_rationale_still_fits_the_token_budget():
+    from hive_exec.llm import wire
+
+    assert wire.planning_schema()["properties"]["rationale"]["maxItems"] == 4
+    test_prompt_v3_fits_the_token_budget_with_clarification_history()

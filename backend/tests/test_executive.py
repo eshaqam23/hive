@@ -888,3 +888,85 @@ async def test_baseline_several_instances_offers_ids(make_exec):
                         world=ex.world)
     p = (await BaselinePlanner().propose(ctx)).proposal
     assert p.disposition == "clarify" and p.clarification_options == ["red_block_1", "red_block_2"]
+
+
+# ================================================== WS3: plan rationale
+
+from hive_exec.catalog import ROBOTS  # noqa: E402
+
+RATIONALE = ["gripper_01 is the only robot that picks and places.",
+             "It has no camera or LiDAR; lidar_01 scans the corridor first and it drives by dead reckoning."]
+RAT_PLAN = dict(PHOTO_FOR_FIND, rationale=RATIONALE)
+
+
+def latest_dump(ex):
+    return ex._serialize_plan(ex.mission, ex.mission.revisions[-1])
+
+
+async def test_revision_keeps_the_planners_rationale_in_state_and_export(make_exec):
+    ex, _ = await stub_exec(make_exec, [RAT_PLAN])
+    await ex.create_mission("Find the red block.")
+    assert ex.mission.revisions[-1].proposal.rationale == RATIONALE
+    state_rev = ex.state()["mission"]["revisions"][-1]
+    assert state_rev["proposal"]["rationale"] == RATIONALE
+    assert ex.export()["mission"]["revisions"][-1]["proposal"]["rationale"] == RATIONALE
+    assert ex.state()["mission"]["last_proposal"]["rationale"] == RATIONALE
+
+
+async def test_revision_without_rationale_serialises_an_empty_list(make_exec):
+    ex, _ = await stub_exec(make_exec, [PHOTO_FOR_FIND])
+    await ex.create_mission("Find the red block.")
+    assert latest_dump(ex)["proposal"]["rationale"] == []
+
+
+async def test_edit_keeps_the_base_rationale(make_exec):
+    ex, _ = await stub_exec(make_exec, [RAT_PLAN])
+    await ex.create_mission("Find the red block.")
+    await ex.edit(1, [{"op": "set_param", "task_id": "t1", "field": "area_id", "value": "pickup_zone"}])
+    rev2 = ex.mission.revisions[-1]
+    assert rev2.kind == "edit" and rev2.proposal.rationale == RATIONALE
+    assert ex.state()["mission"]["revisions"][-1]["proposal"]["rationale"] == RATIONALE
+
+
+async def test_baseline_delivery_in_a_known_world_explains_the_dead_reckoning_drive(make_exec):
+    ex = await make_exec("known")
+    await ex.create_mission(DEMO)
+    p = ex.mission.revisions[-1].proposal
+    text = " ".join(p.rationale)
+    assert 1 <= len(p.rationale) <= 4 and all(0 < len(i) <= 200 for i in p.rationale)
+    assert "gripper_01" in text and "dead reckoning" in text
+    assert "lidar_01" in text and "camera_01" in text  # the evidence the drive relies on
+    assert not [f for f in ex.mission.revisions[-1].validation.findings if f.code == "missing_rationale"]
+
+
+async def test_baseline_observation_stage_says_why_sensing_comes_first(make_exec):
+    ex = await make_exec("unknown")
+    await ex.create_mission(DEMO)
+    p = ex.mission.revisions[-1].proposal
+    text = " ".join(p.rationale)
+    assert p.scope == "observation_stage"
+    assert "camera_01" in text and "lidar_01" in text
+    assert "gripper_01" in text and "no camera or LiDAR" in text  # why it waits for the stage-1 data
+    assert not [f for f in ex.mission.revisions[-1].validation.findings if f.code == "missing_rationale"]
+
+
+async def test_baseline_sensing_plans_name_the_observer_and_no_gripper(make_exec):
+    ex = await make_exec()
+    await ex.create_mission("Take a picture of the work area.")
+    p = ex.mission.revisions[-1].proposal
+    assert p.rationale and "camera_01" in " ".join(p.rationale) and "gripper_01" not in " ".join(p.rationale)
+
+
+async def test_missing_rationale_shows_as_an_info_finding_for_a_moving_gripper(make_exec):
+    carry = dict(PHOTO_FOR_FIND, scope="full",
+                 mission_goals=[{"kind": "object_at", "object_query": {"label": "red_block"},
+                                 "location_id": "dropoff_zone"}],
+                 tasks=[{"task_id": "t1", "binding_id": "carrier", "preferred_robot_id": "gripper_01",
+                         "depends_on": [], "action": {"kind": "navigate_to", "location_id": "pickup_zone",
+                                                      "route_id": "pickup_corridor"}}])
+    ex, _ = await stub_exec(make_exec, [carry], scenario="known")
+    await ex.create_mission("Bring the red block to the drop-off zone.")
+    rev = ex.mission.revisions[-1]
+    (f,) = [f for f in rev.validation.findings if f.code == "missing_rationale"]
+    assert f.severity == "info"
+    assert ROBOTS["gripper_01"].sensors == ()
