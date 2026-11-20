@@ -94,3 +94,13 @@ LLM)".
 - **P10 HIVE_ROS_SETUP through WSLENV:** a Windows path is converted to `/mnt/<drive>/...` so the launcher can run the car backend on the mock ROS.
 - **P10 open on Mission:** sending missions is the main job, so the app (and a reload) opens on Mission, now the first tab; the view is still not in the URL.
 - **P10 left as is:** Gemini's rejection of `seed` and the header pill showing the active revision while a later one awaits approval.
+
+## Open-vocabulary objects and a random sim world (WS1)
+
+- **Labels are open:** an object label is any lowercase snake_case string (`^[a-z][a-z0-9_]{0,31}$`); the nine synthetic catalog profiles are the only objects with a trusted mass, so anything else can be found but not carried (`unknown_object_profile`). An enum of three labels was turned down because the planner could not even name what a camera saw.
+- **One canonicalization point:** `ObjectQuery`'s before-validator in `contracts.py` calls `catalog.canonical_label` (lowercase, spaces/hyphens to `_`, alias lookup, e.g. `red box` to `red_block`). Labels robots report are taken as they come, so the robot side stays the source of truth.
+- **Profile check before location:** the validator rejects a pick of an unprofiled label even while the object is still unlocated, so a plan cannot spend a search on something it could never carry.
+- **Random world is seeded:** `FakeWorld(world="random", seed=N)` is reproducible; a reset without a seed draws one and records it in state and export (`sim: {world, seed}`) so any run can be replayed. The fixed world ignores the seed.
+- **Defaults:** the Executive and the e2e harnesses default to `fixed` (`HIVE_SIM_WORLD` unset; b_e2e and smoke_eval construct the Executive without it), so evidence stays stable; `npm run hive` sets `HIVE_SIM_WORLD=random` unless the caller set it, because a person trying the app should meet a world the planner has not seen. The drawer defaults to Random and offers Fixed demo.
+- **Old fleet, new Executive:** a fleet without world support answers reset without `world`; the Executive records `fixed` and logs that the fleet ignored the request, rather than failing the reset.
+- **Truth stays debug-only:** `/api/exec/debug/truth` and the drawer's "Reveal world truth" show the simulator's hidden state, labeled simulation only; planning and the normal map never read it.
