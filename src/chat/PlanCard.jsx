@@ -502,7 +502,8 @@ export default function PlanCard({ rev, state, mission, latest, readOnly = false
       setDraft(emptyDraft());
     } else setEditError(res.error);
   };
-  const stop = (taskId) => act(`/tasks/${taskId}/cancel`, {}, `Stop sent to ${taskLabel(taskId)}.`);
+  // task ids repeat across revisions: the stop names this card's revision
+  const stop = (taskId) => act(`/tasks/${taskId}/cancel`, { revision: rev.revision }, `Stop sent to ${taskLabel(taskId)}.`);
   const replan = () => act("/mission/replan", {}, "Re-plan requested.");
 
   return (

@@ -277,6 +277,8 @@ describe("stop current", () => {
     await waitFor(() => expect(row("t1")).toBeTruthy());
     fireEvent.click(within(row("t1")).getByRole("button", { name: "Stop current" }));
     await waitFor(() => expect(posts("/tasks/t1/cancel")).toHaveLength(1));
+    // task ids repeat across revisions: the stop names the card's revision
+    expect(posts("/tasks/t1/cancel")[0].body).toEqual({ revision: running.mission.active_revision });
     expect(posts("/tasks/t2/cancel")).toHaveLength(0);
     await waitFor(() => expect(within(row("t1")).getByText("canceling")).toBeTruthy());
   });
@@ -775,6 +777,21 @@ describe("operator messages", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send now" }));
     expect(await screen.findByText("Mission is completed; start a new mission instead.")).toBeTruthy();
     expect(box().value).toBe("hello");
+  });
+
+  it("shows a canceled message in the thread with its note", async () => {
+    const next = clone(complete);
+    const note = "Mission ended before your message was applied; send it again as a new mission.";
+    next.mission.operator_messages = [
+      message("msg-1", { status: "canceled", text: "also check the corridor", created_at: next.mission.created_at + 1, note }),
+    ];
+    server.state = next;
+    render(<Harness />);
+    await waitFor(() => expect(document.querySelector('[data-message="msg-1"]')).toBeTruthy());
+    const bubble = document.querySelector('[data-message="msg-1"]');
+    expect(bubble.textContent).toContain("also check the corridor");
+    expect(bubble.textContent).toContain("canceled");
+    expect(bubble.textContent).toContain(note);
   });
 
   it("says why a live re-plan was dropped when its stage ended first", async () => {

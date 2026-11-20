@@ -475,7 +475,9 @@ describe("operator messages", () => {
     expect(before.get(2).map((x) => x.id)).toEqual(["msg-1"]);
     expect(before.get(3).map((x) => x.id)).toEqual(["msg-2"]);
     expect(before.has(1)).toBe(false);
-    expect(tail.map((x) => x.id)).toEqual(["msg-6"]);
+    expect(tail.map((x) => x.id)).toEqual(["msg-4", "msg-6"]); // a canceled one shows with its note
+    const dropped = threadMessages({ ...m, operator_messages: [msg("msg-7", { status: "canceled", delivered_to_revision: 3 })] });
+    expect(dropped.before.get(3).map((x) => x.id)).toEqual(["msg-7"]);
   });
 
   it("names the source and trigger of a feedback revision and spots a live one", () => {

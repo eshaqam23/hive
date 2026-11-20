@@ -576,7 +576,7 @@ export function messageTag(msg) {
   return msg.status;
 }
 
-/* Held and delivered messages for the thread: {before: Map(revision -> messages), tail}. A message sits
+/* Held, delivered and canceled messages for the thread: {before: Map(revision -> messages), tail}. A message sits
    before the revision it produced, else before the first revision made after it was delivered, else at
    the end. A clarification answer is already shown with its question; queued ones are chips. */
 export function threadMessages(mission) {
@@ -584,7 +584,8 @@ export function threadMessages(mission) {
   const before = new Map();
   const tail = [];
   const shown = (mission?.operator_messages || []).filter(
-    (x) => (x.status === "held" || x.status === "delivered") && x.delivered_as !== "answer",
+    // canceled ones too, so their note (why they were never applied) stays visible
+    (x) => (x.status === "held" || x.status === "delivered" || x.status === "canceled") && x.delivered_as !== "answer",
   );
   for (const msg of [...shown].sort(byCreated)) {
     const at = msg.delivered_at ?? msg.created_at ?? 0;
