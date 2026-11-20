@@ -455,7 +455,8 @@ describe("operator messages", () => {
     expect(queuedMessages(null)).toEqual([]);
     expect(messageTag(msg("a", { status: "held" }))).toBe("held");
     expect(messageTag(msg("a", { delivered_to_revision: 3 }))).toBe("delivered to revision 3");
-    expect(messageTag(msg("a"))).toBe("delivered");
+    expect(messageTag(msg("a"))).toBe("delivered - awaiting approval");
+    expect(messageTag(msg("a", { note: "The planner answered." }))).toBe("delivered");
     expect(messageTag(msg("a", { status: "canceled" }))).toBe("canceled");
   });
 

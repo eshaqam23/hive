@@ -234,7 +234,7 @@ export function Thread({ state, readOnly = false, busy = false, act, pending = n
       {status === "canceling" && <ReasonCard reason="Stopping the robots' current tasks; waiting for them to confirm." title="Canceling" />}
       {(status === "planner_error" || status === "blocked" || status === "rejected") && (
         <ReasonCard reason={mission.outcome?.reason} title={status === "planner_error" ? "Planner error" : status === "blocked" ? "Why the mission is blocked" : "Plan rejected"}>
-          {status === "planner_error" && !readOnly && (
+          {status === "planner_error" && !readOnly && mission.outcome?.retryable !== false && (
             <button className="btn btn-secondary px-4 py-1.5 text-[14px]" disabled={busy} onClick={() => act("/mission/replan", {}, "Asked the planner again.")} type="button">
               Try again
             </button>

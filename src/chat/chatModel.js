@@ -571,8 +571,11 @@ export function queuedMessages(mission) {
 }
 
 /* The small tag under a message bubble. */
+/* The message invariant (executive): applied to the first approved revision whose planning read it; before any
+   approval it is delivered and waiting; a planner reply without a plan leaves a note naming the reply. */
 export function messageTag(msg) {
   if (msg.status === "delivered" && msg.delivered_to_revision != null) return `delivered to revision ${msg.delivered_to_revision}`;
+  if (msg.status === "delivered" && !msg.note) return "delivered - awaiting approval";
   return msg.status;
 }
 

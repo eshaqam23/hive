@@ -182,7 +182,8 @@ function RowActions({ rt, task, status, mission, readOnly, busy, onStop, onRepla
   }
   if (status.key === "failed" || status.key === "uncertain" || status.key === "rejected") {
     if (["completed", "blocked", "canceled", "rejected", "answered"].includes(mission.status)) return null;
-    const can = ["awaiting_approval", "planner_error"].includes(mission.status);
+    // A planner error marked not retryable (context over the budget) would repeat the same failure.
+    const can = mission.status === "awaiting_approval" || (mission.status === "planner_error" && mission.outcome?.retryable !== false);
     const why = can ? undefined : `Re-planning is only available while awaiting approval or after a planner error (now ${mission.status}).`;
     return (
       <span className="inline-flex flex-col items-end gap-0.5">

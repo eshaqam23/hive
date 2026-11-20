@@ -440,6 +440,25 @@ describe("composer", () => {
 });
 
 describe("mission outcomes", () => {
+  it("offers Try again after a planner error, but not after one marked not retryable", async () => {
+    const failed = clone(complete);
+    failed.mission = { ...failed.mission, status: "planner_error", revisions: [], outcome: { status: "planner_error", reason: "Planner timed out." } };
+    server.state = failed;
+    const { unmount } = render(<Harness />);
+    const card = await screen.findByText("Planner timed out.");
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+    unmount();
+    cleanup();
+    const tooLong = clone(failed);
+    const reason = "This request is too long for the planner. Start a new mission with a shorter command or fewer messages.";
+    tooLong.mission.outcome = { status: "planner_error", reason, retryable: false };
+    server.state = tooLong;
+    render(<Harness />);
+    expect(await screen.findByText(reason)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(card).toBeTruthy();
+  });
+
   it("answers a clarification question", async () => {
     server.state = clone(clarification);
     server.post["/mission/clarify"] = () => reply(200, awaiting);
