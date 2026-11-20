@@ -66,12 +66,28 @@ export function Legend() {
 
 const FIELD_LABEL = { location_id: "location", area_id: "area", route_id: "route", object_query: "object", object_id: "object id" };
 
+// Object labels are open vocabulary, so the object picker offers, in this order and once each:
+// the task's own label and the draft's (the order stays put while editing), labels this
+// revision's tasks and goals name, the catalog's profiles, then labels of objects the robots
+// have observed. Labels without a profile can be found, not carried.
+const queryLabel = (x) => x?.object_query?.label;
+function revisionLabels(rev, state) {
+  const p = rev?.proposal || {};
+  const goals = [...(p.mission_goals || []), ...(p.stage_goals || []), ...(state?.mission?.canonical_goals || [])];
+  return [...(rev?.tasks || []).map((t) => queryLabel(t.action)), ...goals.map(queryLabel)];
+}
+function objectOptions(current, rev, state) {
+  const profiles = state?.catalog?.object_profiles || {};
+  const observed = (state?.world?.objects || []).map((o) => o?.label);
+  const labels = [...current, ...revisionLabels(rev, state), ...Object.keys(profiles), ...observed].filter((l) => typeof l === "string" && l !== "");
+  return [...new Set(labels)].map((k) => ({ value: k, label: `${k.replaceAll("_", " ")}${k in profiles ? "" : " (no profile - cannot carry)"}` }));
+}
+
 function fieldOptions(field, catalog) {
   const locs = catalog?.locations || [];
   if (field === "location_id") return locs.map((l) => ({ value: l.location_id, label: l.label }));
   if (field === "area_id") return locs.filter((l) => l.kind === "area" || l.kind === "zone").map((l) => ({ value: l.location_id, label: l.label }));
   if (field === "route_id") return [{ value: "", label: "(none)" }, ...(catalog?.routes || []).map((r) => ({ value: r.route_id, label: r.route_id.replaceAll("_", " ") }))];
-  if (field === "object_query") return Object.keys(catalog?.object_profiles || {}).map((k) => ({ value: k, label: k.replaceAll("_", " ") }));
   return null;
 }
 
@@ -198,7 +214,7 @@ function PlanRow({ task, rev, state, mission, editing, draft, setDraft, readOnly
                 <LockGlyph /> {task.action.kind}
               </span>
               {editableFields(task.action).map((field) => {
-                const options = fieldOptions(field, state.catalog);
+                const options = field === "object_query" ? objectOptions([fieldText(field, task.action[field]), fieldText(field, paramOf(field))], rev, state) : fieldOptions(field, state.catalog);
                 const id = `edit-${rev.revision}-${task.task_id}-${field}`;
                 return (
                   <label className="flex items-center gap-2 text-[13px] text-muted" htmlFor={id} key={field}>

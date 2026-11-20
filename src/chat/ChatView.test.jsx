@@ -180,6 +180,33 @@ describe("edit plan", () => {
     expect(posts("/revisions/1/edit")[0].body.edits).toEqual([{ op: "set_param", task_id: "t1", field: "area_id", value: "dropoff_zone" }]);
     expect(screen.getByRole("button", { name: "Submit 1 edit" })).toBeTruthy();
   });
+
+  it("keeps an open-vocabulary object selected and marks labels without a profile", async () => {
+    const st = clone(awaiting);
+    st.mission.revisions[0].tasks[0].action.object_query = { label: "mystery_crate" };
+    st.mission.revisions[0].proposal.mission_goals = [{ kind: "object_located", object_query: { label: "plush_toy" } }];
+    st.world.objects = [{ object_id: "coffee_mug_1", label: "coffee_mug", location_id: "work_area" }];
+    server.state = st;
+    server.post["/revisions/1/edit"] = () => reply(200, editInvalid);
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit plan" }));
+    const select = within(row("t1")).getByLabelText("object for T1");
+    expect(select.value).toBe("mystery_crate");
+    const options = [...select.options].map((o) => [o.value, o.textContent]);
+    expect(options[0]).toEqual(["mystery_crate", "mystery crate (no profile - cannot carry)"]);
+    expect(options.map((o) => o[0])).toEqual(["mystery_crate", "plush_toy", "red_block", "blue_block", "green_block", "coffee_mug"]);
+    expect(options.find((o) => o[0] === "red_block")[1]).toBe("red block");
+    expect(options.find((o) => o[0] === "coffee_mug")[1]).toBe("coffee mug (no profile - cannot carry)");
+
+    fireEvent.change(select, { target: { value: "red_block" } });
+    expect(select.value).toBe("red_block");
+    expect(select.options[0].value).toBe("mystery_crate"); // order stays put while editing
+    fireEvent.click(screen.getByRole("button", { name: "Submit 1 edit" }));
+    await waitFor(() => expect(posts("/revisions/1/edit")).toHaveLength(1));
+    expect(posts("/revisions/1/edit")[0].body).toEqual({
+      edits: [{ op: "set_param", task_id: "t1", field: "object_query", value: { label: "red_block" } }],
+    });
+  });
 });
 
 describe("recovery", () => {
