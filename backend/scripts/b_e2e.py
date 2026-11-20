@@ -28,7 +28,7 @@ from hive_exec.planner.llm import LLMPlanner  # noqa: E402
 
 DEMO = ("Find the red block in the work area, check the pickup corridor, "
         "and bring the block to the drop-off area.")
-DONE = {"completed", "blocked", "rejected", "canceled", "planner_error"}
+DONE = {"completed", "blocked", "rejected", "canceled", "planner_error", "answered"}
 
 
 async def wait(ex, statuses, timeout=90):
