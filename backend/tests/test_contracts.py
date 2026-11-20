@@ -274,10 +274,67 @@ def test_random_world_stays_in_bounds_and_varies():
             assert 35.0 <= r["battery_pct"] <= 100.0
             if rid != "gripper_01":
                 assert r["location_id"] == fake_world.START_LOCATIONS[rid]
-    assert counts == {0, 1, 2, 3, 4, 5}
+    assert counts == {1, 2, 3, 4, 5, 6}
     assert unknown_seen > 40 and dupes > 20 and absent_red > 40 and work_area > 100
     assert 60 < blocked < 140  # ~25 %
     assert gripper_starts == {"dropoff_zone", "pickup_zone"}
+
+
+def test_random_world_distribution_over_2000_seeds():
+    """Most operators try "find the red box", so a red block is common but not guaranteed."""
+    pool = set(fake_world.PROFILE_MASS_KG) | set(fake_world.UNKNOWN_MASS_KG)
+    n, red, reds2, unknown, blocked, seen = 2000, 0, 0, 0, 0, set()
+    for seed in range(n):
+        w = fake_world.FakeWorld(seed=seed, world="random")
+        labels = [o["label"] for o in w.objects.values()]
+        assert 1 <= len(labels) <= 6
+        seen |= set(labels)
+        red += "red_block" in labels
+        reds2 += labels.count("red_block") >= 2
+        unknown += any(lab in fake_world.UNKNOWN_MASS_KG for lab in labels)
+        blocked += "pickup_corridor" in w.obstacles
+    assert 0.45 <= red / n <= 0.60
+    assert 0.05 <= reds2 / n <= 0.12
+    assert unknown / n >= 0.30
+    assert seen == pool
+    assert 0.21 <= blocked / n <= 0.29
+
+
+# Baseline (7db6669) fault effects on the fixed world, written out by hand so a change to
+# FakeWorld cannot also change what the test expects.
+_BASE_RED_1 = {"label": "red_block", "location_id": "pickup_zone", "held_by": None, "mass_kg": 0.10}
+
+
+def _baseline_fixed(faults):
+    objects = {"red_block_1": dict(_BASE_RED_1)}
+    obstacles, robots = set(), {
+        "camera_01": {"location_id": "camera_post", "battery_pct": 80.0, "carried": None, "health": "ok", "available": True},
+        "lidar_01": {"location_id": "lidar_post", "battery_pct": 80.0, "carried": None, "health": "ok", "available": True},
+        "gripper_01": {"location_id": "dropoff_zone", "battery_pct": 80.0, "carried": None, "health": "ok", "available": True},
+    }
+    for f in faults:
+        if f == "route_blocked":
+            obstacles.add("pickup_corridor")
+        elif f == "block_missing":
+            objects = {k: v for k, v in objects.items() if v["label"] != "red_block" or v["held_by"]}
+        elif f == "two_red_blocks":
+            objects["red_block_2"] = dict(_BASE_RED_1)
+        elif f == "gripper_unavailable":
+            robots["gripper_01"]["available"] = False
+        elif f == "low_battery_gripper":
+            robots["gripper_01"]["battery_pct"] = 24.0
+    return {"objects": objects, "obstacles": sorted(obstacles), "robots": robots, "faults": sorted(set(faults))}
+
+
+def test_fixed_world_faults_match_baseline_for_every_pair():
+    names = sorted(fake_world.KNOWN_FAULTS)
+    combos = [()] + [(a,) for a in names] + [(a, b) for a in names for b in names]
+    for combo in combos:
+        snap = fake_world.FakeWorld(list(combo)).snapshot()
+        got = {k: snap[k] for k in ("objects", "obstacles", "robots", "faults")}
+        assert got == _baseline_fixed(combo), combo
+    assert fake_world.FakeWorld(["block_missing", "two_red_blocks"]).objects == {"red_block_2": _BASE_RED_1}
+    assert fake_world.FakeWorld(["two_red_blocks", "block_missing"]).objects == {}
 
 
 def test_random_world_skills_work_on_drawn_objects():

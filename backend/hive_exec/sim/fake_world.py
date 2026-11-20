@@ -48,7 +48,9 @@ PROFILE_MASS_KG = {"red_block": 0.10, "blue_block": 0.10, "green_block": 0.10, "
                    "traffic_cone": 0.20, "rc_car": 1.20, "cardboard_box": 0.40, "water_bottle": 0.50}
 UNKNOWN_MASS_KG = {"mystery_crate": 0.30, "plush_toy": 0.08, "coffee_mug": 0.30}
 WORLD_KINDS = ("fixed", "random")
-RANDOM_MAX_OBJECTS = 5
+RANDOM_OBJECTS = (1, 6)  # never empty
+RANDOM_RED_P = 0.52  # operators mostly try "find the red box": a red block is common, not certain
+RANDOM_TWO_RED_P = 0.17  # of worlds with a red block, how many have two (ambiguous target)
 RANDOM_OBJECT_LOCATIONS = ("pickup_zone", "work_area")  # camera-observable; gripper reaches only pickup_zone
 RANDOM_GRIPPER_STARTS = ("dropoff_zone", "pickup_zone")
 RANDOM_BLOCKED_P = 0.25
@@ -108,11 +110,18 @@ class FakeWorld:
 
     def _randomize(self, rng: random.Random) -> None:
         """Every random choice goes through ``rng`` (seeded), so a seed replays the world."""
-        pool = sorted(PROFILE_MASS_KG) + sorted(UNKNOWN_MASS_KG)
-        labels: list[str] = []
-        for _ in range(rng.randint(0, RANDOM_MAX_OBJECTS)):
-            dup = labels and rng.random() < RANDOM_DUPLICATE_P
-            labels.append(rng.choice(labels) if dup else rng.choice(pool))
+        # red_block is drawn on its own (RANDOM_RED_P / RANDOM_TWO_RED_P); the other slots come
+        # from the rest of the pool, profiled and profile-less alike, with some duplicates.
+        pool = sorted(set(PROFILE_MASS_KG) - {"red_block"}) + sorted(UNKNOWN_MASS_KG)
+        n = rng.randint(*RANDOM_OBJECTS)
+        reds = 0 if rng.random() >= RANDOM_RED_P else (2 if rng.random() < RANDOM_TWO_RED_P else 1)
+        labels: list[str] = ["red_block"] * min(reds, n)
+        others: list[str] = []
+        while len(labels) + len(others) < n:
+            dup = others and rng.random() < RANDOM_DUPLICATE_P
+            others.append(rng.choice(others) if dup else rng.choice(pool))
+        labels += others
+        rng.shuffle(labels)
         objects: dict[str, dict[str, Any]] = {}
         for label in labels:
             oid = _next_id(objects, label)
@@ -133,8 +142,12 @@ class FakeWorld:
             self.obstacles.add("pickup_corridor")
         elif fault == "block_missing":
             self.objects = {k: v for k, v in self.objects.items() if v["label"] != "red_block" or v["held_by"]}
+        elif fault == "two_red_blocks" and self.kind == "fixed":
+            # exactly as before random worlds existed: red_block_2 joins (or replaces) at pickup_zone
+            self.objects["red_block_2"] = {"label": "red_block", "location_id": "pickup_zone", "held_by": None,
+                                           "mass_kg": 0.10}
         elif fault == "two_red_blocks":
-            # ensure at least two free red blocks (the fixed world gains red_block_2, as before)
+            # a random world tops up to at least two free red blocks
             while sum(o["label"] == "red_block" and o["held_by"] is None for o in self.objects.values()) < 2:
                 self.objects[_next_id(self.objects, "red_block")] = {
                     "label": "red_block", "location_id": "pickup_zone", "held_by": None, "mass_kg": 0.10}
