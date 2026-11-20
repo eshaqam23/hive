@@ -110,10 +110,10 @@ live-data's deps (cv2) but no pytest-asyncio, so it skips the 24 async exec test
 hive-exec venv has FastAPI + pytest-asyncio but no cv2, so test_adapters.py fails to collect.
 System pytest 7.4 warns "Unknown config option: asyncio_mode"; that is expected.
 - live-data (system python3, expect 152):
-  `python3 -m pytest backend/tests -q --ignore=backend/tests/test_api.py --ignore=backend/tests/test_contracts.py --ignore=backend/tests/test_executive.py --ignore=backend/tests/test_validator.py --ignore-glob='backend/tests/test_llm_*'`
-- exec (hive-exec venv, expect 503 after WS4; 442 after WS3; 411 after the WS2 fixes; 390 after WS2; 308 after WS1; 244 after prompt 9):
-  `~/.venvs/hive-exec/bin/python -m pytest backend/tests/test_api.py backend/tests/test_contracts.py backend/tests/test_executive.py backend/tests/test_validator.py backend/tests/test_llm_*.py -q`
-- Also run `npm test` (Windows Node, expect 341 after WS4, 35 files; 322 after WS3; 315 after the WS2 fixes; 313 after WS2; 305 after WS1; 297 before it) and the mock e2e from the Baseline section.
+  `python3 -m pytest backend/tests -q --ignore=backend/tests/test_api.py --ignore=backend/tests/test_contracts.py --ignore=backend/tests/test_executive.py --ignore=backend/tests/test_validator.py --ignore=backend/tests/test_operator_messages.py --ignore-glob='backend/tests/test_llm_*'`
+- exec (hive-exec venv, expect 553 after WS5; 518 after WS4; 442 after WS3; 411 after the WS2 fixes; 390 after WS2; 308 after WS1; 244 after prompt 9):
+  `~/.venvs/hive-exec/bin/python -m pytest backend/tests/test_api.py backend/tests/test_contracts.py backend/tests/test_executive.py backend/tests/test_validator.py backend/tests/test_operator_messages.py backend/tests/test_llm_*.py -q`
+- Also run `npm test` (Windows Node, expect 355 after WS5, 35 files; 341 after WS4; 322 after WS3; 315 after the WS2 fixes; 313 after WS2; 305 after WS1; 297 before it) and the mock e2e from the Baseline section.
 - Prompt evaluation against a live model (WS2, not part of the suites): `backend/scripts/prompt_eval.py` runs the ten
   labelled commands through the Executive on the fake fleet with the `executive` role of an explicitly named provider
   store, prints a PASS/FAIL table and exits 1 on any failure (2 when the store or provider is unusable). Keys are never
@@ -122,4 +122,25 @@ System pytest 7.4 warns "Unknown config option: asyncio_mode"; that is expected.
   (run r samples with seed 1234 + r - 1; the store file is read by the script, never printed). It prints each
   executive row's effective sampling first and a separate pass rate for unseen paraphrases (`in_prompt: false`).
 - Settings > re-save the executive row if prompt_eval shows temperature 0.7.
-- Ollama: the backend sends num_ctx=<input limit + max_tokens> (`MAX_INPUT_TOKENS` in `context.py` + the row's `max_tokens`, 12288 by default, on every request for a row including probes); qwen3:8b at 12288 needs about 2 GB of extra VRAM for the KV cache. prompt_eval prints the effective num_ctx.
+- Ollama: the backend sends num_ctx=min(`MAX_INPUT_TOKENS` + the row's `max_tokens`, 12288) and num_predict<=3072 (`TOTAL_WINDOW_TOKENS` / `RESERVED_OUTPUT_TOKENS` in `context.py`), the same num_ctx on every request for a row including probes, so a large `max_tokens` can no longer ask the GPU for a bigger KV cache; qwen3:8b at 12288 needs about 2 GB of extra VRAM for the KV cache. prompt_eval prints the effective num_ctx.
+
+## Operator messages (WS5)
+While a mission is active the chat composer talks to it: `POST /api/exec/mission/messages {text 1..500, mode now|queue}`,
+`DELETE /api/exec/mission/messages/{id}` (queued or held only, else 409) and `POST .../{id}/send-now`; 409 with no mission or a
+terminal/canceling one. `mission.operator_messages` (state and export) keeps every message: queued | held | delivered (with
+`delivered_at`, `delivered_to_revision`, `delivered_as` feedback|answer) | canceled (with a `note`).
+- clarification: either mode is the answer. awaiting_approval + now: the pending revision becomes `superseded`
+  (`superseded_reason: operator_message`) and a `feedback` re-plan of the same stage runs. planning + now: `held`; the proposal
+  that lands is dropped unseen and the feedback re-plan runs with all held messages. executing + now: a live re-plan while
+  the running revision continues; approving it marks the old revision's never-dispatched tasks `superseded` (dispatched ones
+  finish, the stage end runs once); rejecting or ignoring it leaves the old revision running; if the stage ends first the
+  pending re-plan is superseded (`stage_ended`) and the feedback still reaches the continuation. queue: delivered at the next
+  planning point (feedback, continuation, recovery) or on send-now. STOP ALL, cancel and every terminal outcome cancel queued
+  and held messages.
+- The planner sees delivered feedback only inside the delimited `OPERATOR FEEDBACK` block (prompt hive.prompt.v3.3), capped
+  at the 4 newest messages and 1200 characters (`(N earlier messages omitted)`), plus `previous_proposal` for a feedback
+  re-plan. The baseline applies feedback by keyword rules only (find-only / camera-only, negated phrases dropped) and cannot
+  change approved goals of a later stage; it says so in issues.
+- Reject still ends the mission (the card says so); Edit is unchanged. Tests: `backend/tests/test_operator_messages.py`,
+  `src/chat/ChatView.test.jsx` (operator messages) and `src/chat/chatModel.test.js`.
+
