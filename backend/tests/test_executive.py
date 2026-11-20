@@ -722,3 +722,102 @@ async def test_make_revision_refuses_unvalidated_proposals(make_exec):
     with pytest.raises(ExecError):
         ex._make_revision(ex.mission, PlanProposal.model_validate(ANSWER), record, None, None, "initial", {})
     assert not ex.mission.revisions
+
+
+# ================================================== WS2: baseline intents (find vs fetch vs question)
+
+from hive_exec.planner.baseline import find_label, parse_goals  # noqa: E402
+from hive_exec.world import ObservedWorld, initial_robot_states  # noqa: E402
+
+
+@pytest.mark.parametrize("text,label", [
+    ("find the mystery crate", "mystery_crate"),
+    ("Find the plush toy.", "plush_toy"),
+    ("find me the duck in the feild", "duck"),
+    ("Find a red box in the feild", "red_block"),
+    ("Look for the rubber duck near the drop-off zone", "duck"),
+    ("find the mystery crate near the cone", "mystery_crate"),   # the operator's noun, not a nearby profile
+    ("Find the big red block", "red_block"),                     # profile phrase inside the noun phrase
+    ("bring the red one to the drop-off area", "red_block"),     # bare colour fallback
+    ("Locate the toy car", "rc_car"),
+])
+def test_find_label_takes_the_operators_noun(text, label):
+    assert find_label(text) == label
+
+
+@pytest.mark.parametrize("text", ["get the block", "check on the thing", "Bring the block over here.",
+                                  "find something", "inspect the work area", "take it"])
+def test_find_label_none_for_vague_or_place_nouns(text):
+    assert find_label(text) is None
+
+
+async def baseline_propose(command, **kw):
+    ctx = build_context(phase=kw.pop("phase", "initial"), command=command, robots=initial_robot_states(),
+                        world=ObservedWorld(), **kw)
+    return (await BaselinePlanner().propose(ctx)).proposal
+
+
+@pytest.mark.parametrize("cmd,label", [("find the mystery crate", "mystery_crate"),
+                                       ("Find a red box in the feild", "red_block"),
+                                       ("check for the plush toy", "plush_toy")])
+async def test_baseline_find_only_is_inspect_only(cmd, label):
+    p = await baseline_propose(cmd)
+    assert p.disposition == "plan" and p.scope == "full"
+    assert [(g.kind, g.object_query.label) for g in p.mission_goals] == [("object_located", label)]
+    assert {t.action.kind for t in p.tasks} == {"inspect_area"}
+    assert all(t.preferred_robot_id == "camera_01" for t in p.tasks)
+
+
+@pytest.mark.parametrize("cmd,needle", [("What can the gripper car do?", "pick_object"),
+                                        ("where is the camera car?", "camera_post"),
+                                        ("Which robots do you have?", "lidar_01")])
+async def test_baseline_answers_fleet_questions(cmd, needle):
+    p = await baseline_propose(cmd)
+    assert p.disposition == "answer" and needle in p.answer
+    assert not p.tasks and not p.mission_goals and p.scope is None and len(p.answer) <= 600
+
+
+async def test_baseline_where_is_an_object_is_a_find():
+    p = await baseline_propose("Where is the red block?")
+    assert p.disposition == "plan" and p.mission_goals[0].kind == "object_located"
+
+
+@pytest.mark.parametrize("cmd,options", [
+    ("find the red box and bring it back to base", ["the drop-off zone"]),
+    ("Bring the duck to me", ["the drop-off zone"]),
+    ("get the block", ["the red block", "the blue block", "the green block"]),
+    ("check on the thing", ["the red block", "the duck", "the traffic cone"]),
+    ("Bring the block over here.", ["the red block", "the blue block", "the green block"]),
+])
+async def test_baseline_clarifies_with_options(cmd, options):
+    p = await baseline_propose(cmd)
+    assert p.disposition == "clarify" and p.clarification_options == options
+    assert not p.tasks
+
+
+async def test_baseline_destination_question_lists_named_locations():
+    goals, issues, question = parse_goals("find the red box and bring it back to base")
+    assert not goals and "drop-off zone" in question
+
+
+async def test_baseline_uses_every_clarification_answer():
+    hist = [{"question": "Which object should I move?", "options": [], "answer": "the red block",
+             "phase": "initial"},
+            {"question": "Where should it go?", "options": [], "answer": "the drop-off zone",
+             "phase": "clarification_answer"}]
+    p = await baseline_propose("get it", phase="clarification_answer", clarifications=hist,
+                               clarification={"question": hist[-1]["question"], "answer": hist[-1]["answer"]})
+    assert p.disposition == "plan"
+    assert [(g.kind, g.object_query.label, g.location_id) for g in p.mission_goals] == \
+        [("object_at", "red_block", "dropoff_zone")]
+
+
+async def test_baseline_several_instances_offers_ids(make_exec):
+    ex = await make_exec("unknown", ["two_red_blocks"])
+    await ex.create_mission("Find the red block.")
+    await approve_latest(ex)
+    await wait_for(ex, DONE)
+    ctx = build_context(phase="initial", command="Bring the red block to the drop-off area.", robots=ex.robots,
+                        world=ex.world)
+    p = (await BaselinePlanner().propose(ctx)).proposal
+    assert p.disposition == "clarify" and p.clarification_options == ["red_block_1", "red_block_2"]
