@@ -8,6 +8,7 @@ it has no access to simulator truth.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -21,14 +22,34 @@ RESERVED_OUTPUT_TOKENS = 3_072
 MAX_INPUT_TOKENS = TOTAL_WINDOW_TOKENS - RESERVED_OUTPUT_TOKENS
 # Operator feedback in the prompt (WS5): the most recent messages only; state/export keep every one.
 FEEDBACK_MAX_MESSAGES = 4
-FEEDBACK_MAX_CHARS = 1200  # measured on the rendered (ASCII-escaped JSON) form the prompt shows
+FEEDBACK_MAX_CHARS = 1200  # text_width of the rendered form the prompt shows (ASCII-equivalent characters)
 FEEDBACK_TRUNCATED = " [truncated]"
+# Token estimate: ASCII at ~3.2 chars/token (JSON-heavy English); every non-ASCII code point at NON_ASCII_TOKENS
+# (Qwen's byte-level BPE: CJK and common emoji are 1-2 tokens; 2 is the conservative end of that range).
+CHARS_PER_TOKEN = 3.2
+NON_ASCII_TOKENS = 2
+# Characters str.splitlines breaks on that json.dumps(ensure_ascii=False) leaves raw (it escapes the C0 ones),
+# plus lone surrogates (not encodable as UTF-8). They are written as \uXXXX escapes, so every JSON value stays on
+# its line and the prompt encodes.
+_RAW_UNSAFE = re.compile("[\x85\u2028\u2029\ud800-\udfff]")
+
+
+def safe_dumps(obj: Any, **kw: Any) -> str:
+    """JSON with non-ASCII text kept as itself (an emoji is 1 character, not a 12-character escape pair), except
+    that nothing in it can start a new prompt line."""
+    return _RAW_UNSAFE.sub(lambda c: f"\\u{ord(c.group()):04x}", json.dumps(obj, ensure_ascii=False, **kw))
 
 
 def render_feedback(text: str) -> str:
-    """How one operator message appears in the prompt: one JSON string, ASCII-escaped, so no text can break
-    out of its line. The prompt and the cap both use this, so the cap measures what the model reads."""
-    return json.dumps(text)
+    """How one operator message appears in the prompt: one JSON string on one line (safe_dumps). The prompt and
+    the cap both use this, so the cap measures what the model reads."""
+    return safe_dumps(text)
+
+
+def text_width(text: str) -> float:
+    """Length in ASCII-equivalent characters: a non-ASCII code point counts as NON_ASCII_TOKENS tokens' worth."""
+    wide = len(text) - len(text.encode("ascii", "ignore"))
+    return len(text) + wide * (NON_ASCII_TOKENS * CHARS_PER_TOKEN - 1)
 
 
 class ContextBudgetExceeded(RuntimeError):
@@ -36,8 +57,9 @@ class ContextBudgetExceeded(RuntimeError):
 
 
 def estimate_tokens(text: str) -> int:
-    """Conservative estimate (~3.2 chars/token for JSON-heavy English). Not a tokenizer."""
-    return int(len(text) / 3.2) + 1
+    """Conservative estimate: ASCII at ~3.2 chars/token (unchanged), each non-ASCII code point NON_ASCII_TOKENS.
+    Not a tokenizer."""
+    return int(text_width(text) / CHARS_PER_TOKEN) + 1
 
 
 @dataclass
@@ -70,7 +92,7 @@ class PlanningContext:
         for key in ("previous_preview", "previous_proposal"):
             if data.get(key) is None:
                 data.pop(key, None)  # keeps every other phase's prompt as it was
-        return json.dumps(data, separators=(",", ":"), sort_keys=True)
+        return safe_dumps(data, separators=(",", ":"), sort_keys=True)
 
 
 def build_context(
@@ -149,7 +171,7 @@ def _fit_prefix(text: str, budget: int) -> str:
     lo, hi = 0, len(text)
     while lo < hi:  # largest n with len(render(text[:n] + mark)) <= budget
         mid = (lo + hi + 1) // 2
-        if len(render_feedback(text[:mid] + FEEDBACK_TRUNCATED)) <= budget:
+        if text_width(render_feedback(text[:mid] + FEEDBACK_TRUNCATED)) <= budget:
             lo = mid
         else:
             hi = mid - 1
@@ -163,10 +185,10 @@ def cap_feedback(messages: list[str]) -> dict[str, Any]:
     kept: list[str] = []
     used = 0
     for text in reversed(messages):
-        size = len(render_feedback(text))
+        size = text_width(render_feedback(text))
         if not kept and size > FEEDBACK_MAX_CHARS:
             text = _fit_prefix(text, FEEDBACK_MAX_CHARS)
-            size = len(render_feedback(text))
+            size = text_width(render_feedback(text))
         if len(kept) >= FEEDBACK_MAX_MESSAGES or used + size > FEEDBACK_MAX_CHARS:
             break
         kept.append(text)

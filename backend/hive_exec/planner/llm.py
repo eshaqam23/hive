@@ -26,7 +26,7 @@ from ..llm.probe import probe_provider
 from ..llm.providers import ProviderRow
 from ..llm.router import NotConfigured, ProviderHTTPError, ProviderResponseError, Router, TransportFailure
 from .base import Planner, PlannerError, PlannerOutput
-from .prompt import PROMPT_VERSION, system_prompt, user_prompt
+from .prompt import PROMPT_VERSION, fit_user_prompt, system_prompt
 
 
 class LLMParseError(PlannerError):
@@ -123,9 +123,10 @@ class LLMPlanner(Planner):
             raise PlannerError(str(exc)) from None
 
         sys_msg = system_prompt()
-        usr_msg = user_prompt(ctx, repair_feedback, previous_output)
         schema_text = json.dumps(self.schema)
-        tokens = estimate_tokens(sys_msg) + estimate_tokens(usr_msg) + estimate_tokens(schema_text) // 4
+        fixed = estimate_tokens(sys_msg) + estimate_tokens(schema_text) // 4
+        usr_msg = fit_user_prompt(ctx, repair_feedback, previous_output, fixed)
+        tokens = fixed + estimate_tokens(usr_msg)
         if tokens > MAX_INPUT_TOKENS:
             raise ContextBudgetExceeded(
                 f"Estimated {tokens} input tokens exceeds the {MAX_INPUT_TOKENS}-token budget; refusing to truncate."

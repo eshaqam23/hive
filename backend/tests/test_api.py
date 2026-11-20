@@ -251,3 +251,19 @@ def test_http_operator_messages_queue_cancel_send_now_and_export():
         _wait(c, {"canceled"})
         r = c.post("/api/exec/mission/messages", json={"text": "hello", "mode": "queue"})
         assert r.status_code == 409 and "new mission" in r.json()["error"]
+
+
+def test_http_lone_surrogate_is_a_422_and_nothing_is_stored():
+    settings = ExecSettings(sim_time_scale=0.005, default_planner="baseline", qwen=QwenSettings(base_url=""))
+    with TestClient(create_app(settings), raise_server_exceptions=False) as c:
+        c.post("/api/exec/reset", json={"scenario": "unknown"})
+        bad = {"content-type": "application/json"}
+        r = c.post("/api/exec/missions", content=b'{"command": "find \ud83d box", "planner": "baseline"}', headers=bad)
+        assert r.status_code == 422 and "surrogate" in r.text
+        assert c.get("/api/exec/state").json()["mission"] is None
+        c.post("/api/exec/missions", json={"command": DEMO, "planner": "baseline"})
+        r = c.post("/api/exec/mission/messages", content=b'{"text": "hi \ud83d there", "mode": "queue"}', headers=bad)
+        assert r.status_code == 422 and "surrogate" in r.text
+        s = c.get("/api/exec/state")
+        assert s.status_code == 200 and s.json()["mission"]["operator_messages"] == []
+        assert c.get("/api/exec/export").status_code == 200

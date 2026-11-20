@@ -93,6 +93,7 @@ class Attempt:
     effects_applied: bool = False
     submitted_at: float = 0.0
     task_stop_requested: bool = False  # operator stopped this one task (not the mission)
+    stopped_after: Optional[str] = None  # the executive canceled it because this task failed (_on_task_failure)
     command_file: Optional[str] = None  # agent_commands/<robot>/<task>-r<rev>-a<n>.json, when recorded
 
 
@@ -168,6 +169,8 @@ class Executive:
         # A live feedback replan (operator message while executing); at most one at a time.
         self._live: Optional[asyncio.Task] = None
         self._gen = 0  # bumps on reset/cancel/abandoned live replan; stale async results are discarded
+        # The first failure of the stage being settled: it, not a later one, is the recovery failure.
+        self._stage_failed: Optional[TaskRuntime] = None
         # "<mission_id>:<message id>" of delivered feedback that a non-live planning read and answered (F4).
         self._feedback_read: set[str] = set()
 
@@ -250,6 +253,7 @@ class Executive:
             await self.refresh_status(sync_location=True)
             self.mission = None
             self.attempts.clear()
+            self._stage_failed = None
             self.raw_events.clear()
             self.timeline.clear()
             sim = self.sim["world"] + (f" seed={self.sim['seed']}" if self.sim["seed"] is not None else "")
@@ -412,15 +416,16 @@ class Executive:
 
     @staticmethod
     def _dropped(m: Mission, revision: Optional[int]) -> bool:
-        """No revision, or one dropped unapproved because its stage ended first."""
+        """No revision, or one superseded before it was ever approved (replaced by a later message's re-plan, or
+        dropped because its stage ended first). A revision that ran and was then replaced did use its messages."""
         if revision is None:
             return True
         plan = m.revisions[revision - 1] if 0 < revision <= len(m.revisions) else None
-        return plan is not None and plan.status == "superseded" and plan.superseded_reason == "stage_ended"
+        return plan is not None and plan.status == "superseded" and plan.approved_at is None
 
     def _mark_read(self, m: Mission, ids: set[str]) -> None:
         """A non-live planning landed with these delivered messages in its context. One whose live revision
-        was dropped (stage_ended) now belongs to whatever this planning produces (_make_revision tags it)."""
+        was dropped (superseded unapproved) now belongs to whatever this planning produces (_make_revision tags it)."""
         self._feedback_read |= {f"{m.mission_id}:{i}" for i in ids}
         moved = {x["id"] for x in m.operator_messages if x["id"] in ids and x["delivered_to_revision"] is not None
                  and self._dropped(m, x["delivered_to_revision"])}
@@ -1139,6 +1144,13 @@ class Executive:
         if m.status == "canceling":
             self._check_cancel_settled(m)
             return
+        if ev.status == "canceled" and att.stopped_after is not None and rt is not None:
+            # A task the executive stopped because another one failed: recorded, never a failure of its own.
+            m.history.append(f"rev {rt.revision}: {rt.task_id} on {rt.robot_id} canceled "
+                             f"(stopped after {att.stopped_after})")
+            if m.status == "recovering":
+                await self._maybe_recover(m)
+            return
         obsolete = m.active_revision != att.revision or m.status not in ("executing", "recovering")
         if obsolete:
             self.log("reconcile", f"Late result for revision {att.revision} reconciled without advancing the plan.")
@@ -1215,6 +1227,20 @@ class Executive:
     # ===================================================== failure/recovery
     async def _on_task_failure(self, m: Mission, rt: TaskRuntime, status: str, cancel_siblings: bool = True) -> None:
         plan = self._active_plan(m)
+        if m.status == "recovering":
+            # A failure already ended this stage and is the recovery failure; a later one is history only (an
+            # uncertain pick/place still blocks: no automatic retry of it).
+            if status == "uncertain":
+                m.outcome = {"status": "blocked", "reason": f"{rt.task_id} on {rt.robot_id} has an uncertain "
+                             "outcome; no automatic retry of pick/place. Manual reconciliation or reset required."}
+            m.history.append(self._failure_line(plan, rt, status))
+            self.log("failure", f"{rt.task_id} {status} while the stage settles; {self._failed_label(plan)} stays "
+                                "the recovery failure.")
+            if cancel_siblings:  # e.g. after an operator stop of one task the others kept running: settle them now
+                await self._stop_siblings(rt, status)
+            await self._maybe_recover(m)
+            return
+        self._stage_failed = rt
         self._abandon_live(m)  # the stage ended; recovery planning sees any delivered feedback
         for other in m.tasks.values():
             if other.revision == plan.revision and other.state == "pending":
@@ -1228,18 +1254,34 @@ class Executive:
             m.status = "recovering"
         self.log("failure", f"{rt.task_id} {status}; new dispatch stopped, "
                  + ("settling active tasks." if cancel_siblings else "other active tasks keep running."))
+        m.history.append(self._failure_line(plan, rt, status))
+        if cancel_siblings:
+            await self._stop_siblings(rt, status)
+        await self._maybe_recover(m, failed=rt)
+
+    async def _stop_siblings(self, rt: TaskRuntime, status: str) -> None:
+        """Cancel every live attempt (all belong to this stage: a stage ends only once none is live, including
+        tasks a replaced revision left running), marked so their "canceled" is recorded, not taken as a failure.
+        One the operator is already stopping keeps its own meaning (operator_stop)."""
         for a in self.attempts.values():
-            # every live attempt belongs to this stage (a stage ends only once none is live), including tasks a
-            # replaced revision left running
-            if cancel_siblings and a.status not in TERMINAL_STATUSES:
-                await self.gateway.cancel(self.run_id, a.attempt_id)
+            if a.status in TERMINAL_STATUSES or a.stopped_after is not None:
+                continue
+            if not a.task_stop_requested:
+                failed = rt.task_id if a.revision == rt.revision else f"rev {rt.revision} {rt.task_id}"
+                a.stopped_after = f"{failed} {status}"
+            await self.gateway.cancel(self.run_id, a.attempt_id)
+
+    def _failed_label(self, plan: ExecutionPlan) -> str:
+        f = self._stage_failed
+        return f"rev {f.revision} {f.task_id}" if f is not None else f"rev {plan.revision}"
+
+    @staticmethod
+    def _failure_line(plan: ExecutionPlan, rt: TaskRuntime, status: str) -> str:
         code = (rt.error or {}).get("code", "")
         if rt.revision == plan.revision:
-            m.history.append(f"rev {plan.revision}: {rt.task_id} {status} ({code})")
-        else:
-            m.history.append(f"rev {rt.revision} (replaced by rev {plan.revision}): {rt.task_id} on {rt.robot_id} "
-                             f"{status} ({code})")
-        await self._maybe_recover(m, failed=rt)
+            return f"rev {plan.revision}: {rt.task_id} {status} ({code})"
+        return (f"rev {rt.revision} (replaced by rev {plan.revision}): {rt.task_id} on {rt.robot_id} "
+                f"{status} ({code})")
 
     async def _maybe_recover(self, m: Mission, failed: Optional[TaskRuntime] = None) -> None:
         if any(a.status not in TERMINAL_STATUSES for a in self.attempts.values()):
@@ -1255,8 +1297,10 @@ class Executive:
             self._block(m, "Recovery already used for this mission; no further automatic proposals.")
             return
         m.recovery_used = True
-        rt = failed or next((t for t in reversed(list(m.tasks.values())) if t.state in ("failed", "rejected")
-                             or (t.error or {}).get("code") == "operator_stop"), None)
+        rt = failed or self._stage_failed or next(
+            (t for t in reversed(list(m.tasks.values())) if t.state in ("failed", "rejected")
+             or (t.error or {}).get("code") == "operator_stop"), None)
+        self._stage_failed = None
         failure = {"task_id": rt.task_id if rt else None, "robot_id": rt.robot_id if rt else None,
                    "error": rt.error if rt else None,
                    "completed_effects": {r.robot_id: {"location_id": r.location_id, "carrying": r.carried_object}

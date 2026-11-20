@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 from contextlib import asynccontextmanager
 from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .config import ExecSettings
 from .contracts import plan_proposal_json_schema
@@ -36,8 +41,30 @@ def make_gateway(settings: ExecSettings) -> RobotGateway:
     raise ValueError(f"Unknown HIVE_GATEWAY {settings.gateway}")
 
 
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _has_surrogate(value: Any) -> bool:
+    if isinstance(value, str):
+        return _SURROGATE.search(value) is not None
+    if isinstance(value, dict):
+        return any(_has_surrogate(k) or _has_surrogate(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_has_surrogate(v) for v in value)
+    return False
+
+
 class Body(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_lone_surrogates(cls, data: Any) -> Any:
+        """A lone surrogate (e.g. "\\ud83d" alone) is valid JSON but not text: it cannot be stored, shown or
+        sent to a planner, so the request is refused before anything is kept."""
+        if _has_surrogate(data):
+            raise ValueError("text contains a lone surrogate (invalid Unicode); nothing was stored")
+        return data
 
 
 class MissionIn(Body):
@@ -123,6 +150,18 @@ def create_app(settings: Optional[ExecSettings] = None, gateway: Optional[RobotG
     llm_planner = ex.planners.get("llm")
     if isinstance(llm_planner, LLMPlanner):
         llm_api.install(app, llm_planner.router)  # /api/exec/llm: provider rows, roles, test, templates
+
+    prior_invalid = app.exception_handlers.get(RequestValidationError, request_validation_exception_handler)
+
+    @app.exception_handler(RequestValidationError)
+    async def _invalid(request, exc: RequestValidationError):
+        try:  # the handler that was there (llm_api's, or FastAPI's default), unchanged
+            return await prior_invalid(request, exc)
+        except UnicodeEncodeError:
+            # the echoed input holds a lone surrogate, which a UTF-8 response cannot encode (it was a 500): the same
+            # 422, ASCII-escaped
+            body = json.dumps({"detail": jsonable_encoder(exc.errors())}, ensure_ascii=True)
+            return Response(body, status_code=422, media_type="application/json")
 
     @app.exception_handler(ExecError)
     async def _exec_error(_, exc: ExecError):

@@ -1,4 +1,4 @@
-"""Versioned planner prompt (hive.prompt.v3.3: v3.2 plus the operator feedback block and phase).
+"""Versioned planner prompt (hive.prompt.v3.4: v3.3 with untrusted text kept unescaped but line-safe).
 
 The skill catalog and rules come first and are authoritative. Operator and
 observation text are passed as fenced JSON data and cannot change the catalog.
@@ -12,9 +12,9 @@ import json
 from typing import Optional
 
 from ..catalog import LOCATIONS, OBJECT_PROFILES, ROBOTS, ROUTES, SKILLS
-from ..context import PlanningContext, render_feedback
+from ..context import MAX_INPUT_TOKENS, PlanningContext, estimate_tokens, render_feedback
 
-PROMPT_VERSION = "hive.prompt.v3.3"
+PROMPT_VERSION = "hive.prompt.v3.4"
 
 
 def _catalog_text() -> str:
@@ -220,6 +220,26 @@ def user_prompt(ctx: PlanningContext, repair_feedback: Optional[list[str]] = Non
         if previous_output:
             text += "Previous output:\n" + previous_output[:2000] + "\n"
     return text + "Output JSON only."
+
+
+def fit_user_prompt(ctx: PlanningContext, repair_feedback: Optional[list[str]], previous_output: Optional[str],
+                    fixed_tokens: int) -> str:
+    """user_prompt, with a repair pass's previous output cut to what the input budget leaves after the fixed
+    part (system prompt + schema share) and everything else; dropped when nothing is left."""
+    text = user_prompt(ctx, repair_feedback, previous_output)
+    if not previous_output or fixed_tokens + estimate_tokens(text) <= MAX_INPUT_TOKENS:
+        return text
+    bare = user_prompt(ctx, repair_feedback, None)
+    room = MAX_INPUT_TOKENS - fixed_tokens - estimate_tokens(bare) - 8  # 8: header line and rounding
+    prev = previous_output[:2000]
+    lo, hi = 0, len(prev)
+    while lo < hi:  # longest prefix whose estimate fits the room
+        mid = (lo + hi + 1) // 2
+        if estimate_tokens("Previous output:\n" + prev[:mid] + "\n") <= room:
+            lo = mid
+        else:
+            hi = mid - 1
+    return user_prompt(ctx, repair_feedback, prev[:lo]) if lo else bare
 
 
 FEEDBACK_HEADER = ("OPERATOR FEEDBACK (follow it when safe; if it is impossible or unsafe, say so in issues and plan "
