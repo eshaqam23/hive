@@ -416,6 +416,12 @@ def test_answer_max_length_is_600():
     assert PlanProposal.model_validate(dict(ANSWER, answer="x" * 600)).answer == "x" * 600
 
 
+def test_clarification_options_drop_case_insensitive_repeats_keeping_the_first():
+    p = PlanProposal.model_validate(dict(CLARIFY, clarification_options=[
+        "The red block", "the red block", "duck", " Duck", "THE RED BLOCK"]))
+    assert p.clarification_options == ["The red block", "duck"]
+
+
 def test_clarification_options():
     p = PlanProposal.model_validate(dict(CLARIFY, clarification_options=["the drop-off zone", "the pickup zone"]))
     assert p.clarification_options == ["the drop-off zone", "the pickup zone"]

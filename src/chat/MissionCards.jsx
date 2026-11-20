@@ -110,8 +110,8 @@ export function ClarificationCard({ question, options = [], busy, act }) {
       <p className="mt-1 text-[15px] leading-relaxed text-ink">{question}</p>
       {options.length > 0 && (
         <div aria-label="Suggested answers" className="mt-3 flex flex-wrap gap-2" role="group">
-          {options.map((opt) => (
-            <button className="btn btn-secondary px-3 py-1 text-[14px]" disabled={busy} key={opt} onClick={() => reply(opt)} type="button">
+          {options.map((opt, i) => (
+            <button className="btn btn-secondary px-3 py-1 text-[14px]" disabled={busy} key={`${i}:${opt}`} onClick={() => reply(opt)} type="button">
               {opt}
             </button>
           ))}

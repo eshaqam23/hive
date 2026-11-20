@@ -171,6 +171,23 @@ class PlanProposal(Strict):
         default_factory=list, max_length=4)
     answer: Optional[Annotated[str, Field(min_length=1, max_length=600)]] = None
 
+    @field_validator("clarification_options", mode="before")
+    @classmethod
+    def _unique_options(cls, v):
+        """Repeated options (ignoring case and edge spaces) are dropped, the first one kept."""
+        if not isinstance(v, list):
+            return v
+        seen: set = set()
+        out = []
+        for opt in v:
+            if isinstance(opt, str):
+                key = opt.strip().casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+            out.append(opt)
+        return out
+
     @model_validator(mode="after")
     def _disposition_rules(self):
         if self.disposition == "plan":
