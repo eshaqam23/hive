@@ -166,6 +166,9 @@ class PlanProposal(Strict):
     stage_goals: list[Goal] = Field(default_factory=list, max_length=4)
     tasks: list[TaskSpec] = Field(default_factory=list, max_length=MAX_TASKS)
     issues: list[Annotated[str, Field(max_length=200)]] = Field(default_factory=list, max_length=8)
+    # Why these robots, how a robot without sensors reaches its target, key assumptions. Optional so older
+    # outputs stay valid; the validator notes a plan that moves a sensorless robot without one.
+    rationale: list[Annotated[str, Field(max_length=200)]] = Field(default_factory=list, max_length=4)
     clarification_question: Optional[ShortText] = None
     clarification_options: list[Annotated[str, Field(min_length=1, max_length=60)]] = Field(
         default_factory=list, max_length=4)

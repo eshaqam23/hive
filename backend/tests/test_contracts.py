@@ -445,3 +445,58 @@ def test_schema_offers_answer_and_options():
     schema = plan_proposal_json_schema()
     assert "answer" in schema["properties"]["disposition"]["enum"]
     assert "answer" in schema["properties"] and "clarification_options" in schema["properties"]
+
+
+# ================================================== WS3: plan rationale and sensors
+
+def _plan_with(**kw):
+    base = json.loads(json.dumps(APPENDIX_A))
+    base.update(kw)
+    return base
+
+
+def test_rationale_is_optional_and_defaults_to_empty():
+    assert "rationale" not in APPENDIX_A
+    assert PlanProposal.model_validate(APPENDIX_A).rationale == []
+
+
+def test_rationale_accepts_up_to_four_items_of_200_chars():
+    items = ["x" * 200, "b", "c", "d"]
+    assert PlanProposal.model_validate(_plan_with(rationale=items)).rationale == items
+
+
+@pytest.mark.parametrize("rationale", [["a", "b", "c", "d", "e"], ["x" * 201], [1], "one string"])
+def test_rationale_limits_are_enforced(rationale):
+    with pytest.raises(ValidationError):
+        PlanProposal.model_validate(_plan_with(rationale=rationale))
+
+
+def test_rationale_is_an_optional_array_of_strings_in_the_schema():
+    schema = plan_proposal_json_schema()
+    prop = schema["properties"]["rationale"]
+    assert prop["type"] == "array" and prop["maxItems"] == 4
+    assert prop["items"] == {"type": "string", "maxLength": 200}
+    assert "rationale" not in schema["required"]
+
+
+def test_robot_descriptors_state_their_sensors_and_localization():
+    r = catalog.ROBOTS
+    assert r["camera_01"].sensors == ("rgb_camera",) and "camera_post" in r["camera_01"].localization
+    assert "work_area" in r["camera_01"].localization and "pickup_zone" in r["camera_01"].localization
+    assert r["lidar_01"].sensors == ("2d_lidar",) and "lidar_post" in r["lidar_01"].localization
+    assert "pickup_corridor" in r["lidar_01"].localization
+    g = r["gripper_01"]
+    assert g.sensors == ()
+    for phrase in ["no onboard camera or LiDAR", "dead reckoning", "cannot detect obstacles",
+                   "confirm its position itself", "synthetic"]:
+        assert phrase in g.localization, phrase
+    for d in r.values():
+        assert "synthetic" in d.localization
+
+
+def test_sensors_and_localization_reach_as_dict_and_catalog_dict():
+    d = catalog.ROBOTS["gripper_01"].as_dict()
+    assert d["sensors"] == [] and d["localization"] == catalog.ROBOTS["gripper_01"].localization
+    by_id = {x["robot_id"]: x for x in catalog.catalog_dict()["robots"]}
+    assert by_id["camera_01"]["sensors"] == ["rgb_camera"] and by_id["lidar_01"]["sensors"] == ["2d_lidar"]
+    assert by_id["lidar_01"]["localization"]

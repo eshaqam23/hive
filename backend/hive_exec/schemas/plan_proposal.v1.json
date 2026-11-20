@@ -499,6 +499,15 @@
       "title": "Mission Goals",
       "type": "array"
     },
+    "rationale": {
+      "items": {
+        "maxLength": 200,
+        "type": "string"
+      },
+      "maxItems": 4,
+      "title": "Rationale",
+      "type": "array"
+    },
     "schema_version": {
       "const": "hive.plan-proposal.v1",
       "title": "Schema Version",

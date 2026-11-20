@@ -67,6 +67,8 @@ class RobotDescriptor:
     capacity: int = 0
     ros_action: str = ""  # Delivery B adapter routing
     notes: str = ""
+    sensors: tuple[str, ...] = ()  # synthetic: what the robot senses with, empty = nothing onboard
+    localization: str = ""  # synthetic: how the robot knows where it is / how it gets to a target
 
     def as_dict(self) -> dict:
         return {
@@ -82,6 +84,8 @@ class RobotDescriptor:
             "capacity": self.capacity,
             "adapter": {"fake": self.robot_id, "ros_action": self.ros_action},
             "notes": self.notes,
+            "sensors": list(self.sensors),
+            "localization": self.localization,
         }
 
 
@@ -95,6 +99,8 @@ ROBOTS: dict[str, RobotDescriptor] = {
             observable_areas=("work_area", "pickup_zone"),
             ros_action="/camera_01/execute_skill",
             notes="Identifies trusted object profiles; does not measure mass from pixels.",
+            sensors=("rgb_camera",),
+            localization="fixed at camera_post; sees work_area and pickup_zone (synthetic)",
         ),
         RobotDescriptor(
             "lidar_01", "LiDAR RC Car", "lidarRcCar",
@@ -102,6 +108,8 @@ ROBOTS: dict[str, RobotDescriptor] = {
             start_location="lidar_post", reachable_locations=("lidar_post",),
             observable_routes=("pickup_corridor",),
             ros_action="/lidar_01/execute_skill",
+            sensors=("2d_lidar",),
+            localization="fixed at lidar_post; scans pickup_corridor (synthetic)",
         ),
         RobotDescriptor(
             "gripper_01", "Gripper RC Car", "gripperRcCar",
@@ -109,6 +117,9 @@ ROBOTS: dict[str, RobotDescriptor] = {
             start_location="dropoff_zone", reachable_locations=("dropoff_zone", "pickup_zone"),
             payload_limit_kg=0.25, capacity=1,
             ros_action="/gripper_01/execute_skill",
+            sensors=(),
+            localization="no onboard camera or LiDAR; in simulation it drives between named poses by dead "
+                         "reckoning; it cannot detect obstacles or confirm its position itself (synthetic)",
         ),
     ]
 }
