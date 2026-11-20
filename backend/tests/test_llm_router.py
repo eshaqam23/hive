@@ -95,7 +95,7 @@ async def test_ollama_format_body_is_exec_v2s_native_chat():
     body = rec.bodies()[0]
     assert body["format"] == SCHEMA and body["stream"] is False and body["think"] is False
     assert body["messages"] == [{"role": "system", "content": "SYSTEM"}, {"role": "user", "content": "USER"}]
-    assert body["options"] == {"temperature": 0.7, "top_p": 0.8, "seed": 1234, "num_predict": 3072, "top_k": 20}
+    assert body["options"] == {"temperature": 0.2, "top_p": 0.8, "seed": 1234, "num_predict": 3072, "top_k": 20}
     assert "authorization" not in req.headers
     assert result.row.id == "ollama-local" and result.fallback_used is False
 
@@ -116,7 +116,7 @@ async def test_structured_outputs_body_is_exec_v2s_vllm_body():
     assert body["structured_outputs"] == {"json": SCHEMA}
     assert body["chat_template_kwargs"] == {"enable_thinking": False}
     assert (body["temperature"], body["top_p"], body["seed"], body["max_tokens"], body["top_k"]) == (
-        0.7, 0.8, 1234, 3072, 20)
+        0.2, 0.8, 1234, 3072, 20)
     assert "guided_json" not in body and "response_format" not in body
 
 
@@ -311,3 +311,11 @@ def test_unreadable_store_is_not_configured_without_quoting_the_file(tmp_path):
     with pytest.raises(NotConfigured) as excinfo:
         Router().resolve("executive")
     assert KEY not in str(excinfo.value) and "not valid YAML" in str(excinfo.value)
+
+
+def test_planning_sampling_is_low_temperature():
+    from hive_exec.llm.templates import HOSTED_SAMPLING, QWEN_SAMPLING, TEMPLATES
+
+    assert QWEN_SAMPLING["temperature"] == 0.2 and HOSTED_SAMPLING["temperature"] == 0.2
+    assert all(t["sampling"]["temperature"] == 0.2 for t in TEMPLATES)
+    assert Sampling().temperature == 0.2  # rows saved without explicit sampling plan at 0.2 too

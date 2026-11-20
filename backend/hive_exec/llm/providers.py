@@ -128,7 +128,7 @@ def key_hint(key: str) -> str:
 class Sampling(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    temperature: float = Field(0.7, ge=0.0, le=2.0)
+    temperature: float = Field(0.2, ge=0.0, le=2.0)  # WS2: low temperature for strict-JSON planning
     top_p: float = Field(0.8, gt=0.0, le=1.0)
     top_k: Optional[int] = Field(20, ge=1)
     seed: Optional[int] = 1234

@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-#: Sampling for Qwen3 in non-thinking mode (its published recommendation).
-QWEN_SAMPLING = {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "seed": 1234,
+#: Sampling for Qwen3 in non-thinking mode: Qwen's top_p/top_k, but temperature 0.2 (not its
+#: published 0.7) so a planner emitting strict JSON stays close to deterministic (WS2).
+QWEN_SAMPLING = {"temperature": 0.2, "top_p": 0.8, "top_k": 20, "seed": 1234,
                  "max_tokens": 3072, "timeout_s": 60.0, "think": False}
 #: Hosted OpenAI-compatible APIs do not all accept top_k, so it is left out.
 HOSTED_SAMPLING = {**QWEN_SAMPLING, "top_k": None}
