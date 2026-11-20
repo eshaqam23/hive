@@ -33,6 +33,7 @@ from .contracts import (
     Observation,
     PlannerRecord,
     PlanProposal,
+    PreviewDiff,
     TaskEnvelope,
     TaskEvent,
     TaskSpec,
@@ -40,7 +41,8 @@ from .contracts import (
 )
 from .gateway.base import RobotGateway
 from .planner.base import Planner, PlannerError
-from .validator import ValidationResult, validate
+from .planner.preview import compute_preview_diff
+from .validator import ValidationResult, validate, validate_preview
 from .world import ObservedWorld, RobotState, initial_robot_states
 
 SIM_WORLDS = ("fixed", "random")
@@ -107,6 +109,10 @@ class Mission:
     history: list[str] = field(default_factory=list)
     planning_log: list[dict] = field(default_factory=list)
     last_proposal: Optional[dict] = None
+
+
+# Display-only parts of a proposal: approval binds what can run, so these stay out of the hash.
+HASH_EXCLUDED = {"next_stage_preview", "preview_changes"}
 
 
 def _hash(obj: Any) -> str:
@@ -306,10 +312,12 @@ class Executive:
         planner = self.planners[m.planner_kind]
         prev_status = m.status
         m.status = "planning"
+        previous = self._previous_observation(m) if phase == "continuation" else None
         ctx = build_context(phase=phase, command=m.command, robots=self.robots, world=self.world,
                             canonical_goals=m.canonical_goals, stage_history=m.history,
                             failure=failure, clarification=clarification,
-                            clarifications=[c for c in m.clarifications if c.get("answer") is not None])
+                            clarifications=[c for c in m.clarifications if c.get("answer") is not None],
+                            previous_preview=self._preview_for_context(previous))
         self.log("planning", f"Requesting {phase} proposal from {planner.kind}.")
         attempts, first_ok, repaired = 0, None, False
         feedback: Optional[list[str]] = None
@@ -362,7 +370,22 @@ class Executive:
         async with self.lock:
             if gen != self._gen or self.mission is not m:
                 return
-            self._apply_proposal(m, out.proposal, record, vres, alloc, phase, rev_kind)
+            self._apply_proposal(m, out.proposal, record, vres, alloc, phase, rev_kind, previous)
+
+    @staticmethod
+    def _previous_observation(m: Mission) -> Optional[ExecutionPlan]:
+        """The latest finished observation-stage revision: the stage whose preview a continuation answers.
+
+        A later observation stage without a preview hides an older one (that preview is no longer current)."""
+        return next((p for p in reversed(m.revisions)
+                     if p.status == "finished" and p.proposal.scope == "observation_stage"), None)
+
+    @staticmethod
+    def _preview_for_context(previous: Optional[ExecutionPlan]) -> Optional[dict]:
+        preview = previous.proposal.next_stage_preview if previous is not None else None
+        if preview is None:
+            return None
+        return {"from_revision": previous.revision, **preview.model_dump(exclude_none=True)}
 
     def _planner_failed(self, m: Mission, gen: int, message: str, record: Optional[PlannerRecord], attempts: int):
         if gen != self._gen:
@@ -374,7 +397,8 @@ class Executive:
         self.log("planner_error", message)
 
     def _apply_proposal(self, m: Mission, proposal: PlanProposal, record: PlannerRecord,
-                        vres: Optional[ValidationResult], alloc, phase: str, rev_kind: str) -> None:
+                        vres: Optional[ValidationResult], alloc, phase: str, rev_kind: str,
+                        previous: Optional[ExecutionPlan] = None) -> None:
         if proposal.disposition == "clarify":
             self._ask(m, proposal.clarification_question or "", proposal.clarification_options, phase,
                       issues=proposal.issues)
@@ -399,7 +423,7 @@ class Executive:
             return self._block(m, f"Unsupported planner disposition {str(proposal.disposition)[:40]!r}; "
                                   "nothing was planned.")
         try:
-            plan = self._make_revision(m, proposal, record, vres, alloc, rev_kind, {})
+            plan = self._make_revision(m, proposal, record, vres, alloc, rev_kind, {}, preview_from=previous)
         except Exception as exc:  # noqa: BLE001 - never leave the mission "planning"; nothing was dispatched
             return self._planner_failed(m, self._gen, f"Revision could not be built: {type(exc).__name__}: "
                                         f"{str(exc)[:300]}", record, 1)
@@ -411,20 +435,27 @@ class Executive:
         m.status = "awaiting_approval"
 
     def _make_revision(self, m: Mission, proposal: PlanProposal, record: PlannerRecord,
-                       vres: ValidationResult, alloc, kind: str, constraints: dict[str, str]) -> ExecutionPlan:
+                       vres: ValidationResult, alloc, kind: str, constraints: dict[str, str],
+                       preview_from: Optional[ExecutionPlan] = None) -> ExecutionPlan:
         if proposal.disposition != "plan" or vres is None:
             raise ExecError("Only a validated plan proposal can become a revision.", 500)
         if m.canonical_goals is not None:
             proposal = proposal.model_copy(update={"mission_goals": list(m.canonical_goals)})
         evidence = sorted({e for b in self.world.objects.values() for e in b.evidence}
                           | {r.evidence for r in self.world.routes.values()})
+        # The next-stage preview is display only: it is noted (warning/info, never blocking) and never allocated.
+        report = vres.report.model_copy(update={"preview_findings": validate_preview(
+            proposal, self.allocator, self.robots, self.world)})
+        previewed = preview_from.proposal.next_stage_preview if preview_from is not None else None
+        diff: Optional[PreviewDiff] = (compute_preview_diff(preview_from.revision, previewed, vres.tasks)
+                                       if previewed is not None else None)
         plan = ExecutionPlan(
             mission_id=m.mission_id, revision=len(m.revisions) + 1, kind=kind,
-            proposal_hash=_hash(proposal.model_dump()), run_id=self.run_id, proposal=proposal,
+            proposal_hash=_hash(proposal.model_dump(exclude=HASH_EXCLUDED)), run_id=self.run_id, proposal=proposal,
             allocations=dict(alloc.robots), tasks=vres.tasks, operator_constraints=dict(constraints),
-            evidence_ids=evidence, world_version=self.world.version, validation=vres.report,
+            evidence_ids=evidence, world_version=self.world.version, validation=report,
             planner=record, created_at=self.clock(),
-            status="awaiting_approval" if vres.report.ok else "invalid",
+            status="awaiting_approval" if report.ok else "invalid", preview_diff=diff,
         )
         for old in m.revisions:  # only once the new revision exists
             if old.status == "awaiting_approval" or old.status == "invalid":
@@ -529,7 +560,9 @@ class Executive:
             alloc = self.allocator.allocate(proposal, self.robots, constraints)
             vres = validate(proposal, alloc, self.robots, self.world, m.canonical_goals, constraints)
             record = base.planner.model_copy(update={"label": base.planner.label + " + operator edit"})
-            plan = self._make_revision(m, proposal, record, vres, alloc, "edit", constraints)
+            # An edit of a continuation is still compared with the preview that stage answered.
+            plan = self._make_revision(m, proposal, record, vres, alloc, "edit", constraints,
+                                       preview_from=self._previous_observation(m) if base.preview_diff else None)
             self.log("operator", f"Edited revision {revision} -> {plan.revision}.", edits=edits)
             return plan
 

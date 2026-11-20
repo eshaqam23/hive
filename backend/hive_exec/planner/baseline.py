@@ -12,8 +12,9 @@ from typing import Any, Optional
 
 from ..catalog import LABEL_PATTERN, LOCATIONS, OBJECT_PROFILES, ROBOTS, canonical_label
 from ..context import PlanningContext
-from ..contracts import PlanProposal, PlannerRecord
+from ..contracts import NextStagePreview, PlanProposal, PlannerRecord
 from .base import Planner, PlannerOutput
+from .preview import compute_preview_diff, preview_change_lines
 
 LABELS = {"red": "red_block", "blue": "blue_block", "green": "green_block"}  # bare colour words (fallback)
 # Every profile label and alias as a phrase ("rubber duck" -> duck), longest first for ties.
@@ -201,6 +202,36 @@ def _why_observers(tasks: list[dict]) -> list[str]:
     return out
 
 
+def _carry_chain(oid: Optional[str], label: str, loc: str, pick_loc: str, dest: str) -> list[dict]:
+    """navigate -> pick -> navigate -> place for one carrier, as the baseline plans it once the evidence is in.
+
+    ``oid`` None means the object is not located yet: the chain names it by label (a preview)."""
+    ref = {"object_id": oid} if oid else {"object_query": {"label": label}}
+    steps: list[dict] = []
+    if loc != pick_loc:
+        steps.append({"kind": "navigate_to", "location_id": pick_loc, "route_id": "pickup_corridor"})
+    steps.append({"kind": "pick_object", **ref})
+    if pick_loc != dest:
+        steps.append({"kind": "navigate_to", "location_id": dest, "route_id": "pickup_corridor"})
+    steps.append({"kind": "place_object", **ref, "location_id": dest})
+    return [_task(f"t{i + 1}", "carrier", a, [f"t{i}"] if i else [], "gripper_01") for i, a in enumerate(steps)]
+
+
+def _next_stage_preview(target: Optional[dict], label: str, dest: str, carrier_loc: str, route: str) -> dict:
+    """The likely next stage of a staged fetch: the carry itself, waiting on the evidence still missing."""
+    waits = []
+    if target is None:
+        waits.append(f"camera_01 sighting of {label} in work_area")
+    if route != "clear":
+        waits.append("lidar_01 scan: pickup_corridor clear")
+    # An unlocated object is assumed to turn up in the pickup zone (the gripper's only zone besides drop-off).
+    tasks = _carry_chain(target["object_id"] if target else None, label, carrier_loc,
+                         target["location_id"] if target else "pickup_zone", dest)
+    for t in tasks:
+        t["preferred_robot_id"] = None  # who carries is decided when the stage is planned for real
+    return {"summary": f"Carry {label} to {dest} once the evidence is in.", "tasks": tasks, "waits_for": waits}
+
+
 def plan_for_goals(goals: list[dict], ctx: PlanningContext) -> PlanProposal:
     objects = [o for o in ctx.observed["objects"] if o["fresh"] or o["held_by"]]
     routes = ctx.observed["routes"]
@@ -253,7 +284,8 @@ def plan_for_goals(goals: list[dict], ctx: PlanningContext) -> PlanProposal:
                 "gripper_01 has no camera or LiDAR, so it waits; transport is planned once these results arrive."]
             return _p(disposition="plan", scope="observation_stage",
                       summary="Gather missing evidence before transport.", mission_goals=goals, stage_goals=stage,
-                      tasks=tasks, rationale=why)
+                      tasks=tasks, rationale=why,
+                      next_stage_preview=_next_stage_preview(target, label, dest, carrier["location_id"], route))
         oid = target["object_id"]
         tasks, loc, n = [], carrier["location_id"], 0
 
@@ -325,4 +357,11 @@ class BaselinePlanner(Planner):
             if not goals:
                 return PlannerOutput(_p(disposition="reject", summary="The fleet cannot perform this request.",
                                         issues=issues), record)
-        return PlannerOutput(plan_for_goals(goals, ctx), record)
+        proposal = plan_for_goals(goals, ctx)
+        if ctx.phase == "continuation" and ctx.previous_preview and proposal.disposition == "plan":
+            # Say, deterministically, what the new evidence changed against the preview the operator saw.
+            preview = NextStagePreview.model_validate({k: v for k, v in ctx.previous_preview.items()
+                                                       if k != "from_revision"})
+            diff = compute_preview_diff(ctx.previous_preview.get("from_revision", 0), preview, proposal.tasks)
+            proposal = proposal.model_copy(update={"preview_changes": preview_change_lines(diff)})
+        return PlannerOutput(proposal, record)

@@ -43,9 +43,15 @@ class PlanningContext:
     clarification: Optional[dict[str, str]] = None
     # Every answered question of this mission, oldest first: {question, options, answer, phase}.
     clarifications: list[dict[str, Any]] = field(default_factory=list)
+    # Continuation only: the likely next stage the previous observation stage showed the operator
+    # ({from_revision, summary, tasks, waits_for}), for the planner to keep or change given the new evidence.
+    previous_preview: Optional[dict[str, Any]] = None
 
     def to_json(self) -> str:
-        return json.dumps(self.__dict__, separators=(",", ":"), sort_keys=True)
+        data = dict(self.__dict__)
+        if data.get("previous_preview") is None:
+            data.pop("previous_preview", None)  # keeps every other phase's prompt as it was
+        return json.dumps(data, separators=(",", ":"), sort_keys=True)
 
 
 def build_context(
@@ -59,6 +65,7 @@ def build_context(
     failure: Optional[dict[str, Any]] = None,
     clarification: Optional[dict[str, str]] = None,
     clarifications: Optional[list[dict[str, Any]]] = None,
+    previous_preview: Optional[dict[str, Any]] = None,
 ) -> PlanningContext:
     robot_rows = []
     for rid, s in sorted(robots.items()):
@@ -109,4 +116,5 @@ def build_context(
         failure=failure,
         clarification=clarification,
         clarifications=[dict(c) for c in (clarifications or [])],
+        previous_preview=previous_preview,
     )

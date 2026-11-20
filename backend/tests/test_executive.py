@@ -989,20 +989,403 @@ BAD_PLAN = dict(PHOTO_FOR_FIND, tasks=None, issues=[], clarification_question=No
 
 
 async def test_initial_planning_exception_ends_planner_error_and_dispatches_nothing(make_exec):
-    ex = await make_exec("unknown", planners={"stub": RaisingChecksPlanner([BAD_PLAN])})
+    ex = await make_exec("unknown", planners={"stub": RaisingChecksPlanner([BAD_PLAN, PHOTO_FOR_FIND])})
     await ex.create_mission("Find the red block.")
     m = ex.mission
     assert m.status == "planner_error" and m.outcome["status"] == "planner_error"
     assert "TypeError" in m.outcome["reason"] and not m.revisions and not ex.attempts
     assert any(e["kind"] == "planner_error" and "TypeError" in e["message"] for e in ex.timeline)
     assert m.planning_log[-1]["error"] == m.outcome["reason"]
+    await ex.replan()  # a planner_error mission may be re-planned and then reaches approval
+    assert ex.mission.status == "awaiting_approval" and ex.mission.revisions[-1].revision == 1
 
 
 async def test_clarification_answer_planning_exception_ends_planner_error(make_exec):
-    ex = await make_exec("unknown", planners={"stub": RaisingChecksPlanner([ask("Which object?"), BAD_PLAN])})
+    ex = await make_exec("unknown", planners={"stub": RaisingChecksPlanner([ask("Which object?"), BAD_PLAN, PHOTO_FOR_FIND])})
     await ex.create_mission("Find it.")
     assert ex.mission.status == "clarification"
     await ex.answer_clarification("the red block")
     m = ex.mission
     assert m.status == "planner_error" and "TypeError" in m.outcome["reason"]
     assert not m.revisions and not ex.attempts
+    await ex.replan()
+    assert ex.mission.status == "awaiting_approval" and ex.mission.revisions[-1].revision == 1
+
+
+# ================================================== WS4: next-stage preview
+
+from hive_exec.contracts import AllocatedTask, NextStagePreview  # noqa: E402
+from hive_exec.planner.preview import compute_preview_diff, preview_change_lines  # noqa: E402
+
+RED_AT_DROP = [{"kind": "object_at", "object_query": {"label": "red_block"}, "location_id": "dropoff_zone"}]
+Q_RED = {"label": "red_block"}
+
+
+def _spec(tid, binding, action, deps=(), robot=None):
+    return {"task_id": tid, "binding_id": binding, "action": action, "depends_on": list(deps),
+            "preferred_robot_id": robot}
+
+
+def carry_specs(label_ref=None, drop="dropoff_zone", binding="carrier", route="pickup_corridor"):
+    ref = label_ref or {"object_query": Q_RED}
+    return [
+        _spec("t1", binding, {"kind": "navigate_to", "location_id": "pickup_zone", "route_id": route}),
+        _spec("t2", binding, {"kind": "pick_object", **ref}, ["t1"]),
+        _spec("t3", binding, {"kind": "navigate_to", "location_id": drop, "route_id": route}, ["t2"]),
+        _spec("t4", binding, {"kind": "place_object", **ref, "location_id": drop}, ["t3"]),
+    ]
+
+
+def make_preview(tasks=None, waits=("camera_01 sighting of red_block", "lidar_01 scan of pickup_corridor")):
+    return NextStagePreview.model_validate({"summary": "Carry the red block to the drop-off zone.",
+                                            "tasks": tasks if tasks is not None else carry_specs(),
+                                            "waits_for": list(waits)})
+
+
+def allocated(specs, object_id="red_block_1"):
+    """What the validator produces: the same tasks with a robot and resolved object ids."""
+    out = []
+    for s in specs:
+        s = json.loads(json.dumps(s))
+        a = s["action"]
+        if "object_query" in a:
+            a["object_id"], a["object_query"] = object_id, None
+        out.append(AllocatedTask.model_validate({"task_id": s["task_id"], "binding_id": s["binding_id"],
+                                                 "robot_id": "gripper_01", "action": a,
+                                                 "depends_on": s["depends_on"], "skill": a["kind"]}))
+    return out
+
+
+def test_diff_matches_when_the_same_chain_comes_back_with_resolved_object_ids():
+    d = compute_preview_diff(1, make_preview(), allocated(carry_specs()))
+    assert d.matches_preview and d.previous_revision == 1
+    assert [(i.preview_task, i.task) for i in d.kept] == [("t1", "t1"), ("t2", "t2"), ("t3", "t3"), ("t4", "t4")]
+    assert not d.changed and not d.added and not d.removed
+    assert d.kept[1].what == 'pick_object(object_id="red_block_1")'
+
+
+def test_diff_names_a_different_location_route_or_object():
+    d = compute_preview_diff(1, make_preview(), allocated(carry_specs(drop="pickup_zone")))
+    assert not d.matches_preview and [i.task for i in d.changed] == ["t3", "t4"]
+    nav = d.changed[0]
+    assert nav.preview_task == "t3" and "location_id: dropoff_zone -> pickup_zone" in nav.differences
+    assert nav.was == 'navigate_to(location_id="dropoff_zone", route_id="pickup_corridor")'
+    assert nav.what == 'navigate_to(location_id="pickup_zone", route_id="pickup_corridor")'
+    blue = allocated(carry_specs({"object_query": {"label": "blue_block"}}), object_id="blue_block_1")
+    d = compute_preview_diff(1, make_preview(), blue)
+    assert [i.task for i in d.changed] == ["t2", "t4"] and "label: red_block -> blue_block" in d.changed[0].differences
+    d = compute_preview_diff(1, make_preview(), allocated(carry_specs(route=None)))
+    assert any("route_id: pickup_corridor -> None" in x for i in d.changed for x in i.differences)
+
+
+def test_diff_lists_added_and_removed_tasks():
+    d = compute_preview_diff(2, make_preview(), allocated(carry_specs()[:2]))
+    assert [i.preview_task for i in d.removed] == ["t3", "t4"] and not d.added and not d.matches_preview
+    assert d.removed[0].what.startswith("navigate_to(")
+    d = compute_preview_diff(2, make_preview(carry_specs()[:2]), allocated(carry_specs()))
+    assert [i.task for i in d.added] == ["t3", "t4"] and not d.removed and d.previous_revision == 2
+
+
+def test_diff_pairs_a_renamed_binding_as_changed_not_as_added_and_removed():
+    d = compute_preview_diff(1, make_preview(), allocated(carry_specs(binding="mover")))
+    assert not d.added and not d.removed and len(d.changed) == 4 and not d.kept
+    assert "binding_id: carrier -> mover" in d.changed[0].differences
+
+
+def test_diff_is_deterministic_and_ignores_task_ids_and_robot_ids():
+    a = compute_preview_diff(1, make_preview(), allocated(carry_specs()))
+    renamed = allocated(carry_specs())
+    for i, t in enumerate(renamed):
+        t.task_id = f"t{i + 5}"
+        t.robot_id = "camera_01"
+    b = compute_preview_diff(1, make_preview(), renamed)
+    assert a.matches_preview and b.matches_preview
+    assert compute_preview_diff(1, make_preview(), allocated(carry_specs())) == a
+
+
+def test_diff_compares_object_ids_only_when_both_sides_name_one():
+    named = make_preview(carry_specs({"object_id": "red_block_2"}))
+    d = compute_preview_diff(1, named, allocated(carry_specs()))  # actual red_block_1
+    assert not d.matches_preview and "object_id: red_block_2 -> red_block_1" in d.changed[0].differences
+    d = compute_preview_diff(1, make_preview(carry_specs({"object_id": "red_block_1"})), allocated(carry_specs()))
+    assert d.matches_preview
+
+
+def test_preview_change_lines_are_short_and_say_what_moved():
+    assert preview_change_lines(compute_preview_diff(1, make_preview(), allocated(carry_specs()))) == \
+        ["The evidence matches the preview."]
+    lines = preview_change_lines(compute_preview_diff(1, make_preview(), allocated(carry_specs(drop="pickup_zone"))))
+    assert 1 <= len(lines) <= 4 and all(0 < len(x) <= 160 for x in lines)
+    assert "location_id: dropoff_zone -> pickup_zone" in lines[0]
+    many = compute_preview_diff(1, make_preview(), allocated(carry_specs(binding="mover")))
+    assert len(preview_change_lines(many)) == 4
+
+
+STAGE1 = {"schema_version": V1, "disposition": "plan", "scope": "observation_stage",
+          "summary": "Look for the red block and scan the corridor first.", "mission_goals": RED_AT_DROP,
+          "stage_goals": [], "rationale": ["camera_01 and lidar_01 sense; gripper_01 waits."],
+          "tasks": [_spec("t1", "observer", {"kind": "inspect_area", "area_id": "work_area",
+                                              "object_query": Q_RED}, robot="camera_01"),
+                    _spec("t2", "surveyor", {"kind": "scan_route", "route_id": "pickup_corridor"}, robot="lidar_01")],
+          "next_stage_preview": {"summary": "Carry the red block to the drop-off zone.", "tasks": carry_specs(),
+                                 "waits_for": ["camera_01 sighting of red_block", "lidar_01 corridor scan"]}}
+CARRY_FULL = {"schema_version": V1, "disposition": "plan", "scope": "full", "summary": "Carry it.",
+              "mission_goals": RED_AT_DROP, "stage_goals": [], "tasks": carry_specs(),
+              "rationale": ["gripper_01 carries."]}
+
+
+def staged(**kw):
+    return json.loads(json.dumps({**STAGE1, **kw}))
+
+
+async def run_stage1(make_exec, proposals):
+    ex, stub = await stub_exec(make_exec, proposals)
+    await ex.create_mission("Find the red block and bring it to the drop-off zone.")
+    return ex, stub
+
+
+async def finish_stage(ex):
+    await approve_latest(ex)
+    return await wait_for(ex, {"awaiting_approval"} | DONE)
+
+
+async def test_preview_is_stored_but_never_allocated_dispatched_or_approved(make_exec):
+    ex, _ = await run_stage1(make_exec, [staged(), CARRY_FULL])
+    rev = ex.mission.revisions[-1]
+    assert rev.validation.ok and rev.status == "awaiting_approval"
+    assert len(rev.proposal.next_stage_preview.tasks) == 4
+    assert [t.task_id for t in rev.tasks] == ["t1", "t2"] and set(rev.allocations) == {"observer", "surveyor"}
+    await finish_stage(ex)
+    assert {a.robot_id for a in ex.attempts.values()} == {"camera_01", "lidar_01"}  # never the preview's gripper
+    assert {k for k in ex.mission.tasks if k.startswith("1:")} == {"1:t1", "1:t2"}
+
+
+async def test_preview_findings_are_warnings_only_and_never_block_approval(make_exec):
+    bad = staged()
+    bad["next_stage_preview"]["tasks"] = [_spec("t1", "looker", {"kind": "inspect_area", "area_id": "dropoff_zone",
+                                                                  "object_query": Q_RED})]
+    ex, _ = await run_stage1(make_exec, [bad, CARRY_FULL])
+    rev = ex.mission.revisions[-1]
+    assert rev.validation.ok and rev.status == "awaiting_approval"
+    assert not [f for f in rev.validation.findings if "looker" in f.message]
+    notes = rev.validation.preview_findings
+    assert notes and all(f.severity in ("warning", "info") for f in notes)
+    assert any(f.code == "no_eligible_robot" for f in notes)
+    await approve_latest(ex)  # still approvable
+    assert ex.mission.status in ("executing", "awaiting_approval")
+
+
+async def test_preview_and_changes_do_not_change_the_approval_hash(make_exec):
+    plain = {k: v for k, v in staged().items() if k != "next_stage_preview"}
+    ex1, _ = await run_stage1(make_exec, [plain])
+    ex2, _ = await run_stage1(make_exec, [staged(preview_changes=["x"])])
+    # approval binds what can run, not the display-only preview
+    assert ex1.mission.revisions[-1].proposal_hash == ex2.mission.revisions[-1].proposal_hash
+
+
+async def test_continuation_context_carries_the_previous_preview(make_exec):
+    ex, stub = await run_stage1(make_exec, [staged(), CARRY_FULL])
+    assert stub.contexts[0].previous_preview is None and '"previous_preview"' not in stub.contexts[0].to_json()
+    await finish_stage(ex)
+    ctx = stub.contexts[1]
+    assert ctx.phase == "continuation"
+    pv = ctx.previous_preview
+    assert pv["from_revision"] == 1 and pv["summary"] == "Carry the red block to the drop-off zone."
+    assert len(pv["tasks"]) == 4 and pv["tasks"][1]["action"]["object_query"] == Q_RED
+    assert pv["waits_for"] == ["camera_01 sighting of red_block", "lidar_01 corridor scan"]
+    assert '"previous_preview"' in ctx.to_json()
+
+
+async def test_continuation_revision_gets_a_backend_computed_diff(make_exec):
+    ex, _ = await run_stage1(make_exec, [staged(), dict(CARRY_FULL, preview_changes=["Nothing changed at all."])])
+    await finish_stage(ex)
+    rev2 = ex.mission.revisions[-1]
+    assert rev2.revision == 2 and rev2.kind == "continuation" and rev2.validation.ok
+    assert rev2.preview_diff.matches_preview and rev2.preview_diff.previous_revision == 1
+    assert len(rev2.preview_diff.kept) == 4
+    assert rev2.proposal.preview_changes == ["Nothing changed at all."]  # kept as the model's own words
+    assert ex.mission.revisions[0].preview_diff is None
+    assert ex.state()["mission"]["revisions"][1]["preview_diff"]["matches_preview"] is True
+    assert ex.export()["mission"]["revisions"][1]["preview_diff"]["kept"][0]["task"] == "t1"
+    assert ex.state()["mission"]["revisions"][0]["proposal"]["next_stage_preview"]["waits_for"]
+
+
+async def test_model_claim_that_nothing_changed_is_not_trusted_for_the_diff(make_exec):
+    other = dict(CARRY_FULL, tasks=carry_specs(binding="mover"),
+                 preview_changes=["The evidence matches the preview exactly."])
+    ex, _ = await run_stage1(make_exec, [staged(), other])
+    await finish_stage(ex)
+    d = ex.mission.revisions[-1].preview_diff
+    assert not d.matches_preview and len(d.changed) == 4
+
+
+async def test_continuation_that_differs_lists_changed_and_kept_tasks(make_exec):
+    odd = staged()
+    odd["next_stage_preview"]["tasks"] = carry_specs()[:3] + [_spec("t4", "carrier", {
+        "kind": "place_object", "object_query": Q_RED, "location_id": "pickup_zone"}, ["t3"])]
+    ex, _ = await run_stage1(make_exec, [odd, CARRY_FULL])
+    await finish_stage(ex)
+    d = ex.mission.revisions[-1].preview_diff
+    assert not d.matches_preview and [i.task for i in d.kept] == ["t1", "t2", "t3"]
+    assert [(i.preview_task, i.task) for i in d.changed] == [("t4", "t4")]
+    assert "location_id: pickup_zone -> dropoff_zone" in d.changed[0].differences
+
+
+async def test_previous_preview_is_the_latest_finished_observation_stage_not_an_older_one(make_exec):
+    second = staged(summary="Look again.", tasks=[_spec("t1", "observer", {"kind": "capture_image",
+                                                                         "area_id": "work_area"}, robot="camera_01")])
+    second["next_stage_preview"]["summary"] = "Carry it (second guess)."
+    ex, stub = await run_stage1(make_exec, [staged(), second, CARRY_FULL])
+    await finish_stage(ex)
+    rev2 = ex.mission.revisions[-1]
+    assert rev2.proposal.scope == "observation_stage" and rev2.preview_diff is not None
+    await finish_stage(ex)
+    assert stub.contexts[2].previous_preview["from_revision"] == 2
+    assert stub.contexts[2].previous_preview["summary"] == "Carry it (second guess)."
+
+
+async def test_no_previous_preview_means_no_diff_and_no_context_field(make_exec):
+    plain = {k: v for k, v in staged().items() if k != "next_stage_preview"}
+    ex, stub = await run_stage1(make_exec, [plain, CARRY_FULL])
+    await finish_stage(ex)
+    assert stub.contexts[1].previous_preview is None
+    assert ex.mission.revisions[-1].preview_diff is None
+    assert ex.state()["mission"]["revisions"][-1]["preview_diff"] is None
+
+
+async def test_an_observation_stage_without_a_preview_hides_an_older_one(make_exec):
+    bare = staged(summary="Look again.", tasks=[_spec("t1", "observer", {"kind": "capture_image",
+                                                                       "area_id": "work_area"}, robot="camera_01")])
+    bare.pop("next_stage_preview")
+    ex, stub = await run_stage1(make_exec, [staged(), bare, CARRY_FULL])
+    await finish_stage(ex)
+    await finish_stage(ex)
+    assert stub.contexts[2].previous_preview is None and ex.mission.revisions[-1].preview_diff is None
+
+
+async def test_replan_of_a_continuation_still_sees_the_same_preview_and_diffs_against_it(make_exec):
+    ex, stub = await run_stage1(make_exec, [staged(), CARRY_FULL])
+    await finish_stage(ex)
+    await ex.replan()
+    assert stub.contexts[2].previous_preview["from_revision"] == 1
+    assert ex.mission.revisions[-1].revision == 3 and ex.mission.revisions[-1].preview_diff.matches_preview
+
+
+async def test_edit_keeps_the_preview_and_the_diff_follows_the_edited_tasks(make_exec):
+    ex, _ = await run_stage1(make_exec, [staged(), CARRY_FULL])
+    await ex.edit(1, [{"op": "set_param", "task_id": "t1", "field": "area_id", "value": "pickup_zone"}])
+    rev = ex.mission.revisions[-1]
+    assert rev.kind == "edit" and rev.proposal.next_stage_preview is not None and rev.preview_diff is None
+    await finish_stage(ex)
+    cont = ex.mission.revisions[-1]
+    await ex.edit(cont.revision, [{"op": "remove_task", "task_id": "t4"}])
+    edited = ex.mission.revisions[-1]
+    assert edited.kind == "edit" and [i.preview_task for i in edited.preview_diff.removed] == ["t4"]
+
+
+async def test_baseline_fetch_stages_with_a_deterministic_carry_preview(make_exec):
+    ex = await make_exec("unknown")
+    await ex.create_mission(DEMO)
+    rev = ex.mission.revisions[-1]
+    pv = rev.proposal.next_stage_preview
+    assert rev.proposal.scope == "observation_stage" and pv is not None
+    assert [t.action.kind for t in pv.tasks] == ["navigate_to", "pick_object", "navigate_to", "place_object"]
+    assert pv.tasks[1].action.object_query.label == "red_block" and pv.tasks[3].action.location_id == "dropoff_zone"
+    assert all(len(w) <= 160 for w in pv.waits_for) and len(pv.waits_for) == 2
+    assert "camera_01" in pv.waits_for[0] and "lidar_01" in pv.waits_for[1]
+    assert rev.validation.ok and not [f for f in rev.validation.preview_findings if f.severity == "error"]
+    again = await baseline_propose(DEMO)
+    assert again.next_stage_preview == pv  # deterministic
+    assert rev.proposal.preview_changes == []
+
+
+async def test_baseline_full_story_with_preview_matches_and_explains_it(make_exec):
+    ex = await make_exec("unknown")
+    await ex.create_mission(DEMO)
+    await approve_latest(ex)
+    await wait_for(ex, {"awaiting_approval"} | DONE)
+    rev2 = ex.mission.revisions[-1]
+    assert rev2.revision == 2 and rev2.proposal.scope == "full" and rev2.validation.ok
+    assert rev2.preview_diff.matches_preview and len(rev2.preview_diff.kept) == 4
+    assert rev2.proposal.preview_changes == ["The evidence matches the preview."]
+    assert rev2.proposal.next_stage_preview is None
+    await approve_latest(ex)
+    assert await wait_for(ex, DONE) == "completed"
+
+
+async def test_baseline_continuation_reports_what_the_evidence_changed(make_exec):
+    ex = await make_exec("unknown")
+    await ex.create_mission(DEMO)
+    # the gripper car is already at the pickup zone when the evidence arrives: no first drive is needed
+    ex.robots["gripper_01"].location_id = "pickup_zone"
+    await approve_latest(ex)
+    await wait_for(ex, {"awaiting_approval"} | DONE)
+    rev2 = ex.mission.revisions[-1]
+    assert not rev2.preview_diff.matches_preview and [i.preview_task for i in rev2.preview_diff.removed] == ["t1"]
+    assert rev2.proposal.preview_changes and all(len(x) <= 160 for x in rev2.proposal.preview_changes)
+
+
+async def test_baseline_preview_for_a_located_object_names_its_id_and_waits_only_for_the_corridor():
+    world = ObservedWorld()
+    world.accept(Observation(kind="object_seen", entity_id="red_block_1", label="red_block",
+                             area_id="work_area", location_id="pickup_zone"), "camera_01")
+    goal = [{"kind": "object_at", "object_query": Q_RED, "location_id": "dropoff_zone"}]
+    from hive_exec.planner.baseline import plan_for_goals
+
+    ctx = build_context(phase="initial", command=DEMO, robots=initial_robot_states(), world=world)
+    p = plan_for_goals(goal, ctx)
+    assert p.scope == "observation_stage" and [t.action.kind for t in p.tasks] == ["scan_route"]
+    pv = p.next_stage_preview
+    assert pv.waits_for == ["lidar_01 scan: pickup_corridor clear"]
+    assert pv.tasks[1].action.object_id == "red_block_1" and pv.tasks[1].action.object_query is None
+
+
+async def test_baseline_known_world_has_no_preview(make_exec):
+    ex = await make_exec("known")
+    await ex.create_mission(DEMO)
+    assert ex.mission.revisions[-1].proposal.scope == "full"
+    assert ex.mission.revisions[-1].proposal.next_stage_preview is None
+
+
+# ----- WS3 carry-over: the planner_error wrap on the continuation and recovery phases, and replan afterwards
+
+class FlakyChecksPlanner(BaselinePlanner):
+    """The baseline, except that the numbered calls (1-based) return a proposal built without validation."""
+
+    kind = "baseline"
+
+    def __init__(self, bad_calls):
+        self.bad_calls = set(bad_calls)
+        self.calls = 0
+
+    async def propose(self, ctx, repair_feedback=None, previous_output=None):
+        self.calls += 1
+        if self.calls in self.bad_calls:
+            return PlannerOutput(PlanProposal.model_construct(**BAD_PLAN),
+                                 PlannerRecord(kind="baseline", label="stub", latency_ms=0.0))
+        return await super().propose(ctx, repair_feedback, previous_output)
+
+
+async def test_continuation_planning_exception_ends_planner_error_then_replan_recovers(make_exec):
+    ex = await make_exec("unknown", planners={"flaky": FlakyChecksPlanner({2})})
+    await ex.create_mission(DEMO)
+    await approve_latest(ex)
+    assert await wait_for(ex, {"planner_error"} | DONE) == "planner_error"
+    m = ex.mission
+    assert "TypeError" in m.outcome["reason"] and len(m.revisions) == 1
+    assert not any(a.robot_id == "gripper_01" for a in ex.attempts.values())
+    await ex.replan()  # planner_error allows a re-plan
+    assert ex.mission.status == "awaiting_approval" and ex.mission.revisions[-1].revision == 2
+    assert ex.mission.revisions[-1].kind == "continuation" and ex.mission.revisions[-1].validation.ok
+
+
+async def test_recovery_planning_exception_ends_planner_error_then_replan_recovers(make_exec):
+    ex = await make_exec("known", ["nav_fault_after_pickup"], planners={"flaky": FlakyChecksPlanner({2})})
+    await ex.create_mission(DEMO)
+    await approve_latest(ex)
+    assert await wait_for(ex, {"planner_error"} | DONE) == "planner_error"
+    assert "TypeError" in ex.mission.outcome["reason"] and ex.mission.recovery_used
+    await ex.replan()
+    assert ex.mission.status == "awaiting_approval"
+    assert ex.mission.revisions[-1].revision == 2 and ex.mission.revisions[-1].validation.ok
+    assert [t.skill for t in ex.mission.revisions[-1].tasks] == ["navigate_to", "place_object"]
