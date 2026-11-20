@@ -400,6 +400,63 @@ describe("mission outcomes", () => {
     expect(await screen.findByRole("button", { name: "Approve & run" })).toBeTruthy();
   });
 
+  it("offers the planner's options as quick replies, keeps free text and earlier rounds", async () => {
+    server.state = clone(clarification);
+    const q = clarification.mission.clarification_question;
+    server.state.mission.clarifications = [
+      { question: "Which object should I move?", options: ["the red block", "the duck"], answer: "the red block", phase: "initial" },
+      { question: q, options: ["red_block_1", "red_block_2"], answer: null, phase: "evaluation" },
+    ];
+    server.post["/mission/clarify"] = () => reply(200, awaiting);
+    render(<Harness />);
+    const card = await screen.findByRole("region", { name: "Clarification" });
+    expect(card.textContent).toContain(q);
+    const earlier = screen.getByRole("list", { name: "Earlier questions" });
+    expect(earlier.textContent).toContain("Which object should I move?");
+    expect(earlier.textContent).toContain("the red block");
+    expect(within(earlier).queryByRole("button")).toBeNull();
+    expect(within(card).getByPlaceholderText("Your answer")).toBeTruthy(); // free text stays
+    fireEvent.click(within(card).getByRole("button", { name: "red_block_2" }));
+    await waitFor(() => expect(posts("/mission/clarify")).toHaveLength(1));
+    expect(posts("/mission/clarify")[0].body).toEqual({ answer: "red_block_2" });
+  });
+
+  it("renders an answered question as the Executive's reply, with no plan and a new run offered", async () => {
+    server.state = clone(clarification);
+    Object.assign(server.state.mission, {
+      command: "What can the gripper car do?",
+      status: "answered",
+      revisions: [],
+      active_revision: null,
+      clarification_question: null,
+      clarifications: [],
+      canonical_goals: null,
+      outcome: { status: "answered", reason: "gripper_01 picks and places objects up to 0.25 kg." },
+    });
+    render(<Harness />);
+    const bubble = await screen.findByRole("article", { name: "Executive reply" });
+    expect(bubble.textContent).toContain("gripper_01 picks and places objects up to 0.25 kg.");
+    expect(screen.queryByRole("region", { name: "Clarification" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Approve & run" })).toBeNull();
+    expect(await screen.findByRole("button", { name: "Start a new run" })).toBeTruthy();
+  });
+
+  it("states what a find-only mission found on its completion card", async () => {
+    server.state = clone(complete);
+    server.state.mission.canonical_goals = [{ kind: "object_located", object_query: { label: "duck" }, area_id: "work_area" }];
+    server.state.mission.outcome = { status: "completed", reason: "Searched work_area: no duck found." };
+    render(<Harness />);
+    const done = await screen.findByRole("region", { name: "Mission complete" });
+    expect(done.textContent).toContain("Searched work_area: no duck found.");
+  });
+
+  it("keeps the generic reason off a delivery's completion card", async () => {
+    server.state = clone(complete);
+    render(<Harness />);
+    const done = await screen.findByRole("region", { name: "Mission complete" });
+    expect(done.textContent).not.toContain("All mission goals satisfied");
+  });
+
   it("shows a blocked mission's reason verbatim and the blocked completion variant", async () => {
     server.state = clone(blocked);
     render(<Harness />);

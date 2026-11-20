@@ -167,7 +167,7 @@ function RowActions({ rt, task, status, mission, readOnly, busy, onStop, onRepla
     );
   }
   if (status.key === "failed" || status.key === "uncertain" || status.key === "rejected") {
-    if (["completed", "blocked", "canceled", "rejected"].includes(mission.status)) return null;
+    if (["completed", "blocked", "canceled", "rejected", "answered"].includes(mission.status)) return null;
     const can = ["awaiting_approval", "planner_error"].includes(mission.status);
     const why = can ? undefined : `Re-planning is only available while awaiting approval or after a planner error (now ${mission.status}).`;
     return (

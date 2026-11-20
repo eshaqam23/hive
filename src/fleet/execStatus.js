@@ -3,7 +3,7 @@
 // connection data (link state, IP, domain, topics) comes only from live-data's backend.
 
 /* Mission statuses after which nothing moves (backend hive_exec/executive.py TERMINAL_MISSION). */
-export const TERMINAL_MISSION = new Set(["completed", "blocked", "rejected", "canceled", "planner_error"]);
+export const TERMINAL_MISSION = new Set(["completed", "blocked", "rejected", "canceled", "planner_error", "answered"]);
 
 /* Task runtime states that mean the robot is working on the task now. */
 const ACTIVE_TASK = new Set(["dispatched", "accepted", "running", "canceling"]);

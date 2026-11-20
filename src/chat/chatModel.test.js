@@ -10,6 +10,7 @@ import recovery from "./__fixtures__/recovery.json";
 import uncertain from "./__fixtures__/uncertain.json";
 import {
   checkSummary,
+  clarificationRounds,
   completionSummary,
   composerBlock,
   describeWhat,
@@ -345,6 +346,31 @@ describe("completion", () => {
   it("says all steps succeeded when they did", () => {
     expect(completionSummary(blocked.mission, blocked.timeline).stepsText).toBe("all 2 step(s) succeeded");
     expect(completionSummary(awaiting.mission, awaiting.timeline)).toBeNull();
+  });
+
+  it("titles an answered mission and keeps the answer as its reason", () => {
+    const m = { ...awaiting.mission, status: "answered", revisions: [], outcome: { status: "answered", reason: "gripper_01 picks and places." } };
+    expect(completionSummary(m, [])).toMatchObject({ title: "Answered", status: "answered", steps: 0, reason: "gripper_01 picks and places." });
+    expect(composerBlock({ reachable: true, state: { mission: m } }).newRun).toBe(true);
+  });
+
+  it("shows the completion reason for a find-only mission or a cancel, not for a delivery", () => {
+    const goal = (kind) => [{ kind, object_query: { label: "duck" }, area_id: "work_area", location_id: "dropoff_zone" }];
+    const mk = (status, kind) => ({ ...complete.mission, status, canonical_goals: kind ? goal(kind) : null });
+    expect(completionSummary(mk("completed", "object_located"), complete.timeline).showReason).toBe(true);
+    expect(completionSummary(mk("completed", "object_at"), complete.timeline).showReason).toBe(false);
+    expect(completionSummary(mk("completed", null), complete.timeline).showReason).toBe(false);
+    expect(completionSummary(mk("canceled", "object_at"), complete.timeline).showReason).toBe(true);
+  });
+
+  it("splits answered clarification rounds into before and after the plan", () => {
+    const r = (phase, answer) => ({ question: `${phase}?`, options: [], answer, phase });
+    const m = { clarifications: [r("initial", "the red block"), r("clarification_answer", "the drop-off zone"), r("evaluation", "red_block_2"), r("evaluation", null)] };
+    const { before, after } = clarificationRounds(m);
+    expect(before.map((x) => x.answer)).toEqual(["the red block", "the drop-off zone"]);
+    expect(after.map((x) => x.answer)).toEqual(["red_block_2"]);
+    expect(clarificationRounds({})).toEqual({ before: [], after: [] });
+    expect(clarificationRounds(null)).toEqual({ before: [], after: [] });
   });
 
   it("formats durations", () => {

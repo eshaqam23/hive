@@ -24,6 +24,13 @@ describe("missionRecord", () => {
   });
 });
 
+describe("missionRecord for an answered question", () => {
+  it("keeps the answered outcome and the answer itself", () => {
+    const state = { run_id: "run-a", timeline: [], mission: { mission_id: "m1", command: "What can the gripper car do?", status: "answered", created_at: 10, revisions: [], outcome: { status: "answered", reason: "It picks and places." } } };
+    expect(missionRecord(state, null)).toMatchObject({ outcome: "answered", reason: "It picks and places.", revisions: 0 });
+  });
+});
+
 describe("storage", () => {
   it("round-trips newest first, replaces the same mission and caps the list", () => {
     const a = missionRecord(complete, null);

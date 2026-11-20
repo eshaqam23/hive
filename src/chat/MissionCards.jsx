@@ -1,5 +1,6 @@
-// The thread's other cards: the operator's command, the replan header with its diff, the
-// clarification question, the amber reason card, the completion card and the earlier missions list.
+// The thread's other cards: the operator's command, the Executive's reply to a question, the replan
+// header with its diff, the clarification question and earlier rounds, the amber reason card, the
+// completion card and the earlier missions list.
 import React, { useState } from "react";
 import { describeWhat, durationText, formatTaskList, revisionDiff, taskLabel } from "./chatModel.js";
 import { clock } from "./ui.jsx";
@@ -10,6 +11,34 @@ export function UserBubble({ command, at }) {
       <p className="max-w-[85%] whitespace-pre-wrap rounded-2xl bg-card px-4 py-2.5 text-[15px] leading-relaxed text-ink">{command}</p>
       {at && <time className="font-mono text-[12px] text-faint">{clock(at)}</time>}
     </div>
+  );
+}
+
+/* An answered fleet question: the planner's reply, on the assistant's side of the thread. */
+export function AssistantBubble({ text, at }) {
+  return (
+    <article aria-label="Executive reply" className="flex flex-col items-start gap-1">
+      <p className="max-w-[85%] whitespace-pre-wrap rounded-2xl border border-line bg-raised px-4 py-2.5 text-[15px] leading-relaxed text-ink">{text}</p>
+      {at && <time className="font-mono text-[12px] text-faint">{clock(at)}</time>}
+    </article>
+  );
+}
+
+/* Questions the planner already asked this mission and what the operator answered, oldest first. */
+export function ClarificationRounds({ rounds, label = "Earlier questions" }) {
+  if (!rounds?.length) return null;
+  return (
+    <ul aria-label={label} className="space-y-2">
+      {rounds.map((r, i) => (
+        <li className="space-y-1" key={i}>
+          <p className="max-w-[85%] rounded-2xl border border-line px-4 py-2 text-[14px] text-muted">
+            <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-warn">The planner asked </span>
+            {r.question}
+          </p>
+          <p className="ml-auto w-fit max-w-[85%] rounded-2xl bg-card px-4 py-2 text-[14px] text-ink">{r.answer}</p>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -67,17 +96,27 @@ export function ReplanHeader({ prev, rev, trigger, catalog }) {
   );
 }
 
-export function ClarificationCard({ question, busy, act }) {
+export function ClarificationCard({ question, options = [], busy, act }) {
   const [answer, setAnswer] = useState("");
+  const reply = (text) => act("/mission/clarify", { answer: text }, "Answer sent to the planner.");
   const send = async (e) => {
     e.preventDefault();
-    const res = await act("/mission/clarify", { answer: answer.trim() }, "Answer sent to the planner.");
+    const res = await reply(answer.trim());
     if (res.ok) setAnswer("");
   };
   return (
     <section aria-label="Clarification" className="rounded-2xl border border-warn/50 bg-card px-4 py-3.5">
       <p className="font-mono text-[12px] uppercase tracking-[0.08em] text-warn">The planner asks</p>
       <p className="mt-1 text-[15px] leading-relaxed text-ink">{question}</p>
+      {options.length > 0 && (
+        <div aria-label="Suggested answers" className="mt-3 flex flex-wrap gap-2" role="group">
+          {options.map((opt) => (
+            <button className="btn btn-secondary px-3 py-1 text-[14px]" disabled={busy} key={opt} onClick={() => reply(opt)} type="button">
+              {opt}
+            </button>
+          ))}
+        </div>
+      )}
       <form className="mt-3 flex gap-2" onSubmit={send}>
         <label className="min-w-0 flex-1">
           <span className="sr-only">Your answer</span>
@@ -102,7 +141,7 @@ export function ReasonCard({ title, reason, children }) {
   );
 }
 
-const EDGE = { completed: "border-l-live", blocked: "border-l-warn", canceled: "border-l-faint", rejected: "border-l-danger", planner_error: "border-l-danger" };
+const EDGE = { completed: "border-l-live", blocked: "border-l-warn", canceled: "border-l-faint", rejected: "border-l-danger", planner_error: "border-l-danger", answered: "border-l-live" };
 
 /* R3: "Mission complete · duration · all N step(s) succeeded", or the failed variant */
 export function CompletionCard({ summary, catalog, onExport, exportLabel = "Export run", showReason = false }) {
@@ -133,7 +172,7 @@ export function CompletionCard({ summary, catalog, onExport, exportLabel = "Expo
   );
 }
 
-const OUTCOME_TONE = { completed: "text-live", blocked: "text-warn", canceled: "text-faint", rejected: "text-danger", planner_error: "text-danger" };
+const OUTCOME_TONE = { completed: "text-live", blocked: "text-warn", canceled: "text-faint", rejected: "text-danger", planner_error: "text-danger", answered: "text-live" };
 
 const EARLIER_SHOWN = 3;
 

@@ -54,7 +54,7 @@ describe("activeMission", () => {
   it("is the mission until it reaches a terminal status", () => {
     expect(activeMission({ mission: mission("executing") })?.mission_id).toBe("m1");
     expect(activeMission({ mission: mission("awaiting_approval") })?.mission_id).toBe("m1");
-    for (const done of ["completed", "blocked", "rejected", "canceled", "planner_error"]) expect(activeMission({ mission: mission(done) })).toBeNull();
+    for (const done of ["completed", "blocked", "rejected", "canceled", "planner_error", "answered"]) expect(activeMission({ mission: mission(done) })).toBeNull();
     expect(activeMission({ mission: null })).toBeNull();
     expect(activeMission({ ok: true })).toBeNull();
   });

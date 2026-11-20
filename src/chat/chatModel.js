@@ -437,7 +437,11 @@ const COMPLETION_TITLE = {
   canceled: "Mission canceled",
   rejected: "Mission rejected",
   planner_error: "Planner error",
+  answered: "Answered",
 };
+
+/* A completed find-only mission's reason says what was found; a delivery's is the generic sentence. */
+const findsSomething = (mission) => (mission?.canonical_goals || []).some((g) => g.kind === "object_located");
 
 /* The completion card: title, duration and how many steps succeeded, plus the step that failed. */
 export function completionSummary(mission, timeline) {
@@ -469,6 +473,18 @@ export function completionSummary(mission, timeline) {
     succeeded,
     failing,
     reason: mission.outcome?.reason ?? null,
+    showReason: mission.status === "canceled" || (mission.status === "completed" && findsSomething(mission)),
+  };
+}
+
+/* The questions already answered this mission, oldest first: those asked before any plan (the
+   initial request, or an answer to an earlier question) and those asked once a plan had run. */
+const BEFORE_PLAN = new Set(["initial", "clarification_answer"]);
+export function clarificationRounds(mission) {
+  const answered = (mission?.clarifications || []).filter((c) => c && c.answer != null);
+  return {
+    before: answered.filter((c) => BEFORE_PLAN.has(c.phase)),
+    after: answered.filter((c) => !BEFORE_PLAN.has(c.phase)),
   };
 }
 

@@ -54,5 +54,6 @@ describe("missionPill", () => {
   it("is nothing without an active mission", () => {
     expect(missionPill(null, 0)).toBeNull();
     expect(missionPill(at("completed"), 0)).toBeNull();
+    expect(missionPill(at("answered"), 0)).toBeNull(); // a question answered from the catalog ends the mission
   });
 });

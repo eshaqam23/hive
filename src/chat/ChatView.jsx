@@ -9,8 +9,10 @@ import { TERMINAL_MISSION, isSimulated } from "../fleet/execStatus.js";
 import { HiveMark } from "../shell/icons.jsx";
 import {
   DEMO_COMMAND,
+  clarificationRounds,
   completionSummary,
   composerBlock,
+  finishedAt,
   livePlannerLabel,
   normalizePlanner,
   pendingThinking,
@@ -19,7 +21,16 @@ import {
 } from "./chatModel.js";
 import Composer from "./Composer.jsx";
 import { loadEarlier, missionRecord, saveEarlier, withMission } from "./earlierMissions.js";
-import { ClarificationCard, CompletionCard, EarlierMissions, ReasonCard, ReplanHeader, UserBubble } from "./MissionCards.jsx";
+import {
+  AssistantBubble,
+  ClarificationCard,
+  ClarificationRounds,
+  CompletionCard,
+  EarlierMissions,
+  ReasonCard,
+  ReplanHeader,
+  UserBubble,
+} from "./MissionCards.jsx";
 import PlanCard from "./PlanCard.jsx";
 import RightRail from "./RightRail.jsx";
 import SimDrawer from "./SimDrawer.jsx";
@@ -102,6 +113,9 @@ export function Thread({ state, readOnly = false, busy = false, act, pending = n
   const live = readOnly ? null : pendingThinking(ctx);
   const summary = completionSummary(mission, ctx.timeline);
   const status = mission?.status;
+  const rounds = clarificationRounds(mission);
+  const asking = mission?.clarifications?.at(-1);
+  const options = asking && asking.answer == null ? asking.options || [] : [];
 
   if (!mission && !pending) return null;
   return (
@@ -113,6 +127,7 @@ export function Thread({ state, readOnly = false, busy = false, act, pending = n
           {readOnly ? " · read-only" : ""}
         </p>
       )}
+      <ClarificationRounds rounds={rounds.before} />
       {!mission && sending && (
         <ThinkingCard thinking={{ label: plannerLabel || "Planner", latencyMs: null, reads: [], lines: [], live: true }} />
       )}
@@ -153,9 +168,12 @@ export function Thread({ state, readOnly = false, busy = false, act, pending = n
         );
       })}
 
+      <ClarificationRounds label="Questions during the mission" rounds={rounds.after} />
       {live && <ThinkingCard thinking={live} />}
 
-      {status === "clarification" && !readOnly && <ClarificationCard act={act} busy={busy} question={mission.clarification_question} />}
+      {status === "clarification" && !readOnly && (
+        <ClarificationCard act={act} busy={busy} options={options} question={mission.clarification_question} />
+      )}
       {status === "clarification" && readOnly && <ReasonCard reason={mission.clarification_question} title="The planner asked" />}
       {status === "canceling" && <ReasonCard reason="Stopping the robots' current tasks; waiting for them to confirm." title="Canceling" />}
       {(status === "planner_error" || status === "blocked" || status === "rejected") && (
@@ -167,8 +185,9 @@ export function Thread({ state, readOnly = false, busy = false, act, pending = n
           )}
         </ReasonCard>
       )}
-      {summary && (summary.steps > 0 || !["rejected", "planner_error"].includes(status)) && (
-        <CompletionCard catalog={state.catalog} onExport={onExport} showReason={status === "canceled"} summary={summary} />
+      {status === "answered" && <AssistantBubble at={finishedAt(mission, ctx.timeline)} text={mission.outcome?.reason} />}
+      {summary && (summary.steps > 0 || !["rejected", "planner_error", "answered"].includes(status)) && (
+        <CompletionCard catalog={state.catalog} onExport={onExport} showReason={summary.showReason} summary={summary} />
       )}
     </div>
   );
