@@ -19,6 +19,9 @@ from .world import ObservedWorld, RobotState
 TOTAL_WINDOW_TOKENS = 12_288
 RESERVED_OUTPUT_TOKENS = 3_072
 MAX_INPUT_TOKENS = TOTAL_WINDOW_TOKENS - RESERVED_OUTPUT_TOKENS
+# Operator feedback in the prompt (WS5): the most recent messages only; state/export keep every one.
+FEEDBACK_MAX_MESSAGES = 4
+FEEDBACK_MAX_CHARS = 1200
 
 
 class ContextBudgetExceeded(RuntimeError):
@@ -32,7 +35,7 @@ def estimate_tokens(text: str) -> int:
 
 @dataclass
 class PlanningContext:
-    phase: str  # initial | continuation | recovery | clarification_answer
+    phase: str  # initial | continuation | recovery | clarification_answer | feedback
     command: str
     robots: list[dict[str, Any]]
     observed: dict[str, Any]
@@ -46,11 +49,20 @@ class PlanningContext:
     # Continuation only: the likely next stage the previous observation stage showed the operator
     # ({from_revision, summary, tasks, waits_for}), for the planner to keep or change given the new evidence.
     previous_preview: Optional[dict[str, Any]] = None
+    # Operator messages delivered to the planner, oldest first, capped (see cap_feedback). Untrusted text:
+    # never part of the INPUT data; the prompt renders it only inside its delimited OPERATOR FEEDBACK block.
+    operator_feedback: list[str] = field(default_factory=list)
+    feedback_omitted: int = 0  # older delivered messages left out by the cap
+    # Feedback phase only: the proposal the operator's message revises ({revision, scope, summary, tasks}).
+    previous_proposal: Optional[dict[str, Any]] = None
 
     def to_json(self) -> str:
         data = dict(self.__dict__)
-        if data.get("previous_preview") is None:
-            data.pop("previous_preview", None)  # keeps every other phase's prompt as it was
+        data.pop("operator_feedback", None)
+        data.pop("feedback_omitted", None)
+        for key in ("previous_preview", "previous_proposal"):
+            if data.get(key) is None:
+                data.pop(key, None)  # keeps every other phase's prompt as it was
         return json.dumps(data, separators=(",", ":"), sort_keys=True)
 
 
@@ -66,6 +78,8 @@ def build_context(
     clarification: Optional[dict[str, str]] = None,
     clarifications: Optional[list[dict[str, Any]]] = None,
     previous_preview: Optional[dict[str, Any]] = None,
+    operator_feedback: Optional[list[str]] = None,
+    previous_proposal: Optional[dict[str, Any]] = None,
 ) -> PlanningContext:
     robot_rows = []
     for rid, s in sorted(robots.items()):
@@ -117,4 +131,20 @@ def build_context(
         clarification=clarification,
         clarifications=[dict(c) for c in (clarifications or [])],
         previous_preview=previous_preview,
+        **cap_feedback(operator_feedback or []),
+        previous_proposal=previous_proposal,
     )
+
+
+def cap_feedback(messages: list[str]) -> dict[str, Any]:
+    """The most recent messages that fit FEEDBACK_MAX_MESSAGES and FEEDBACK_MAX_CHARS, oldest first, plus
+    how many older ones were left out. A message is kept whole or not at all (each is at most 500 chars)."""
+    kept: list[str] = []
+    used = 0
+    for text in reversed(messages):
+        if len(kept) >= FEEDBACK_MAX_MESSAGES or used + len(text) > FEEDBACK_MAX_CHARS:
+            break
+        kept.append(text)
+        used += len(text)
+    kept.reverse()
+    return {"operator_feedback": kept, "feedback_omitted": len(messages) - len(kept)}

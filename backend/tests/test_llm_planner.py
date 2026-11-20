@@ -294,7 +294,7 @@ def _example(prefix):
 def test_prompt_v3_rules_cover_find_answer_and_asking():
     from hive_exec.planner.prompt import PROMPT_VERSION, RULES, system_prompt
 
-    assert PROMPT_VERSION == "hive.prompt.v3.2" and "hive.prompt.v3.2" in system_prompt()
+    assert PROMPT_VERSION == "hive.prompt.v3.3" and "hive.prompt.v3.3" in system_prompt()
     for phrase in ["Write your own summary and rationale for this command; do not reuse example text.",
                    "object_located", "no scan_route", "the field", "work_area", "ONE short question",
                    "Never map an unnamed destination to dropoff_zone", "operator's own noun",
@@ -430,10 +430,10 @@ def _preview_context(preview=True):
                          robots=initial_robot_states(), world=w, canonical_goals=[goal], previous_preview=prev)
 
 
-def test_prompt_is_v3_2_and_says_so():
+def test_prompt_is_v3_3_and_says_so():
     from hive_exec.planner.prompt import PROMPT_VERSION, system_prompt
 
-    assert PROMPT_VERSION == "hive.prompt.v3.2" and "hive.prompt.v3.2" in system_prompt()
+    assert PROMPT_VERSION == "hive.prompt.v3.3" and "hive.prompt.v3.3" in system_prompt()
 
 
 def test_prompt_rules_ask_for_a_preview_and_for_changes_on_continuation():

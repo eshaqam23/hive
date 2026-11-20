@@ -61,6 +61,13 @@ class ClarifyIn(Body):
     answer: str = Field(min_length=1, max_length=500)
 
 
+class MessageIn(Body):
+    """An operator message to the planner (untrusted text: capped, only ever shown to the planner inside its
+    delimited OPERATOR FEEDBACK block)."""
+    text: str = Field(min_length=1, max_length=500)
+    mode: Literal["now", "queue"]
+
+
 class ResetIn(Body):
     scenario: Literal["unknown", "known"] = "unknown"
     faults: list[str] = Field(default_factory=list)
@@ -164,6 +171,21 @@ def create_app(settings: Optional[ExecSettings] = None, gateway: Optional[RobotG
     async def clarify(body: ClarifyIn):
         await ex.answer_clarification(body.answer)
         return ex.state()
+
+    @app.post("/api/exec/mission/messages")
+    async def post_message(body: MessageIn):
+        msg = await ex.post_message(body.text, body.mode)
+        return {**ex.state(), "message": msg}
+
+    @app.delete("/api/exec/mission/messages/{msg_id}")
+    async def cancel_message(msg_id: str):
+        msg = await ex.cancel_message(msg_id)
+        return {**ex.state(), "message": msg}
+
+    @app.post("/api/exec/mission/messages/{msg_id}/send-now")
+    async def send_message_now(msg_id: str):
+        msg = await ex.send_message_now(msg_id)
+        return {**ex.state(), "message": msg}
 
     @app.post("/api/exec/mission/replan")
     async def replan():

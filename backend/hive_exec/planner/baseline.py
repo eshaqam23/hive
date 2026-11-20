@@ -328,6 +328,44 @@ def plan_for_goals(goals: list[dict], ctx: PlanningContext) -> PlanProposal:
               tasks=tasks, rationale=_why_observers(tasks))
 
 
+# ---- operator feedback (phase "feedback"), by keyword rules only ---------------------------------------
+# Limits (documented in DECISIONS.md): the baseline understands two kinds of feedback, "sensing only" (find,
+# do not carry) and "camera only" (no LiDAR scan). Other feedback is re-parsed together with the command, so
+# it changes the plan only when parse_goals reads a new intent from it. Approved mission goals never change,
+# and continuation/recovery planning ignores feedback.
+_NOT = r"(?:don['’]?t|do not|never|no|without)"
+NEGATED = re.compile(rf"\b{_NOT}\s+(?:[a-z_'’-]+\s+){{0,2}}[a-z_'’-]+")
+SENSING_ONLY = re.compile(
+    rf"\b(?:(?:only|just)\s+(?:find|locate|look|search|inspect|check)|find\s+(?:it\s+)?only|leave it|"
+    rf"{_NOT}\s+(?:move|moving|bring|bringing|carry|carrying|pick|fetch|transport|grab|touch|deliver)|"
+    rf"no\s+(?:transport|carry|delivery|pickup|pick-up))\b")
+CAMERA_ONLY = re.compile(rf"\b(?:camera only|only (?:use )?the camera|use only the camera|just the camera|"
+                         rf"{_NOT}\s+(?:the\s+)?(?:lidar|scan)|skip the (?:lidar|scan))\b")
+DELIVER_VERBS = re.compile(r"\b(?:bring|deliver|carry|move|take|transport|fetch|get|grab)\b")
+
+
+def feedback_directives(feedback: list[str]) -> dict[str, bool]:
+    t = " ".join(feedback).lower()
+    camera_only = bool(CAMERA_ONLY.search(t))
+    return {"camera_only": camera_only, "sensing_only": camera_only or bool(SENSING_ONLY.search(t))}
+
+
+def _apply_feedback_text(text: str, feedback: list[str], directives: dict[str, bool]) -> tuple[str, list[str]]:
+    """The text parse_goals reads for a feedback replan: command + answers + feedback, with negated phrases
+    ("don't move the gripper") removed and, for sensing-only feedback, every carry verb removed so only the
+    find / photograph / scan intents remain."""
+    text = NEGATED.sub(" ", ". ".join([text, *feedback]).lower())
+    applied = []
+    if directives["sensing_only"]:
+        text = DELIVER_VERBS.sub(" ", text)
+        applied.append("find only, no transport")
+    if directives["camera_only"]:
+        applied.append("camera only, no LiDAR scan")
+    note = ("Operator feedback applied by keyword rules: " + "; ".join(applied) + "." if applied else
+            "Operator feedback re-read with the command; the baseline found no find-only or camera-only rule in it.")
+    return text, [note]
+
+
 BASELINE_LABEL = "Baseline (no LLM)"
 
 
@@ -339,13 +377,20 @@ class BaselinePlanner(Planner):
 
     async def propose(self, ctx: PlanningContext, repair_feedback=None, previous_output=None) -> PlannerOutput:
         record = PlannerRecord(kind="baseline", label=BASELINE_LABEL, latency_ms=0.0)
-        if ctx.canonical_goals and ctx.phase in ("continuation", "recovery"):
+        notes: list[str] = []
+        directives = feedback_directives(ctx.operator_feedback) if ctx.phase == "feedback" else None
+        if ctx.canonical_goals and ctx.phase in ("continuation", "recovery", "feedback"):
             goals = ctx.canonical_goals
+            if directives is not None:
+                notes.append("Operator feedback noted; the baseline cannot change approved mission goals, so it "
+                             "re-planned the same goals (an LLM planner can follow the feedback).")
         else:
             text = ctx.command
             answers = [c.get("answer") or "" for c in ctx.clarifications] or \
                 [(ctx.clarification or {}).get("answer", "")]
             text = ". ".join(x for x in [text, *answers] if x.strip())
+            if directives is not None:
+                text, notes = _apply_feedback_text(text, ctx.operator_feedback, directives)
             if is_fleet_question(ctx.command) and not ctx.clarifications:
                 return PlannerOutput(_p(disposition="answer", summary="Fleet question answered from the catalog.",
                                         answer=fleet_answer(ctx.command, ctx.robots)), record)
@@ -354,11 +399,15 @@ class BaselinePlanner(Planner):
                 return PlannerOutput(_p(disposition="clarify", summary="The request is ambiguous.", issues=issues,
                                         clarification_question=question,
                                         clarification_options=QUESTION_OPTIONS.get(question, [])), record)
+            if directives is not None and directives["camera_only"]:
+                goals = [g for g in goals if g["kind"] != "route_observed"]  # the scan is lidar_01's
             if not goals:
                 return PlannerOutput(_p(disposition="reject", summary="The fleet cannot perform this request.",
                                         issues=issues), record)
         proposal = plan_for_goals(goals, ctx)
-        if ctx.phase == "continuation" and ctx.previous_preview and proposal.disposition == "plan":
+        if notes:
+            proposal = proposal.model_copy(update={"issues": [*proposal.issues, *notes][:8]})
+        if ctx.phase in ("continuation", "feedback") and ctx.previous_preview and proposal.disposition == "plan":
             # Say, deterministically, what the new evidence changed against the preview the operator saw.
             preview = NextStagePreview.model_validate({k: v for k, v in ctx.previous_preview.items()
                                                        if k != "from_revision"})

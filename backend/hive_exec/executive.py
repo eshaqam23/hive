@@ -68,7 +68,8 @@ class TaskRuntime:
     task_id: str
     revision: int
     robot_id: Optional[str]
-    # pending|dispatched|accepted|running|canceling|succeeded|failed|rejected|canceled|uncertain|skipped
+    # pending|dispatched|accepted|running|canceling|succeeded|failed|rejected|canceled|uncertain|skipped|
+    # superseded (never dispatched; an approved operator-message revision replaced its revision - not a failure)
     state: str = "pending"
     attempt_ids: list[str] = field(default_factory=list)
     progress: float = 0.0
@@ -112,6 +113,18 @@ class Mission:
     history: list[str] = field(default_factory=list)
     planning_log: list[dict] = field(default_factory=list)
     last_proposal: Optional[dict] = None
+    # Operator messages, oldest first: {id, text, mode, status: queued|held|delivered|canceled, created_at,
+    # delivered_at, delivered_to_revision, delivered_as: feedback|answer, note?}. Replaced, never mutated.
+    operator_messages: list[dict] = field(default_factory=list)
+    # The planning phase/kind/failure of the current stage; a feedback replan keeps the stage it revises.
+    stage_phase: str = "initial"
+    stage_rev_kind: str = "initial"
+    stage_failure: Optional[dict] = None
+    revising: Optional[dict] = None  # brief of the proposal a feedback replan revises (previous_proposal)
+
+
+MESSAGE_MAX_CHARS = 500
+OPEN_MESSAGE = ("queued", "held")
 
 
 # Display-only parts of a proposal: approval binds what can run, so these stay out of the hash.
@@ -150,7 +163,9 @@ class Executive:
         self._tl = itertools.count(1)
         self._mission_seq = itertools.count(1)
         self._planning: Optional[asyncio.Task] = None
-        self._gen = 0  # bumps on reset/new mission; stale async results are discarded
+        # A live feedback replan (operator message while executing); at most one at a time.
+        self._live: Optional[asyncio.Task] = None
+        self._gen = 0  # bumps on reset/cancel/abandoned live replan; stale async results are discarded
 
     # ================================================================ setup
     async def start(self, scenario: str = "unknown") -> None:
@@ -202,8 +217,10 @@ class Executive:
         elif seed is None:
             seed = random.SystemRandom().randrange(2 ** 32)
         self._gen += 1
-        if self._planning and not self._planning.done():
-            self._planning.cancel()
+        for task in (self._planning, self._live):
+            if task and not task.done():
+                task.cancel()
+        self._live = None
         async with self.lock:
             active = [a for a in self.attempts.values() if a.status not in TERMINAL_STATUSES]
             if self.mission and self.mission.status not in TERMINAL_MISSION:
@@ -302,6 +319,167 @@ class Executive:
         phase = "continuation" if m.canonical_goals else "initial"
         await self._plan(phase, "continuation" if m.canonical_goals else "initial")
 
+    # ==================================================== operator messages
+    async def post_message(self, text: str, mode: str) -> dict:
+        """An operator message to the planner. Untrusted text: length-capped here, never executed, and only
+        ever rendered inside the prompt's delimited OPERATOR FEEDBACK block (or used as a clarification
+        answer). "now" replans at once (or holds while a planning is in flight); "queue" waits for the next
+        planning point."""
+        text = (text or "").strip()
+        if not 1 <= len(text) <= MESSAGE_MAX_CHARS:
+            raise ExecError(f"A message must be 1 to {MESSAGE_MAX_CHARS} characters.", 400)
+        if mode not in ("now", "queue"):
+            raise ExecError(f"Unknown message mode {str(mode)[:20]!r} (expected now or queue).", 400)
+        async with self.lock:
+            m = self._message_mission()
+            mid = f"msg-{len(m.operator_messages) + 1}"
+            m.operator_messages = [*m.operator_messages, {
+                "id": mid, "text": text, "mode": mode, "status": "queued", "created_at": self.clock(),
+                "delivered_at": None, "delivered_to_revision": None, "delivered_as": None}]
+            self.log("operator", f"Operator message {mid} ({mode}) while {m.status}.", text=text)
+            answer = self._route_message(m, mid, mode)
+        if answer:  # nothing awaits between the lock and this call, so the clarification is still pending
+            await self.answer_clarification(text)
+        return self._message(m, mid)
+
+    async def send_message_now(self, message_id: str) -> dict:
+        async with self.lock:
+            m = self._message_mission()
+            msg = self._message(m, message_id)
+            if msg["status"] != "queued":
+                raise ExecError(f"Message {message_id} is {msg['status']}; only a queued message can be sent now.")
+            self.log("operator", f"Operator sent queued message {message_id} now.")
+            answer = self._route_message(m, message_id, "now")
+        if answer:
+            await self.answer_clarification(msg["text"])
+        return self._message(m, message_id)
+
+    async def cancel_message(self, message_id: str) -> dict:
+        async with self.lock:
+            m = self.mission
+            if m is None:
+                raise ExecError("No active mission.")
+            msg = self._message(m, message_id)
+            if msg["status"] not in OPEN_MESSAGE:
+                raise ExecError(f"Message {message_id} is {msg['status']}; only a queued or held message can be "
+                                "removed.")
+            self._update_messages(m, {message_id}, status="canceled", note="Removed by the operator.")
+            self.log("operator", f"Operator removed message {message_id}.")
+            return self._message(m, message_id)
+
+    def _message_mission(self) -> Mission:
+        m = self.mission
+        if m is None:
+            raise ExecError("No active mission; send the text as a new mission instead.")
+        if m.status in TERMINAL_MISSION or m.status == "canceling":
+            raise ExecError(f"Mission is {m.status}; start a new mission instead.")
+        return m
+
+    @staticmethod
+    def _message(m: Mission, message_id: str) -> dict:
+        for x in m.operator_messages:
+            if x["id"] == message_id:
+                return dict(x)
+        raise ExecError(f"No message {message_id}.", 404)
+
+    @staticmethod
+    def _update_messages(m: Mission, ids: set[str], **changes: Any) -> None:
+        m.operator_messages = [{**x, **changes} if x["id"] in ids else x for x in m.operator_messages]
+
+    def _deliver(self, m: Mission, ids: set[str], as_: str = "feedback") -> None:
+        if ids:
+            self._update_messages(m, ids, status="delivered", delivered_at=self.clock(), delivered_as=as_)
+
+    def _close_messages(self, m: Mission, why: str) -> None:
+        """Queued and held messages never outlive the mission (STOP ALL, cancel, any terminal outcome)."""
+        ids = {x["id"] for x in m.operator_messages if x["status"] in OPEN_MESSAGE}
+        if ids:
+            self._update_messages(m, ids, status="canceled", note=f"Not delivered: {why}"[:300])
+
+    def _note_delivered(self, m: Mission, note: str) -> None:
+        """Explain a delivered message whose planning produced no revision (the running plan continues)."""
+        ids = {x["id"] for x in m.operator_messages if x["status"] == "delivered"
+               and x["delivered_to_revision"] is None and x["delivered_as"] == "feedback"}
+        self._update_messages(m, ids, note=note[:300])
+
+    @staticmethod
+    def _feedback_texts(m: Mission) -> list[str]:
+        return [x["text"] for x in m.operator_messages if x["status"] == "delivered" and x["delivered_as"] == "feedback"]
+
+    def _route_message(self, m: Mission, mid: str, mode: str) -> bool:
+        """Apply a message under the lock. True: it answers the pending clarification (caller answers it)."""
+        if m.status == "clarification":
+            self._deliver(m, {mid}, "answer")
+            return True
+        if mode == "now":
+            self._send_now(m, mid)
+        return False
+
+    def _send_now(self, m: Mission, mid: str) -> None:
+        if m.status == "awaiting_approval":
+            latest = m.revisions[-1] if m.revisions else None
+            if latest is not None and latest.status in ("awaiting_approval", "invalid"):
+                self._supersede(latest, "operator_message")  # never approvable from here on
+            m.revising = self._brief(latest.proposal, latest) if latest is not None else None
+            self._deliver(m, {mid})
+            m.status = "planning"  # set now, so a second message before the planning starts is held
+            self.log("planning", "Operator message: the pending revision is superseded; re-planning with it.")
+            self._spawn_planning("feedback", "feedback")
+        elif m.status == "executing" and not self._live_in_flight():
+            pending = self._pending_live(m)
+            base = pending or self._active_plan(m)
+            if pending is not None:
+                self._supersede(pending, "operator_message")
+            m.revising = self._brief(base.proposal, base)
+            self._deliver(m, {mid})
+            self.log("planning", f"Operator message: re-planning while revision {m.active_revision} keeps running.")
+            self._spawn_planning("feedback", "feedback", live=True)
+        else:  # a planning is in flight (or about to start): the message waits for it to land
+            self._update_messages(m, {mid}, status="held")
+
+    def _live_in_flight(self) -> bool:
+        return self._live is not None and not self._live.done()
+
+    @staticmethod
+    def _pending_live(m: Mission) -> Optional[ExecutionPlan]:
+        """The revision proposed while another one executes, still waiting for approval (or invalid)."""
+        latest = m.revisions[-1] if m.revisions else None
+        if latest is None or m.active_revision is None or latest.revision <= m.active_revision:
+            return None
+        return latest if latest.status in ("awaiting_approval", "invalid") else None
+
+    @staticmethod
+    def _supersede(plan: ExecutionPlan, reason: str) -> None:
+        plan.status = "superseded"
+        plan.superseded_reason = reason
+
+    def _abandon_live(self, m: Mission) -> None:
+        """The running stage ended (finished, failed, blocked, canceled): a live replan in flight is discarded
+        and a live revision still waiting for approval can never run."""
+        if self._live is not None and not self._live.done():
+            self._gen += 1  # its result is stale; nothing else plans while a stage executes
+            self._live.cancel()
+            self.log("planning", "The running stage ended; the live re-plan in flight is discarded.")
+        self._live = None
+        for p in m.revisions:
+            if m.active_revision is not None and p.revision > m.active_revision \
+                    and p.status in ("awaiting_approval", "invalid"):
+                self._supersede(p, "stage_ended")
+                self.log("revision", f"Revision {p.revision} superseded: its stage ended before approval.")
+
+    @staticmethod
+    def _brief(proposal: PlanProposal, plan: Optional[ExecutionPlan] = None) -> dict:
+        """The proposal an operator message revises, compact, for the planner's previous_proposal."""
+        allocations = plan.allocations if plan is not None else {}
+        tasks = []
+        for t in proposal.tasks:
+            row = {"task_id": t.task_id, "binding_id": t.binding_id, "depends_on": list(t.depends_on),
+                   "action": t.action.model_dump(exclude_none=True)}
+            robot = allocations.get(t.binding_id) or t.preferred_robot_id
+            tasks.append({**row, "robot_id": robot} if robot else row)
+        return {**({"revision": plan.revision} if plan is not None else {}), "scope": proposal.scope,
+                "summary": proposal.summary, "tasks": tasks}
+
     def _require_mission(self) -> Mission:
         if self.mission is None:
             raise ExecError("No active mission.", 404)
@@ -309,19 +487,39 @@ class Executive:
 
     # ============================================================= planning
     async def _plan(self, phase: str, rev_kind: str, failure: Optional[dict] = None,
-                    clarification: Optional[dict] = None) -> None:
+                    clarification: Optional[dict] = None, live: bool = False, gen: Optional[int] = None) -> None:
+        """One planning call. ``live``: a feedback replan while the active revision keeps executing; the
+        mission status is left alone and failures never end the mission (_live_failed). ``gen``: the
+        generation a spawned planning was requested in; a reset/cancel/abandon since then makes it a no-op."""
         m = self._require_mission()
-        gen = self._gen
+        if gen is None:
+            gen = self._gen
+        elif gen != self._gen:
+            return  # canceled (or the stage ended) before this spawned planning started
         planner = self.planners[m.planner_kind]
-        prev_status = m.status
-        m.status = "planning"
-        previous = self._previous_observation(m) if phase == "continuation" else None
+        fail = self._live_failed if live else self._planner_failed
+        # Every planning call is a planning point: queued and held messages are delivered to it.
+        self._deliver(m, {x["id"] for x in m.operator_messages if x["status"] in OPEN_MESSAGE})
+        if not live:
+            m.status = "planning"
+        if phase != "feedback":
+            m.stage_phase, m.stage_rev_kind, m.stage_failure = phase, rev_kind, failure
+            m.revising = None
+        elif m.stage_phase == "recovery":
+            failure = m.stage_failure  # a feedback replan of a recovery still sees the failure
+        # Superseded revisions were never approved, so they are never the preview source (WS4 F5).
+        previous = (self._previous_observation(m)
+                    if phase == "continuation" or (phase == "feedback" and not live
+                                                   and m.stage_phase == "continuation") else None)
         ctx = build_context(phase=phase, command=m.command, robots=self.robots, world=self.world,
                             canonical_goals=m.canonical_goals, stage_history=m.history,
                             failure=failure, clarification=clarification,
                             clarifications=[c for c in m.clarifications if c.get("answer") is not None],
-                            previous_preview=self._preview_for_context(previous))
-        self.log("planning", f"Requesting {phase} proposal from {planner.kind}.")
+                            previous_preview=self._preview_for_context(previous),
+                            operator_feedback=self._feedback_texts(m),
+                            previous_proposal=m.revising if phase == "feedback" else None)
+        self.log("planning", f"Requesting {phase} proposal from {planner.kind}"
+                 + (" (the active revision keeps running)." if live else "."))
         attempts, first_ok, repaired = 0, None, False
         feedback: Optional[list[str]] = None
         raw: Optional[str] = None
@@ -335,7 +533,7 @@ class Executive:
             try:
                 out = await planner.propose(ctx, feedback, raw)
             except ContextBudgetExceeded as exc:
-                return self._planner_failed(m, gen, str(exc), None, attempts)
+                return fail(m, gen, str(exc), None, attempts)
             except PlannerError as exc:
                 record = exc.record
                 raw = getattr(exc, "raw", None)
@@ -344,7 +542,7 @@ class Executive:
                     feedback = (record.errors if record and record.errors else [str(exc)])
                     self.log("planning", f"Proposal rejected by schema; repair attempt. ({exc})")
                     continue
-                return self._planner_failed(m, gen, str(exc), record, attempts)
+                return fail(m, gen, str(exc), record, attempts)
             if gen != self._gen:
                 return
             record = out.record
@@ -360,8 +558,8 @@ class Executive:
                 alloc = self.allocator.allocate(out.proposal, self.robots, {})
                 vres = validate(out.proposal, alloc, self.robots, self.world, m.canonical_goals)
             except Exception as exc:  # noqa: BLE001 - a malformed proposal must not strand the mission in planning
-                return self._planner_failed(m, gen, f"Plan checks could not run: {type(exc).__name__}: "
-                                            f"{str(exc)[:300]}", record, attempts)
+                return fail(m, gen, f"Plan checks could not run: {type(exc).__name__}: "
+                                f"{str(exc)[:300]}", record, attempts)
             if first_ok is None:
                 first_ok = vres.report.ok
             if vres.report.ok or attempts >= 2 or planner.kind == "baseline":
@@ -378,7 +576,49 @@ class Executive:
         async with self.lock:
             if gen != self._gen or self.mission is not m:
                 return
+            if live and m.status != "executing":
+                return  # the stage ended under it (_abandon_live normally got here first)
+            if any(x["status"] == "held" for x in m.operator_messages):
+                # The operator spoke while this planning ran: the landed proposal is never shown; one feedback
+                # replan carries every held message (they are delivered when it starts).
+                m.planning_log[-1] = {**m.planning_log[-1], "superseded_by_message": True}
+                m.revising = self._brief(out.proposal)
+                self.log("planning", "Operator message arrived during planning; the landed proposal is superseded "
+                                     "unseen and re-planned with it.")
+                self._spawn_planning("feedback", "feedback", live=live)
+                return
+            if live:
+                return self._apply_live(m, out.proposal, record, vres, alloc)
             self._apply_proposal(m, out.proposal, record, vres, alloc, phase, rev_kind, previous)
+
+    def _apply_live(self, m: Mission, proposal: PlanProposal, record: PlannerRecord,
+                    vres: Optional[ValidationResult], alloc) -> None:
+        """A live feedback proposal: a plan becomes a revision waiting for approval while the active revision
+        keeps running; anything else is noted on the messages and changes nothing."""
+        if proposal.disposition != "plan" or vres is None:
+            what = proposal.answer or proposal.clarification_question or proposal.summary
+            self._note_delivered(m, f"The planner did not re-plan ({proposal.disposition}: {what}); revision "
+                                    f"{m.active_revision} keeps running.")
+            self.log("planning", f"Live re-plan returned {str(proposal.disposition)[:40]}; revision "
+                                 f"{m.active_revision} keeps running.")
+            return
+        try:
+            self._make_revision(m, proposal, record, vres, alloc, "feedback", {})
+        except Exception as exc:  # noqa: BLE001 - the running revision is unaffected
+            self._live_failed(m, self._gen, f"Revision could not be built: {type(exc).__name__}: "
+                                            f"{str(exc)[:300]}", record, 1)
+
+    def _live_failed(self, m: Mission, gen: int, message: str, record: Optional[PlannerRecord], attempts: int):
+        """A live replan failed: the active revision keeps running; the messages say why and any held ones go
+        back to the queue for the next planning point."""
+        if gen != self._gen:
+            return
+        m.planning_log.append({"phase": "error", "planner": record.model_dump() if record else None,
+                               "error": message, "attempts": attempts, "live": True})
+        self._note_delivered(m, f"Planner error: {message[:200]}; revision {m.active_revision} keeps running.")
+        held = {x["id"] for x in m.operator_messages if x["status"] == "held"}
+        self._update_messages(m, held, status="queued")
+        self.log("planning", f"Live re-plan failed ({message[:200]}); revision {m.active_revision} keeps running.")
 
     @staticmethod
     def _previous_observation(m: Mission) -> Optional[ExecutionPlan]:
@@ -409,26 +649,31 @@ class Executive:
                                "error": message, "attempts": attempts})
         m.status = "planner_error"
         m.outcome = {"status": "planner_error", "reason": message}
+        self._close_messages(m, "planner error")  # fail closed: a held message never re-plans by itself
         self.log("planner_error", message)
 
     def _apply_proposal(self, m: Mission, proposal: PlanProposal, record: PlannerRecord,
                         vres: Optional[ValidationResult], alloc, phase: str, rev_kind: str,
                         previous: Optional[ExecutionPlan] = None) -> None:
+        # A feedback replan revises the current stage, so it ends the way that stage's planning would.
+        stage = m.stage_phase if phase == "feedback" else phase
         if proposal.disposition == "clarify":
             self._ask(m, proposal.clarification_question or "", proposal.clarification_options, phase,
                       issues=proposal.issues)
             return
         if proposal.disposition == "answer":
-            if phase == "initial" or phase == "clarification_answer":
+            if stage == "initial" or stage == "clarification_answer":
                 m.status, m.outcome = "answered", {"status": "answered", "reason": proposal.answer}
+                self._close_messages(m, "mission answered")
                 self.log("answer", proposal.answer or "")
             else:
                 self._block(m, f"No continuation: {proposal.answer}")
             return
         if proposal.disposition == "reject":
             reason = proposal.summary + (f" ({'; '.join(proposal.issues)})" if proposal.issues else "")
-            if phase == "initial" or phase == "clarification_answer":
+            if stage == "initial" or stage == "clarification_answer":
                 m.status, m.outcome = "rejected", {"status": "rejected", "reason": reason}
+                self._close_messages(m, "planner rejected the request")
                 self.log("rejected", f"Planner rejected the request: {reason}")
             else:
                 self._block(m, f"No continuation: {reason}")
@@ -474,8 +719,15 @@ class Executive:
         )
         for old in m.revisions:  # only once the new revision exists
             if old.status == "awaiting_approval" or old.status == "invalid":
-                old.status = "superseded"
+                self._supersede(old, "operator_message" if kind == "feedback" else "replanned")
+            if old.status == "superseded" and old.superseded_by is None \
+                    and old.superseded_reason in ("operator_message", "replanned"):
+                old.superseded_by = plan.revision
         m.revisions.append(plan)
+        if kind != "edit":  # messages delivered to this planning were consumed by this revision
+            ids = {x["id"] for x in m.operator_messages
+                   if x["status"] == "delivered" and x["delivered_to_revision"] is None}
+            self._update_messages(m, ids, delivered_to_revision=plan.revision)
         self.log("revision", f"Revision {plan.revision} ({kind}, {proposal.scope}) proposed by {record.label}; "
                  f"validation {'passed' if plan.validation.ok else 'FAILED'}.",
                  findings=[f.model_dump() for f in plan.validation.findings])
@@ -490,7 +742,8 @@ class Executive:
     async def approve(self, revision: int, proposal_hash: str) -> ExecutionPlan:
         async with self.lock:
             m = self._require_mission()
-            if m.status != "awaiting_approval":
+            live = m.status == "executing" and self._pending_live(m) is not None
+            if m.status != "awaiting_approval" and not live:
                 raise ExecError(f"Mission is {m.status}, not awaiting approval.")
             plan = self._latest(m, revision)
             if plan.proposal_hash != proposal_hash:
@@ -507,6 +760,18 @@ class Executive:
                 self.log("approval", f"Approval of revision {revision} refused: state changed since validation.")
                 raise ExecError("State changed since validation; re-plan required (stale approval).", 409,
                                 [f.model_dump() for f in vres.report.findings])
+            old = self._active_plan(m) if live else None
+            if old is not None:
+                # Replace the running revision: its never-dispatched tasks are superseded (not failed);
+                # dispatched ones finish, and the stage ends once (_tick waits for every live attempt).
+                for t in old.tasks:
+                    ort = m.tasks[f"{old.revision}:{t.task_id}"]
+                    if ort.state == "pending":
+                        ort.state = "superseded"
+                self._supersede(old, "operator_message")
+                old.superseded_by = revision
+                self.log("revision", f"Revision {old.revision} superseded by {revision}; its dispatched tasks "
+                                     "finish, the rest never run.")
             plan.status = "executing"
             plan.approved_at = self.clock()
             plan.approved_by = "operator"
@@ -514,8 +779,9 @@ class Executive:
                 m.canonical_goals = list(proposal.mission_goals)
             m.active_revision = revision
             m.status = "executing"
-            if proposal.scope == "observation_stage" or plan.kind in ("continuation", "initial"):
-                m.stage_count += 1
+            kind = m.stage_rev_kind if plan.kind == "feedback" else plan.kind
+            if not live and (proposal.scope == "observation_stage" or kind in ("continuation", "initial")):
+                m.stage_count += 1  # a live replacement is the same stage, already counted
             for t in plan.tasks:
                 m.tasks[f"{revision}:{t.task_id}"] = TaskRuntime(t.task_id, revision, t.robot_id)
             if plan.preview_diff is not None and plan.preview_diff.previous_revision <= len(m.revisions):
@@ -527,12 +793,20 @@ class Executive:
     async def reject(self, revision: int, reason: str = "") -> None:
         async with self.lock:
             m = self._require_mission()
+            if m.status == "executing" and self._pending_live(m) is not None:
+                # Rejecting a live replan only drops it: the running revision continues unchanged.
+                plan = self._latest(m, revision)
+                plan.status = "rejected"
+                self.log("approval", f"Operator rejected live revision {revision}; revision {m.active_revision} "
+                                     f"keeps running. {reason}".strip())
+                return
             if m.status != "awaiting_approval":
                 raise ExecError(f"Mission is {m.status}, not awaiting approval.")
             plan = self._latest(m, revision)
             plan.status = "rejected"
             m.status = "rejected"
             m.outcome = {"status": "rejected", "reason": f"Operator rejected revision {revision}. {reason}".strip()}
+            self._close_messages(m, "mission rejected")
             self.log("approval", m.outcome["reason"])
 
     async def edit(self, revision: int, edits: list[dict]) -> ExecutionPlan:
@@ -574,7 +848,8 @@ class Executive:
                 proposal = PlanProposal.model_validate(data)
             except Exception as exc:  # noqa: BLE001
                 raise ExecError(f"Edited plan is not a valid proposal: {exc}", 400) from exc
-            if _hash(proposal.model_dump(exclude=HASH_EXCLUDED)) == base.proposal_hash                     and constraints == base.operator_constraints:
+            if _hash(proposal.model_dump(exclude=HASH_EXCLUDED)) == base.proposal_hash \
+                    and constraints == base.operator_constraints:
                 raise ExecError("Edit changes nothing; no new revision was made.", 400)
             await self.refresh_status()
             alloc = self.allocator.allocate(proposal, self.robots, constraints)
@@ -613,6 +888,8 @@ class Executive:
             if m.status in TERMINAL_MISSION:
                 raise ExecError(f"Mission already {m.status}.")
             self._gen += 1  # discard in-flight planning results
+            self._abandon_live(m)
+            self._close_messages(m, "mission stopped")
             active = [a for a in self.attempts.values() if a.status not in TERMINAL_STATUSES]
             for rt in m.tasks.values():
                 if rt.state == "pending":
@@ -741,7 +1018,10 @@ class Executive:
                          f" {receipt.detail}")
                 await self._on_task_failure(m, rt, status)
                 return
-        if all(m.tasks[f"{plan.revision}:{t.task_id}"].state in TERMINAL_STATUSES | {"skipped"} for t in plan.tasks):
+        # The stage ends once: every task of the active revision is done AND no attempt of any revision is
+        # still live (a revision replaced mid-stage leaves its dispatched tasks running; their results count).
+        if all(m.tasks[f"{plan.revision}:{t.task_id}"].state in TERMINAL_STATUSES | {"skipped", "superseded"}
+               for t in plan.tasks) and not any(a.status not in TERMINAL_STATUSES for a in self.attempts.values()):
             await self._finish_revision(m, plan)
 
     def _record_command(self, envelope: dict, attempt_no: int) -> Optional[str]:
@@ -826,6 +1106,13 @@ class Executive:
             self.log("reconcile", f"Late result for revision {att.revision} reconciled without advancing the plan.")
             if m.status == "recovering":
                 await self._maybe_recover(m)
+            elif m.status == "executing":
+                # A task of a revision replaced mid-stage settled: an uncertain outcome stops the stage like any
+                # other; otherwise its robot is free again and the stage-end check may now pass.
+                if ev.status == "uncertain" and rt is not None:
+                    await self._on_task_failure(m, rt, "uncertain")
+                else:
+                    await self._tick()
             return
         if ev.status in ("failed", "rejected", "uncertain"):
             await self._on_task_failure(m, rt, ev.status)
@@ -882,6 +1169,7 @@ class Executive:
     # ===================================================== failure/recovery
     async def _on_task_failure(self, m: Mission, rt: TaskRuntime, status: str, cancel_siblings: bool = True) -> None:
         plan = self._active_plan(m)
+        self._abandon_live(m)  # the stage ended; recovery planning sees any delivered feedback
         for other in m.tasks.values():
             if other.revision == plan.revision and other.state == "pending":
                 other.state = "skipped"
@@ -907,6 +1195,7 @@ class Executive:
             return
         if m.outcome and m.outcome.get("status") == "blocked":
             m.status = "blocked"
+            self._close_messages(m, "mission blocked")
             self.log("blocked", m.outcome["reason"])
             return
         if m.recovery_used:
@@ -922,14 +1211,24 @@ class Executive:
         self.log("recovery", "Requesting one bounded recovery proposal.", failure=failure)
         self._spawn_planning("recovery", "recovery", failure=failure)
 
-    def _spawn_planning(self, phase: str, kind: str, **kw: Any) -> None:
+    def _spawn_planning(self, phase: str, kind: str, live: bool = False, **kw: Any) -> None:
+        gen = self._gen
+
         async def run():
             try:
-                await self._plan(phase, kind, **kw)
+                await self._plan(phase, kind, live=live, gen=gen, **kw)
             except Exception as exc:  # noqa: BLE001
                 if self.mission:
-                    self._planner_failed(self.mission, self._gen, f"{type(exc).__name__}: {exc}", None, 0)
-        self._planning = asyncio.create_task(run())
+                    fail = self._live_failed if live else self._planner_failed
+                    fail(self.mission, gen, f"{type(exc).__name__}: {exc}", None, 0)
+            finally:
+                if live and self._live is asyncio.current_task():
+                    self._live = None
+        task = asyncio.create_task(run())
+        if live:
+            self._live = task
+        else:
+            self._planning = task
 
     def _ask(self, m: Mission, question: str, options: list[str], phase: str, **data: Any) -> None:
         """Put a question to the operator, or end the mission once the clarify budget is spent."""
@@ -943,8 +1242,10 @@ class Executive:
         self.log("clarification", question, **({"options": opts} if opts else {}), **data)
 
     def _block(self, m: Mission, reason: str) -> None:
+        self._abandon_live(m)
         m.status = "blocked"
         m.outcome = {"status": "blocked", "reason": reason}
+        self._close_messages(m, "mission blocked")
         self.log("blocked", reason)
 
     # ========================================================== evaluation
@@ -998,6 +1299,7 @@ class Executive:
         return " ".join(parts)
 
     async def _finish_revision(self, m: Mission, plan: ExecutionPlan) -> None:
+        self._abandon_live(m)  # a live replan of a finished stage is moot; its messages reach the next step
         plan.status = "finished"
         m.status = "evaluating"
         m.history.append(f"rev {plan.revision} ({plan.proposal.scope}) finished: {plan.proposal.summary}")
@@ -1005,6 +1307,7 @@ class Executive:
         if goals and all(self.goal_satisfied(g, m.created_at) for g in goals):
             m.status = "completed"
             m.outcome = {"status": "completed", "reason": self._completion_reason(goals, m.created_at)}
+            self._close_messages(m, "mission completed")
             self.log("completed", m.outcome["reason"])
             return
         for g in goals:
@@ -1070,6 +1373,7 @@ class Executive:
                 "clarifications": [dict(c) for c in m.clarifications],
                 "outcome": m.outcome, "history": m.history, "planning_log": m.planning_log,
                 "last_proposal": m.last_proposal,
+                "operator_messages": [dict(x) for x in m.operator_messages],
                 "revisions": [self._serialize_plan(m, p) for p in m.revisions],
             },
             "timeline": self.timeline[-300:],

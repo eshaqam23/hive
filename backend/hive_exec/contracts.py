@@ -373,7 +373,7 @@ class ExecutionPlan(Strict):
     schema_version: Literal["hive.execution-plan.v1"] = EXECUTION_PLAN_SCHEMA
     mission_id: str
     revision: int
-    kind: Literal["initial", "continuation", "recovery", "edit", "clarification"]
+    kind: Literal["initial", "continuation", "recovery", "edit", "clarification", "feedback"]
     proposal_hash: str
     run_id: str
     proposal: PlanProposal
@@ -396,6 +396,11 @@ class ExecutionPlan(Strict):
     # An observation stage's preview is answered once: the number of the approved revision that compared
     # itself with it (set at approval; None while unanswered).
     preview_consumed_by: Optional[int] = None
+    # Why a superseded revision can no longer run: "operator_message" (an operator message replaced it),
+    # "replanned" (a newer revision replaced it) or "stage_ended" (its stage ended before approval); the
+    # revision that replaced it, once one exists.
+    superseded_reason: Optional[Literal["operator_message", "replanned", "stage_ended"]] = None
+    superseded_by: Optional[int] = None
 
 
 class TaskEnvelope(Strict):

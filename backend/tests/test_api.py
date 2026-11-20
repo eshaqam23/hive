@@ -203,3 +203,36 @@ def test_http_env_bad_world_fails_loudly(monkeypatch):
     monkeypatch.setenv("HIVE_SIM_WORLD", "chaos")
     with pytest.raises(ValueError, match="HIVE_SIM_WORLD"):
         create_app(ExecSettings(default_planner="baseline", qwen=QwenSettings(base_url="")))
+
+
+# -- WS5: operator messages ------------------------------------------------------------------
+def test_http_operator_messages_queue_cancel_send_now_and_export():
+    with _client() as c:
+        r = c.post("/api/exec/mission/messages", json={"text": "use the camera only", "mode": "now"})
+        assert r.status_code == 409  # no mission yet
+        c.post("/api/exec/missions", json={"command": DEMO, "planner": "baseline"})
+        for bad in [{"text": "", "mode": "now"}, {"text": "x" * 501, "mode": "now"},
+                    {"text": "ok", "mode": "later"}, {"text": "ok", "mode": "now", "extra": 1}]:
+            assert c.post("/api/exec/mission/messages", json=bad).status_code in (400, 422)
+        s = c.post("/api/exec/mission/messages", json={"text": "use the camera only", "mode": "queue"}).json()
+        msg = s["message"]
+        assert set(msg) >= {"id", "text", "mode", "status", "created_at"} and msg["status"] == "queued"
+        assert s["mission"]["operator_messages"][0]["id"] == msg["id"]  # full state comes back for the UI
+        r = c.delete(f"/api/exec/mission/messages/{msg['id']}")
+        assert r.status_code == 200 and r.json()["message"]["status"] == "canceled"
+        assert c.delete(f"/api/exec/mission/messages/{msg['id']}").status_code == 409
+        assert c.delete("/api/exec/mission/messages/msg-404").status_code == 404
+        msg = c.post("/api/exec/mission/messages", json={"text": "use the camera only", "mode": "queue"}).json()["message"]
+        r = c.post(f"/api/exec/mission/messages/{msg['id']}/send-now")
+        assert r.status_code == 200 and r.json()["message"]["status"] == "delivered"
+        s = _wait(c, {"awaiting_approval"})
+        revs = s["mission"]["revisions"]
+        assert revs[0]["status"] == "superseded" and revs[0]["superseded_reason"] == "operator_message"
+        assert revs[-1]["kind"] == "feedback" and {t["robot_id"] for t in revs[-1]["tasks"]} == {"camera_01"}
+        assert c.delete(f"/api/exec/mission/messages/{msg['id']}").status_code == 409  # delivered
+        rows = c.get("/api/exec/export").json()["mission"]["operator_messages"]
+        assert [(x["status"], x["delivered_to_revision"]) for x in rows] == [("canceled", None), ("delivered", 2)]
+        c.post("/api/exec/cancel")
+        _wait(c, {"canceled"})
+        r = c.post("/api/exec/mission/messages", json={"text": "hello", "mode": "queue"})
+        assert r.status_code == 409 and "new mission" in r.json()["error"]
