@@ -355,6 +355,25 @@ def test_probe_and_planning_calls_send_the_same_num_ctx_for_a_row():
     assert ping["options"]["num_predict"] == wire.PROBE_MAX_TOKENS  # the output limit still differs; the window must not
 
 
+# -- WS5 H3: num_ctx and num_predict never exceed the planner's total window ----------------
+def test_ollama_num_ctx_and_num_predict_are_clamped_to_the_total_window():
+    from hive_exec.context import RESERVED_OUTPUT_TOKENS, TOTAL_WINDOW_TOKENS
+
+    row = _ollama_row(131072)  # the Field allows it; unclamped it asked Ollama for num_ctx 140288
+    planning = wire.chat_body(row, "SYSTEM", "USER", SCHEMA)
+    assert planning["options"]["num_ctx"] == TOTAL_WINDOW_TOKENS == 12288
+    assert planning["options"]["num_predict"] <= RESERVED_OUTPUT_TOKENS == 3072
+    ping = wire.chat_body(row, "", "ping", None, max_tokens=wire.PROBE_MAX_TOKENS)
+    probe = wire.chat_body(row, "SYSTEM", "USER", SCHEMA, probe=True, max_tokens=wire.PROBE_MAX_TOKENS)
+    assert planning["options"]["num_ctx"] == ping["options"]["num_ctx"] == probe["options"]["num_ctx"] == 12288
+    assert ping["options"]["num_predict"] == wire.PROBE_MAX_TOKENS <= 3072
+
+
+def test_ollama_small_max_tokens_keeps_todays_window():
+    body = wire.chat_body(_ollama_row(512), "SYSTEM", "USER", SCHEMA)
+    assert body["options"]["num_ctx"] == 9728 and body["options"]["num_predict"] == 512
+
+
 @pytest.mark.parametrize("pid", ["arc", "ollama-json"])
 def test_only_ollama_bodies_have_num_ctx_in_options(pid):
     make_store([pid])

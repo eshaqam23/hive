@@ -13,7 +13,7 @@ from typing import Any, Optional
 import httpx
 from pydantic import ValidationError
 
-from ..context import MAX_INPUT_TOKENS
+from ..context import MAX_INPUT_TOKENS, RESERVED_OUTPUT_TOKENS, TOTAL_WINDOW_TOKENS
 from ..contracts import plan_proposal_json_schema
 from .providers import ProviderRow, key_hint
 
@@ -28,8 +28,9 @@ def ollama_num_ctx(row: ProviderRow) -> int:
 
     Without it Ollama falls back to its own default (often 4096) and silently cuts a long prompt from the
     front. It depends on the row only, never on the call (probe or planning): a different num_ctx makes
-    Ollama reload the model."""
-    return MAX_INPUT_TOKENS + row.sampling.max_tokens
+    Ollama reload the model. Clamped to the planner's total window (TOTAL_WINDOW_TOKENS): a row max_tokens of
+    131072 (the Field allows it) would otherwise ask for a window that can exhaust the desktop GPU."""
+    return min(MAX_INPUT_TOKENS + row.sampling.max_tokens, TOTAL_WINDOW_TOKENS)
 
 
 def planning_schema() -> dict:
@@ -77,7 +78,8 @@ def chat_body(row: ProviderRow, system: str, user: str, schema: Optional[dict], 
         options: dict[str, Any] = {"temperature": temperature, "top_p": s.top_p}
         if s.seed is not None:
             options["seed"] = s.seed
-        options["num_predict"] = limit  # Ollama's name for the output-token limit
+        # Ollama's name for the output-token limit; capped at the reserved output so input + output fit num_ctx.
+        options["num_predict"] = min(limit, RESERVED_OUTPUT_TOKENS)
         options["num_ctx"] = ollama_num_ctx(row)  # the same on every request for this row
         if s.top_k is not None:
             options["top_k"] = s.top_k
