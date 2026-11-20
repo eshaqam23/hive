@@ -207,6 +207,17 @@ describe("edit plan", () => {
       edits: [{ op: "set_param", task_id: "t1", field: "object_query", value: { label: "red_block" } }],
     });
   });
+
+  it("treats a label named like an Object prototype key as having no profile", async () => {
+    const st = clone(awaiting);
+    st.mission.revisions[0].tasks[0].action.object_query = { label: "constructor" };
+    server.state = st;
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit plan" }));
+    const select = within(row("t1")).getByLabelText("object for T1");
+    expect(select.value).toBe("constructor");
+    expect(select.options[0].textContent).toBe("constructor (no profile - cannot carry)");
+  });
 });
 
 describe("recovery", () => {

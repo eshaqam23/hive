@@ -77,10 +77,11 @@ function revisionLabels(rev, state) {
   return [...(rev?.tasks || []).map((t) => queryLabel(t.action)), ...goals.map(queryLabel)];
 }
 function objectOptions(current, rev, state) {
-  const profiles = state?.catalog?.object_profiles || {};
+  // own keys only: `in` would also match prototype names such as "constructor"
+  const profiled = new Set(Object.keys(state?.catalog?.object_profiles || {}));
   const observed = (state?.world?.objects || []).map((o) => o?.label);
-  const labels = [...current, ...revisionLabels(rev, state), ...Object.keys(profiles), ...observed].filter((l) => typeof l === "string" && l !== "");
-  return [...new Set(labels)].map((k) => ({ value: k, label: `${k.replaceAll("_", " ")}${k in profiles ? "" : " (no profile - cannot carry)"}` }));
+  const labels = [...current, ...revisionLabels(rev, state), ...profiled, ...observed].filter((l) => typeof l === "string" && l !== "");
+  return [...new Set(labels)].map((k) => ({ value: k, label: `${k.replaceAll("_", " ")}${profiled.has(k) ? "" : " (no profile - cannot carry)"}` }));
 }
 
 function fieldOptions(field, catalog) {
