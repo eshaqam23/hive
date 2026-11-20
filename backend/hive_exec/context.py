@@ -24,10 +24,9 @@ MAX_INPUT_TOKENS = TOTAL_WINDOW_TOKENS - RESERVED_OUTPUT_TOKENS
 FEEDBACK_MAX_MESSAGES = 4
 FEEDBACK_MAX_CHARS = 1200  # text_width of the rendered form the prompt shows (ASCII-equivalent characters)
 FEEDBACK_TRUNCATED = " [truncated]"
-# Token estimate: ASCII at ~3.2 chars/token (JSON-heavy English); every non-ASCII code point at NON_ASCII_TOKENS
-# (Qwen's byte-level BPE: CJK and common emoji are 1-2 tokens; 2 is the conservative end of that range).
+# Token estimate: ASCII at ~3.2 chars/token (JSON-heavy English); every non-ASCII code point at one token per
+# UTF-8 byte (2-4): a byte-level BPE never needs more tokens than the bytes it encodes, so this is an upper bound.
 CHARS_PER_TOKEN = 3.2
-NON_ASCII_TOKENS = 2
 # Characters str.splitlines breaks on that json.dumps(ensure_ascii=False) leaves raw (it escapes the C0 ones),
 # plus lone surrogates (not encodable as UTF-8). They are written as \uXXXX escapes, so every JSON value stays on
 # its line and the prompt encodes.
@@ -46,10 +45,17 @@ def render_feedback(text: str) -> str:
     return safe_dumps(text)
 
 
+def _split(text: str) -> tuple[int, int]:
+    """(ASCII characters, UTF-8 bytes of the non-ASCII ones; a lone surrogate counts its 3 bytes)."""
+    ascii_n = len(text.encode("ascii", "ignore"))
+    return ascii_n, len(text.encode("utf-8", "surrogatepass")) - ascii_n
+
+
 def text_width(text: str) -> float:
-    """Length in ASCII-equivalent characters: a non-ASCII code point counts as NON_ASCII_TOKENS tokens' worth."""
-    wide = len(text) - len(text.encode("ascii", "ignore"))
-    return len(text) + wide * (NON_ASCII_TOKENS * CHARS_PER_TOKEN - 1)
+    """Length in ASCII-equivalent characters: each UTF-8 byte of a non-ASCII code point counts as one token's
+    worth (CHARS_PER_TOKEN characters)."""
+    ascii_n, wide_bytes = _split(text)
+    return ascii_n + wide_bytes * CHARS_PER_TOKEN
 
 
 class ContextBudgetExceeded(RuntimeError):
@@ -57,9 +63,10 @@ class ContextBudgetExceeded(RuntimeError):
 
 
 def estimate_tokens(text: str) -> int:
-    """Conservative estimate: ASCII at ~3.2 chars/token (unchanged), each non-ASCII code point NON_ASCII_TOKENS.
-    Not a tokenizer."""
-    return int(text_width(text) / CHARS_PER_TOKEN) + 1
+    """Conservative estimate: ASCII at ~3.2 chars/token (unchanged), one token per UTF-8 byte of each non-ASCII
+    code point. Not a tokenizer."""
+    ascii_n, wide_bytes = _split(text)
+    return int(ascii_n / CHARS_PER_TOKEN) + wide_bytes + 1
 
 
 @dataclass

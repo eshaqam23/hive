@@ -246,7 +246,8 @@ def test_http_operator_messages_queue_cancel_send_now_and_export():
         assert revs[-1]["kind"] == "feedback" and {t["robot_id"] for t in revs[-1]["tasks"]} == {"camera_01"}
         assert c.delete(f"/api/exec/mission/messages/{msg['id']}").status_code == 409  # delivered
         rows = c.get("/api/exec/export").json()["mission"]["operator_messages"]
-        assert [(x["status"], x["delivered_to_revision"]) for x in rows] == [("canceled", None), ("delivered", 2)]
+        # fix 3 (I1): applied only once revision 2 is approved; until then delivered with no revision
+        assert [(x["status"], x["delivered_to_revision"]) for x in rows] == [("canceled", None), ("delivered", None)]
         c.post("/api/exec/cancel")
         _wait(c, {"canceled"})
         r = c.post("/api/exec/mission/messages", json={"text": "hello", "mode": "queue"})

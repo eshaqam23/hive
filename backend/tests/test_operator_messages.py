@@ -213,7 +213,9 @@ async def test_a_message_during_clarification_is_the_answer(make_exec, mode):
     assert stub.contexts[1].phase == "clarification_answer"
     assert stub.contexts[1].operator_feedback == []  # it went in as the answer, not as feedback
     m = msg(ex, m["id"])
-    assert m["status"] == "delivered" and m["delivered_as"] == "answer" and m["delivered_to_revision"] == 1
+    assert m["status"] == "delivered" and m["delivered_as"] == "answer" and m["delivered_to_revision"] is None
+    await approve_latest(ex)  # I1: applied once the revision its planning used is approved
+    assert msg(ex, m["id"])["delivered_to_revision"] == 1
 
 
 # ================================================================ awaiting approval
@@ -234,8 +236,9 @@ async def test_now_while_awaiting_approval_supersedes_and_replans_with_feedback(
     assert ctx.phase == "feedback" and ctx.operator_feedback == ["Skip the inspection, just take a picture."]
     assert ctx.previous_proposal["revision"] == 1
     assert [t["task_id"] for t in ctx.previous_proposal["tasks"]] == ["t1", "t2"]
-    assert msg(ex, m["id"])["delivered_to_revision"] == 2
+    assert msg(ex, m["id"])["delivered_to_revision"] is None  # I1: not applied before an approval
     await approve_latest(ex)
+    assert msg(ex, m["id"])["delivered_to_revision"] == 2
     assert ex.mission.stage_count == 1  # the replacement is the same stage, counted once
     assert await wait_for(ex, DONE) in DONE
 
@@ -266,7 +269,9 @@ async def test_queued_message_is_delivered_at_the_next_continuation(make_exec):
     assert await wait_for(ex, {"awaiting_approval"} | DONE) == "awaiting_approval"
     assert rec.contexts[-1].phase == "continuation"
     assert rec.contexts[-1].operator_feedback == ["Approach the pickup zone slowly."]
-    assert msg(ex, m["id"])["status"] == "delivered" and msg(ex, m["id"])["delivered_to_revision"] == 2
+    assert msg(ex, m["id"])["status"] == "delivered" and msg(ex, m["id"])["delivered_to_revision"] is None
+    await approve_latest(ex)
+    assert msg(ex, m["id"])["delivered_to_revision"] == 2
 
 
 async def test_cancel_message_removes_a_queued_one_and_refuses_unknown_or_closed(make_exec):
@@ -303,8 +308,9 @@ async def test_messages_while_planning_are_held_and_the_landing_proposal_is_neve
     assert stub.contexts[1].operator_feedback == ["Skip the inspection.", "Just take a picture."]
     assert stub.contexts[1].previous_proposal["summary"] == "Inspect, then take a picture."
     assert ex.mission.planning_log[0].get("superseded_by_message") is True
-    assert {msg(ex, x["id"])["delivered_to_revision"] for x in (a, b)} == {1}
+    assert {msg(ex, x["id"])["delivered_to_revision"] for x in (a, b)} == {None}
     await approve_latest(ex)
+    assert {msg(ex, x["id"])["delivered_to_revision"] for x in (a, b)} == {1}
     assert ex.mission.stage_count == 1
 
 
@@ -355,8 +361,9 @@ async def test_now_while_executing_replans_live_and_approval_supersedes_only_und
     assert ex.mission.status == "executing" and rev1.status == "executing"
     assert rev2.kind == "feedback" and rev2.status == "awaiting_approval"
     assert stub.contexts[1].phase == "feedback" and stub.contexts[1].previous_proposal["revision"] == 1
-    assert msg(ex, m["id"])["delivered_to_revision"] == 2
+    assert msg(ex, m["id"])["delivered_to_revision"] is None
     await approve_latest(ex)
+    assert msg(ex, m["id"])["delivered_to_revision"] == 2
     assert rev1.status == "superseded" and rev1.superseded_by == 2
     assert rt(ex, 1, "t2").state == "superseded"  # never dispatched: superseded, not failed
     assert rt(ex, 1, "t1").state == "dispatched"  # dispatched: left to finish
@@ -542,6 +549,8 @@ async def test_state_and_export_carry_every_operator_message(make_exec):
     await ex.cancel_message(q["id"])
     await ex.post_message("now one", "now")
     await wait_for(ex, {"awaiting_approval"})
+    assert ex.state()["mission"]["operator_messages"][1]["delivered_to_revision"] is None
+    await approve_latest(ex)
     for view in (ex.state(), ex.export()):
         rows = view["mission"]["operator_messages"]
         assert [(r["text"], r["status"]) for r in rows] == [("queued one", "canceled"), ("now one", "delivered")]
@@ -664,10 +673,10 @@ LIVE = {"dispatched", "accepted", "running"}
 UNAPPLIED = "Mission ended before your message was applied; send it again as a new mission."
 
 
-async def _old_camera_and_new_lidar_running(gated, after):
+async def _old_camera_and_new_lidar_running(gated, after, gateway=None):
     """rev 1 t1 (inspect, camera_01) dispatched; a message re-plans live to rev 2 t1 (scan, lidar_01); approved."""
     stub = StubPlanner([OBSERVE_THEN_PICTURE, plan(SCAN("t1"), summary="Scan instead."), *after])
-    ex = await gated(stub, gateway=HoldingGateway)
+    ex = await gated(stub, gateway=gateway or HoldingGateway)
     await ex.create_mission("Look around")
     await approve_latest(ex)
     await until(lambda: rt(ex, 1, "t1").state == "dispatched")
@@ -764,6 +773,8 @@ async def test_f4_feedback_carried_into_a_continuation_names_the_revision_that_u
     assert await wait_for(ex, {"awaiting_approval"} | DONE) == "awaiting_approval"
     assert ex.mission.revisions[1].superseded_reason == "stage_ended"
     assert stub.contexts[2].phase == "continuation" and stub.contexts[2].operator_feedback == ["Just take a picture."]
+    assert msg(ex, m["id"])["delivered_to_revision"] is None  # rev 2 never ran; rev 3 is not approved yet
+    await approve_latest(ex)
     assert msg(ex, m["id"])["delivered_to_revision"] == 3
 
 
@@ -833,7 +844,8 @@ async def test_f5_a_held_message_falling_back_to_the_queue_says_why(gated):
     assert "model down" in msg(ex, a["id"])["note"]
     ex.gateway.release.set()
     assert await wait_for(ex, DONE) == "blocked"
-    assert msg(ex, b["id"])["status"] == "delivered" and "note" not in msg(ex, b["id"])  # stale note dropped
+    # the stale fallback note is dropped; the continuation's answer consumed B (fix 3, I2) and says so
+    assert msg(ex, b["id"])["status"] == "delivered" and msg(ex, b["id"])["note"] == "The planner answered."
 
 
 # ---------------------------------------------------------------- F2: rendered feedback budget
@@ -933,12 +945,12 @@ async def _two_live(gated, after=(PICTURE_ONLY, PICTURE_ONLY)):
     return ex, stub
 
 
-def _event(ex, rev, tid, robot, status, code=None, eid=None):
+def _event(ex, rev, tid, robot, status, code=None, eid=None, seq=900):
     from hive_exec.contracts import TaskEvent
 
     att = attempt_of(ex, rev, tid)
     return TaskEvent(event_id=eid or f"{tid}-{status}", run_id=ex.run_id, attempt_id=att.attempt_id, robot_id=robot,
-                     seq=900, status=status, error={"code": code, "message": "injected"} if code else None)
+                     seq=seq, status=status, error={"code": code, "message": "injected"} if code else None)
 
 
 async def test_fix2_recovery_names_the_original_failure_in_one_revision(gated):
@@ -990,6 +1002,8 @@ async def test_fix2_message_moves_to_the_revision_that_used_it_when_awaiting_app
     b = await ex.post_message("B: picture only", "now")
     await until(lambda: len(ex.mission.revisions) == 3)
     assert stub.contexts[-1].operator_feedback == ["A: camera only", "B: picture only"]
+    assert [msg(ex, x["id"])["delivered_to_revision"] for x in (a, b)] == [None, None]
+    await approve_latest(ex)
     assert [msg(ex, x["id"])["delivered_to_revision"] for x in (a, b)] == [3, 3]
 
 
@@ -1027,21 +1041,34 @@ SHAPES = {
 }
 
 
+# fix 3: with one token per UTF-8 byte, the 1000-character commands and the 3x500 emoji answers no longer fit:
+# (first pass fits, repair pass fits). Over the budget the planner refuses (ContextBudgetExceeded): fail closed.
+SHAPE_FITS = {
+    "emoji_command_500_and_emoji_feedback": (True, True),
+    "emoji_command_1000": (False, False),
+    "cjk_command_1000": (True, False),
+    "emoji_answers_3x500": (False, False),
+    "emoji_feedback_4x500": (True, True),
+    "cjk_feedback_4x500": (True, True),
+}
+
+
 @pytest.mark.parametrize("shape", sorted(SHAPES))
-def test_v34_wide_untrusted_text_stays_under_the_guard(shape):
+def test_v34_wide_untrusted_text_stays_under_the_guard_or_fails_closed(shape):
     from hive_exec.context import MAX_INPUT_TOKENS
 
     first, repair = _sent_passes(SHAPES[shape]())
-    assert first < MAX_INPUT_TOKENS and repair < MAX_INPUT_TOKENS, (shape, first, repair)
+    assert (first <= MAX_INPUT_TOKENS, repair <= MAX_INPUT_TOKENS) == SHAPE_FITS[shape], (shape, first, repair)
 
 
-def test_v34_estimate_is_unchanged_for_ascii_and_at_least_one_token_per_wide_char():
-    from hive_exec.context import NON_ASCII_TOKENS, estimate_tokens
+def test_v34_estimate_is_unchanged_for_ascii_and_one_token_per_utf8_byte_of_wide_text():
+    from hive_exec.context import estimate_tokens
 
     assert estimate_tokens("a" * 320) == 101 and estimate_tokens('{"k":"v"}' * 40) == int(360 / 3.2) + 1
-    assert NON_ASCII_TOKENS >= 1
-    for ch in (E, chr(0x4E00), "\u00e9"):
-        assert estimate_tokens(ch * 100) >= 100 * NON_ASCII_TOKENS
+    # fix 3: a non-ASCII code point weighs its UTF-8 byte length (byte-level BPE never needs more tokens than bytes)
+    for ch, size in ((chr(0xE9), 2), (chr(0x4E00), 3), (E, 4), (chr(0xD800), 3)):
+        assert estimate_tokens(ch * 100) == 100 * size + 1, ch
+    assert estimate_tokens("ab" + chr(0x4E00)) == int(2 / 3.2) + 3 + 1
 
 
 BREAKERS = "\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
@@ -1118,7 +1145,9 @@ async def test_fix2_a_failure_after_an_operator_stop_still_stops_the_tasks_left_
     await until(lambda: rt(ex, 1, "t3").state == "canceled")
     assert await wait_for(ex, {"awaiting_approval"} | DONE) == "awaiting_approval"
     assert [c.phase for c in stub.contexts].count("recovery") == 1
-    assert stub.contexts[-1].failure["task_id"] == "t1"  # the first failure of the stage (the operator stop)
+    # fix 3: a real fault outranks the operator stop as the recovery failure; the stop stays a history line
+    assert stub.contexts[-1].failure["task_id"] == "t2"
+    assert "rev 1: t1 canceled (operator_stop)" in ex.mission.history
     assert "rev 1: t3 on gripper_01 canceled (stopped after t2 failed)" in ex.mission.history
 
 
@@ -1134,3 +1163,218 @@ async def test_fix2_message_of_a_revision_that_ran_and_was_then_replaced_stays_d
     assert await wait_for(ex, DONE) == "completed"
     assert (msg(ex, a["id"])["status"], msg(ex, a["id"])["delivered_to_revision"]) == ("delivered", 2)
     assert (msg(ex, b["id"])["status"], msg(ex, b["id"])["delivered_to_revision"]) == ("delivered", 3)
+
+
+# ================================================================ WS5 fix batch 3
+# Message invariant. I1: applied to the FIRST approved revision whose planning context included the message.
+# I2: a planning reply that is not a plan consumes it (delivered, no revision, a note naming the reply).
+# I3: when the mission ends, every delivered message neither applied nor consumed is canceled with UNAPPLIED.
+def _tags(ex, *ms):
+    return [(msg(ex, x["id"])["status"], msg(ex, x["id"])["delivered_to_revision"]) for x in ms]
+
+
+async def _two_live_messages(gated):
+    """executing; A now -> rev 2 live awaiting; B now -> rev 2 superseded -> rev 3 (feedback A + B)."""
+    p1 = dict(plan(INSPECT("t1"), PICTURE("t2", ["t1"])), mission_goals=[FIND])
+    stub = StubPlanner([p1, PICTURE_ONLY, PICTURE_ONLY])
+    ex = await gated(stub, "known")
+    await ex.create_mission("Find the red block")
+    await approve_latest(ex)
+    await until(lambda: rt(ex, 1, "t1").state == "dispatched")
+    a = await ex.post_message("A: also check the corridor", "now")
+    await until(lambda: len(ex.mission.revisions) == 2)
+    b = await ex.post_message("B: picture only", "now")
+    await until(lambda: len(ex.mission.revisions) == 3)
+    assert stub.contexts[-1].operator_feedback == ["A: also check the corridor", "B: picture only"]
+    assert ex.mission.revisions[1].status == "superseded"
+    return ex, stub, a, b
+
+
+async def test_fix3_i1_two_live_messages_apply_to_the_approved_revision_that_had_both(gated):
+    ex, stub, a, b = await _two_live_messages(gated)  # probe3 test_g
+    assert _tags(ex, a, b) == [("delivered", None)] * 2  # nothing approved has used them yet
+    await approve_latest(ex)
+    assert _tags(ex, a, b) == [("delivered", 3)] * 2
+    ex.gateway.release.set()
+    assert await wait_for(ex, DONE) == "completed"
+    assert _tags(ex, a, b) == [("delivered", 3)] * 2
+
+
+async def test_fix3_i3_two_live_messages_whose_revision_never_ran_are_canceled(gated):
+    ex, stub, a, b = await _two_live_messages(gated)
+    ex.gateway.release.set()  # rev 3 is never approved; the stage (and mission) completes from rev 1
+    assert await wait_for(ex, DONE) == "completed"
+    for x in (a, b):
+        assert msg(ex, x["id"])["status"] == "canceled" and msg(ex, x["id"])["note"] == UNAPPLIED
+
+
+REJECT = {"schema_version": V1, "disposition": "reject", "summary": "That cannot be done safely."}
+
+
+@pytest.mark.parametrize("reply,status,note", [
+    (ANSWER, "answered", "The planner answered."),
+    (REJECT, "rejected", "The planner rejected the request."),
+    (ask(), "clarification", "The planner asked a question."),
+])
+async def test_fix3_i2_a_reply_without_a_plan_consumes_the_message(make_exec, reply, status, note):
+    ex, stub = await stub_exec(make_exec, [OBSERVE_THEN_PICTURE, reply])
+    await ex.create_mission("Look around")
+    m = await ex.post_message("What can the gripper do?", "now")
+    assert await wait_for(ex, {status, "awaiting_approval"} | DONE) == status
+    got = msg(ex, m["id"])
+    assert (got["status"], got["delivered_to_revision"], got.get("note")) == ("delivered", None, note)
+
+
+async def test_fix3_i1_a_message_answered_by_a_question_applies_to_the_revision_after_the_answer(make_exec):
+    ex, stub = await stub_exec(make_exec, [OBSERVE_THEN_PICTURE, ask(), PICTURE_ONLY])
+    await ex.create_mission("Look around")
+    m = await ex.post_message("Only one picture.", "now")
+    assert await wait_for(ex, {"clarification"} | DONE) == "clarification"
+    await ex.answer_clarification("the red block")
+    assert ex.mission.status == "awaiting_approval"
+    assert stub.contexts[-1].operator_feedback == ["Only one picture."]
+    await approve_latest(ex)
+    assert _tags(ex, m) == [("delivered", ex.mission.revisions[-1].revision)]
+
+
+@pytest.mark.parametrize("end", ["stop", "reject"])
+async def test_fix3_i3_a_revision_ended_before_approval_cancels_its_message(make_exec, end):
+    ex, stub = await stub_exec(make_exec, [OBSERVE_THEN_PICTURE, PICTURE_ONLY])
+    await ex.create_mission("Look around")
+    m = await ex.post_message("Just take a picture.", "now")
+    assert await wait_for(ex, {"awaiting_approval"} | DONE) == "awaiting_approval"
+    if end == "stop":
+        await ex.cancel()
+    else:
+        await ex.reject(2, "no")
+    assert await wait_for(ex, DONE) in DONE
+    assert msg(ex, m["id"])["status"] == "canceled" and msg(ex, m["id"])["note"] == UNAPPLIED
+
+
+# ---------------------------------------------------------------- item 2: old-revision results while recovering
+class NoConfirmGateway(HoldingGateway):
+    """A cancel is never confirmed: the robot's own report is the attempt's only result."""
+
+    async def cancel(self, run_id, attempt_id):
+        return None
+
+
+async def _rev2_failed_rev1_still_live(gated, gate_calls=()):
+    ex, stub = await _old_camera_and_new_lidar_running(gated, [PICTURE_ONLY], gateway=NoConfirmGateway)
+    stub.gate_calls = set(gate_calls)
+    await ex.handle_event(_event(ex, 2, "t1", "lidar_01", "failed", "lidar_fault", eid="rev2-t1-failed"))
+    assert ex.mission.status == "recovering" and attempt_of(ex, 1, "t1").status in LIVE
+    return ex, stub
+
+
+async def test_fix3_old_revision_uncertain_while_recovering_blocks(gated):
+    ex, stub = await _rev2_failed_rev1_still_live(gated)  # probe3 test_p6
+    await ex.handle_event(_event(ex, 1, "t1", "camera_01", "uncertain", "lost"))
+    assert await wait_for(ex, {"awaiting_approval"} | DONE) == "blocked"
+    assert "uncertain" in ex.mission.outcome["reason"] and "camera_01" in ex.mission.outcome["reason"]
+    assert [c.phase for c in stub.contexts] == ["initial", "feedback"]  # no recovery planning
+    assert "rev 1 (replaced by rev 2): t1 on camera_01 uncertain (lost)" in ex.mission.history
+
+
+async def test_fix3_old_revision_failure_while_recovering_is_a_history_line(gated):
+    ex, stub = await _rev2_failed_rev1_still_live(gated)
+    await ex.handle_event(_event(ex, 1, "t1", "camera_01", "failed", "camera_fault"))
+    assert await wait_for(ex, {"awaiting_approval"} | DONE) == "awaiting_approval"
+    assert "rev 1 (replaced by rev 2): t1 on camera_01 failed (camera_fault)" in ex.mission.history
+    assert [c.phase for c in stub.contexts].count("recovery") == 1
+    f = stub.contexts[-1].failure
+    assert (f["task_id"], f["robot_id"]) == ("t1", "lidar_01")  # the first fault stays the recovery failure
+
+
+@pytest.mark.parametrize("when", ["recovery_planning", "recovery_pending"])
+async def test_fix3_uncertain_during_recovery_planning_blocks_and_no_revision_is_approvable(gated, when):
+    ex, stub = await _rev2_failed_rev1_still_live(gated, gate_calls={2} if when == "recovery_planning" else ())
+    await ex.handle_event(_event(ex, 1, "t1", "camera_01", "failed", "camera_fault"))
+    try:
+        if when == "recovery_planning":
+            await asyncio.wait_for(stub.entered.wait(), 5)
+            assert ex.mission.status == "planning"
+        else:
+            assert await wait_for(ex, {"awaiting_approval"} | DONE) == "awaiting_approval"
+        # No event order reaches this today (recovery starts only once every attempt settled): force rev 1 t1
+        # live again, so the guard for an uncertain result landing now is exercised.
+        attempt_of(ex, 1, "t1").status = "running"
+        await ex.handle_event(_event(ex, 1, "t1", "camera_01", "uncertain", "lost", eid="late-u", seq=901))
+        assert ex.mission.status == "blocked" and "uncertain" in ex.mission.outcome["reason"]
+    finally:
+        stub.release.set()  # never leave the gated planning waiting (teardown would hang)
+    await asyncio.sleep(0.05)
+    assert ex.mission.status == "blocked"
+    assert not any(p.status == "awaiting_approval" for p in ex.mission.revisions)
+    latest = ex.mission.revisions[-1]
+    with pytest.raises(ExecError) as e:
+        await ex.approve(latest.revision, latest.proposal_hash)
+    assert e.value.status == 409
+
+
+# ---------------------------------------------------------------- item 3: a real fault outranks an operator stop
+async def test_fix3_a_robot_side_cancel_after_an_operator_stop_is_the_recovery_failure(gated):
+    nav = task("t3", "navigate_to", "gripper_01", binding="carrier", location_id="pickup_zone",
+               route_id="pickup_corridor")
+    p1 = dict(plan(INSPECT("t1"), SCAN("t2"), nav), rationale=["gripper_01 drives the known corridor by dead reckoning"])
+    stub = StubPlanner([p1, PICTURE_ONLY])
+    ex = await gated(stub, "known", gateway=ThreeHoldingGateway)
+    await ex.create_mission("Look around")
+    await approve_latest(ex)
+    await until(lambda: all(rt(ex, 1, t).state in LIVE for t in ("t1", "t2", "t3")))
+    await ex.cancel_task("t1", revision=1)
+    await until(lambda: rt(ex, 1, "t1").state == "canceled")
+    await ex.handle_event(_event(ex, 1, "t2", "lidar_01", "canceled"))  # robot-side, nobody asked for it
+    await until(lambda: rt(ex, 1, "t3").state == "canceled")
+    assert await wait_for(ex, {"awaiting_approval"} | DONE) == "awaiting_approval"
+    f = stub.contexts[-1].failure
+    assert (f["task_id"], f["robot_id"]) == ("t2", "lidar_01")
+    assert "rev 1: t1 canceled (operator_stop)" in ex.mission.history
+    assert "rev 1: t3 on gripper_01 canceled (stopped after t2 failed)" in ex.mission.history
+
+
+# ---------------------------------------------------------------- item 4: context overflow
+BUDGET_REASON = ("This request is too long for the planner. Start a new mission with a shorter command or fewer "
+                 "messages.")
+
+
+async def test_fix3_context_overflow_is_a_readable_planner_error_that_cannot_be_retried(make_exec):
+    from hive_exec.context import ContextBudgetExceeded
+
+    ex, stub = await stub_exec(make_exec, [ContextBudgetExceeded("Estimated 9999 input tokens exceeds the budget")])
+    await ex.create_mission("Look around")
+    assert ex.mission.status == "planner_error"
+    assert ex.mission.outcome == {"status": "planner_error", "reason": BUDGET_REASON, "retryable": False}
+    assert ex.state()["mission"]["outcome"]["retryable"] is False
+    assert "9999" in ex.mission.planning_log[-1]["error"]  # the technical detail stays in the planning log
+    with pytest.raises(ExecError) as e:
+        await ex.replan()
+    assert e.value.status == 409 and len(stub.contexts) == 1
+
+
+async def test_fix3_other_planner_errors_can_still_be_retried(make_exec):
+    ex, stub = await stub_exec(make_exec, [PlannerError("model down"), OBSERVE_THEN_PICTURE])
+    await ex.create_mission("Look around")
+    assert ex.mission.status == "planner_error" and ex.mission.outcome.get("retryable", True) is True
+    await ex.replan()
+    assert ex.mission.status == "awaiting_approval"
+
+
+async def test_fix3_a_live_replan_overflow_says_so_on_the_message(gated):
+    from hive_exec.context import ContextBudgetExceeded
+
+    ex, stub = await _find_mission(gated, live_reply=ContextBudgetExceeded("Estimated 9999 input tokens"))
+    m = await ex.post_message("Also check the corridor.", "now")
+    await until(lambda: "note" in msg(ex, m["id"]))
+    assert BUDGET_REASON in msg(ex, m["id"])["note"] and ex.mission.status == "executing"
+
+
+# ---------------------------------------------------------------- item 6: lone surrogate in the previous output
+def test_fix3_a_lone_surrogate_in_the_previous_output_is_replaced_before_the_repair_prompt():
+    from hive_exec.planner.prompt import fit_user_prompt, user_prompt
+
+    ctx = _light_answers_context("red")
+    bad = '{"disposition": "plan", "summary": "x' + chr(0xD800) + 'y"}'
+    for text in (user_prompt(ctx, ["e1: broken"], bad), fit_user_prompt(ctx, ["e1: broken"], bad, 0)):
+        text.encode("utf-8")  # raised UnicodeEncodeError before the fix
+        assert ("x" + chr(0xFFFD) + "y") in text and chr(0xD800) not in text
