@@ -41,6 +41,8 @@ class PlanningContext:
     stage_history: list[str] = field(default_factory=list)
     failure: Optional[dict[str, Any]] = None
     clarification: Optional[dict[str, str]] = None
+    # Every answered question of this mission, oldest first: {question, options, answer, phase}.
+    clarifications: list[dict[str, Any]] = field(default_factory=list)
 
     def to_json(self) -> str:
         return json.dumps(self.__dict__, separators=(",", ":"), sort_keys=True)
@@ -56,6 +58,7 @@ def build_context(
     stage_history: Optional[list[str]] = None,
     failure: Optional[dict[str, Any]] = None,
     clarification: Optional[dict[str, str]] = None,
+    clarifications: Optional[list[dict[str, Any]]] = None,
 ) -> PlanningContext:
     robot_rows = []
     for rid, s in sorted(robots.items()):
@@ -105,4 +108,5 @@ def build_context(
         stage_history=list(stage_history or []),
         failure=failure,
         clarification=clarification,
+        clarifications=[dict(c) for c in (clarifications or [])],
     )

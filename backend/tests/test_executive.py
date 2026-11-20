@@ -16,7 +16,7 @@ from hive_exec.planner.baseline import BaselinePlanner
 
 from .conftest import DEMO, approve_latest, wait_for
 
-DONE = {"completed", "blocked", "rejected", "canceled", "planner_error"}
+DONE = {"completed", "blocked", "rejected", "canceled", "planner_error", "answered"}
 
 
 def robots_with_attempts(ex):
@@ -501,3 +501,224 @@ async def test_synapse_reset_passes_world_and_seed_through():
 
     gw._request = old_fleet
     assert await gw.reset("run-y", world="random", seed=5) == {"world": "fixed", "seed": None}
+
+
+# ================================================== WS2: answer, find-only report, clarification rounds
+
+from hive_exec.contracts import Observation, PlannerRecord, PlanProposal  # noqa: E402
+from hive_exec.executive import TERMINAL_MISSION  # noqa: E402
+from hive_exec.planner.base import Planner, PlannerOutput  # noqa: E402
+
+V1 = "hive.plan-proposal.v1"
+ANSWER = {"schema_version": V1, "disposition": "answer", "summary": "Gripper car abilities.",
+          "answer": "The gripper car picks, places and drives to the pickup and drop-off zones."}
+CAP_REASON = "The planner still could not resolve the request after 3 questions."
+
+
+def ask(q="Which object?", options=()):
+    return {"schema_version": V1, "disposition": "clarify", "summary": "Unclear.", "clarification_question": q,
+            "clarification_options": list(options)}
+
+
+class StubPlanner(Planner):
+    """Returns scripted proposals in order (the last one repeats) and records every context."""
+
+    kind = "stub"
+
+    def __init__(self, proposals):
+        self.proposals = list(proposals)
+        self.contexts = []
+
+    async def propose(self, ctx, repair_feedback=None, previous_output=None):
+        self.contexts.append(ctx)
+        raw = self.proposals.pop(0) if len(self.proposals) > 1 else self.proposals[0]
+        return PlannerOutput(PlanProposal.model_validate(raw),
+                             PlannerRecord(kind="baseline", label="stub", latency_ms=0.0))
+
+
+async def stub_exec(make_exec, proposals, scenario="unknown", faults=None):
+    stub = StubPlanner(proposals)
+    ex = await make_exec(scenario, faults, planners={"stub": stub})
+    return ex, stub
+
+
+def test_answered_is_terminal():
+    assert "answered" in TERMINAL_MISSION
+    assert "answered" in DONE
+
+
+async def test_answer_proposal_ends_mission_answered(make_exec):
+    ex, _ = await stub_exec(make_exec, [ANSWER])
+    await ex.create_mission("What can the gripper car do?")
+    m = ex.mission
+    assert m.status == "answered"
+    assert m.outcome == {"status": "answered", "reason": ANSWER["answer"]}
+    assert not m.revisions and not ex.attempts
+    assert any(e["kind"] == "answer" and ANSWER["answer"] in e["message"] for e in ex.timeline)
+    assert ex.state()["mission"]["status"] == "answered"
+
+
+async def test_answer_after_clarification_is_answered(make_exec):
+    ex, _ = await stub_exec(make_exec, [ask("Which car?"), ANSWER])
+    await ex.create_mission("What can it do?")
+    assert ex.mission.status == "clarification"
+    await ex.answer_clarification("the gripper car")
+    assert ex.mission.status == "answered"
+
+
+async def test_answered_mission_allows_no_more_actions(make_exec):
+    ex, _ = await stub_exec(make_exec, [ANSWER])
+    await ex.create_mission("What can the gripper car do?")
+    with pytest.raises(ExecError):
+        await ex.answer_clarification("x")
+    with pytest.raises(ExecError):
+        await ex.replan()
+
+
+async def test_answer_on_continuation_blocks_like_reject(make_exec):
+    ex = await make_exec("unknown", ["two_red_blocks"])
+    await ex.create_mission(DEMO)
+    await approve_latest(ex)
+    assert await wait_for(ex, DONE | {"clarification"}) == "clarification"
+    ex.planners[ex.mission.planner_kind] = StubPlanner([ANSWER])
+    await ex.answer_clarification("red_block_2")
+    assert ex.mission.status == "blocked"
+    assert ex.mission.outcome["reason"] == "No continuation: " + ANSWER["answer"]
+    assert "gripper_01" not in robots_with_attempts(ex)
+
+
+async def test_find_only_reports_what_was_found(make_exec):
+    ex = await make_exec("unknown")
+    await ex.create_mission("Find a red box in the feild")
+    rev = ex.mission.revisions[-1]
+    assert rev.proposal.scope == "full" and {t.skill for t in rev.tasks} == {"inspect_area"}
+    await approve_latest(ex)
+    assert await wait_for(ex, DONE) == "completed"
+    found = ex.world.instances("red_block", "work_area")
+    assert found
+    reason = ex.mission.outcome["reason"]
+    assert reason.startswith("Found ")
+    for b in found:
+        assert f"{b.object_id} in {b.location_id}" in reason
+    assert robots_with_attempts(ex) == {"camera_01"}
+
+
+async def test_find_only_lists_several_found(make_exec):
+    ex = await make_exec("unknown", ["two_red_blocks"])
+    await ex.create_mission("Find the red block.")
+    await approve_latest(ex)
+    assert await wait_for(ex, DONE | {"clarification"}) == "completed"
+    reason = ex.mission.outcome["reason"]
+    assert "red_block_1 in" in reason and "red_block_2 in" in reason
+
+
+async def test_find_only_nothing_found_completes_with_search_report(make_exec):
+    ex = await make_exec("unknown")
+    await ex.create_mission("find me the duck in the feild")
+    goals = ex.mission.revisions[-1].proposal.mission_goals
+    assert [g.kind for g in goals] == ["object_located"] and goals[0].object_query.label == "duck"
+    await approve_latest(ex)
+    assert await wait_for(ex, DONE) == "completed"
+    assert ex.mission.outcome["reason"] == "Searched work_area: no duck found."
+
+
+async def test_object_located_satisfied_by_fresh_absence_only(make_exec):
+    ex = await make_exec("unknown")
+    await ex.create_mission("Find the duck.")
+    g = ex.mission.revisions[-1].proposal.mission_goals[0]
+    assert not ex.goal_satisfied(g, ex.mission.created_at)
+    ex.world.accept(Observation(kind="object_absent", entity_id="work_area:duck", area_id="work_area",
+                                label="duck"), source="camera_01")
+    assert ex.goal_satisfied(g, ex.mission.created_at)
+    assert not ex.goal_satisfied(g, ex.clock() + 5)  # a report older than `since` does not count
+
+
+async def test_fetch_with_missing_object_still_blocks(make_exec):
+    ex = await make_exec("unknown", ["block_missing"])
+    await ex.create_mission(DEMO)
+    await approve_latest(ex)
+    assert await wait_for(ex, DONE) == "blocked"
+    assert "no red_block" in ex.mission.outcome["reason"]
+    assert ex.mission.outcome["reason"] != "Searched work_area: no red_block found."
+
+
+async def test_clarifications_history_reaches_context_oldest_first(make_exec):
+    reject = {"schema_version": V1, "disposition": "reject", "summary": "Cannot do it."}
+    ex, stub = await stub_exec(make_exec, [ask("Which object?", ["the red block", "the duck"]),
+                                           ask("Where should it go?"), reject])
+    await ex.create_mission("get it")
+    m = ex.mission
+    assert m.clarifications == [{"question": "Which object?", "options": ["the red block", "the duck"],
+                                 "answer": None, "phase": "initial"}]
+    assert ex.state()["mission"]["clarifications"] == m.clarifications
+    await ex.answer_clarification("the red block")
+    await ex.answer_clarification("the drop-off zone")
+    assert [c["answer"] for c in m.clarifications] == ["the red block", "the drop-off zone"]
+    assert [c["phase"] for c in m.clarifications] == ["initial", "clarification_answer"]
+    last = stub.contexts[-1]
+    assert [c["question"] for c in last.clarifications] == ["Which object?", "Where should it go?"]
+    assert [c["answer"] for c in last.clarifications] == ["the red block", "the drop-off zone"]
+    assert last.clarification == {"question": "Where should it go?", "answer": "the drop-off zone"}
+    assert "Which object?" in last.to_json()
+    assert ex.export()["mission"]["clarifications"] == m.clarifications
+
+
+async def test_fourth_clarify_blocks_the_mission(make_exec):
+    ex, _ = await stub_exec(make_exec, [ask("Q?")])
+    await ex.create_mission("get it")
+    for n in range(3):
+        assert ex.mission.status == "clarification"
+        await ex.answer_clarification(f"a{n}")
+    assert ex.mission.status == "blocked"
+    assert ex.mission.outcome["reason"] == CAP_REASON
+    assert len(ex.mission.clarifications) == 3
+    assert not ex.attempts
+
+
+async def test_mid_mission_clarification_offers_instance_ids(make_exec):
+    ex = await make_exec("unknown", ["two_red_blocks"])
+    await ex.create_mission(DEMO)
+    await approve_latest(ex)
+    assert await wait_for(ex, DONE | {"clarification"}) == "clarification"
+    c = ex.mission.clarifications[-1]
+    assert c["options"] == ["red_block_1", "red_block_2"] and c["answer"] is None
+    assert c["question"] == ex.mission.clarification_question
+    await ex.answer_clarification("red_block_2")
+    assert ex.mission.clarifications[-1]["answer"] == "red_block_2"
+
+
+class ConstructedPlanner(StubPlanner):
+    """Bypasses model validation, as a buggy or hostile planner adapter might."""
+
+    async def propose(self, ctx, repair_feedback=None, previous_output=None):
+        self.contexts.append(ctx)
+        return PlannerOutput(PlanProposal.model_construct(**self.proposals[0]),
+                             PlannerRecord(kind="baseline", label="stub", latency_ms=0.0))
+
+
+async def test_unknown_disposition_fails_closed(make_exec):
+    bad = {"schema_version": V1, "disposition": "execute_now", "scope": None, "summary": "Do it.",
+           "mission_goals": [], "stage_goals": [], "tasks": [], "issues": [], "clarification_question": None,
+           "clarification_options": [], "answer": None}
+    ex = await make_exec("unknown", planners={"stub": ConstructedPlanner([bad])})
+    await ex.create_mission("Find the duck.")
+    assert ex.mission.status == "blocked"
+    assert "Unsupported planner disposition 'execute_now'" in ex.mission.outcome["reason"]
+    assert not ex.mission.revisions and not ex.attempts
+
+
+async def test_answer_constructed_without_validation_still_dispatches_nothing(make_exec):
+    raw = dict(ANSWER, scope=None, mission_goals=[], stage_goals=[], tasks=[], issues=[],
+               clarification_question=None, clarification_options=[])
+    ex = await make_exec("unknown", planners={"stub": ConstructedPlanner([raw])})
+    await ex.create_mission("What can the gripper car do?")
+    assert ex.mission.status == "answered" and not ex.mission.revisions and not ex.attempts
+
+
+async def test_make_revision_refuses_unvalidated_proposals(make_exec):
+    ex, _ = await stub_exec(make_exec, [ANSWER])
+    await ex.create_mission("What can the gripper car do?")
+    record = PlannerRecord(kind="baseline", label="stub", latency_ms=0.0)
+    with pytest.raises(ExecError):
+        ex._make_revision(ex.mission, PlanProposal.model_validate(ANSWER), record, None, None, "initial", {})
+    assert not ex.mission.revisions

@@ -22,7 +22,7 @@ from typing import Any, Callable, Optional
 
 from .agent_commands import describe_command, write_command
 from .allocator import Allocator, CapabilityAllocator
-from .catalog import BATTERY_RESERVE_PCT, LOCATIONS, ROBOTS, SKILLS, catalog_dict, route_between
+from .catalog import BATTERY_RESERVE_PCT, LOCATIONS, ROBOTS, SKILLS, area_contains, catalog_dict, route_between
 from .context import ContextBudgetExceeded, build_context
 from .contracts import (
     RUN_EXPORT_SCHEMA,
@@ -44,7 +44,9 @@ from .validator import ValidationResult, validate
 from .world import ObservedWorld, RobotState, initial_robot_states
 
 SIM_WORLDS = ("fixed", "random")
-TERMINAL_MISSION = {"completed", "blocked", "rejected", "canceled", "planner_error"}
+TERMINAL_MISSION = {"completed", "blocked", "rejected", "canceled", "planner_error", "answered"}
+MAX_CLARIFICATIONS = 3  # clarify rounds per mission; one more ends the mission blocked
+CLARIFY_CAP_REASON = f"The planner still could not resolve the request after {MAX_CLARIFICATIONS} questions."
 MAX_STAGES = 4
 PRE_DISPATCH_FAIL = "precondition_failed"
 
@@ -100,6 +102,7 @@ class Mission:
     stage_count: int = 0
     recovery_used: bool = False
     clarification_question: Optional[str] = None
+    clarifications: list[dict] = field(default_factory=list)  # {question, options, answer, phase}, oldest first
     outcome: Optional[dict] = None
     history: list[str] = field(default_factory=list)
     planning_log: list[dict] = field(default_factory=list)
@@ -275,6 +278,8 @@ class Executive:
         if m.status != "clarification":
             raise ExecError("No clarification is pending.")
         self.log("operator", "Clarification answered.", answer=answer)
+        if m.clarifications and m.clarifications[-1].get("answer") is None:
+            m.clarifications = [*m.clarifications[:-1], {**m.clarifications[-1], "answer": answer}]
         phase = "continuation" if m.canonical_goals else "clarification_answer"
         await self._plan(phase, "clarification", clarification={"question": m.clarification_question or "",
                                                                  "answer": answer})
@@ -303,7 +308,8 @@ class Executive:
         m.status = "planning"
         ctx = build_context(phase=phase, command=m.command, robots=self.robots, world=self.world,
                             canonical_goals=m.canonical_goals, stage_history=m.history,
-                            failure=failure, clarification=clarification)
+                            failure=failure, clarification=clarification,
+                            clarifications=[c for c in m.clarifications if c.get("answer") is not None])
         self.log("planning", f"Requesting {phase} proposal from {planner.kind}.")
         attempts, first_ok, repaired = 0, None, False
         feedback: Optional[list[str]] = None
@@ -366,9 +372,15 @@ class Executive:
     def _apply_proposal(self, m: Mission, proposal: PlanProposal, record: PlannerRecord,
                         vres: Optional[ValidationResult], alloc, phase: str, rev_kind: str) -> None:
         if proposal.disposition == "clarify":
-            m.status = "clarification"
-            m.clarification_question = proposal.clarification_question
-            self.log("clarification", proposal.clarification_question or "", issues=proposal.issues)
+            self._ask(m, proposal.clarification_question or "", proposal.clarification_options, phase,
+                      issues=proposal.issues)
+            return
+        if proposal.disposition == "answer":
+            if phase == "initial" or phase == "clarification_answer":
+                m.status, m.outcome = "answered", {"status": "answered", "reason": proposal.answer}
+                self.log("answer", proposal.answer or "")
+            else:
+                self._block(m, f"No continuation: {proposal.answer}")
             return
         if proposal.disposition == "reject":
             reason = proposal.summary + (f" ({'; '.join(proposal.issues)})" if proposal.issues else "")
@@ -378,6 +390,10 @@ class Executive:
             else:
                 self._block(m, f"No continuation: {reason}")
             return
+        if proposal.disposition != "plan" or vres is None:
+            # Fail closed: a disposition this code does not know never becomes a revision.
+            return self._block(m, f"Unsupported planner disposition {str(proposal.disposition)[:40]!r}; "
+                                  "nothing was planned.")
         plan = self._make_revision(m, proposal, record, vres, alloc, rev_kind, {})
         if not plan.validation.ok and phase in ("continuation", "recovery"):
             reasons = "; ".join(f.message for f in plan.validation.findings if f.severity == "error")
@@ -388,6 +404,8 @@ class Executive:
 
     def _make_revision(self, m: Mission, proposal: PlanProposal, record: PlannerRecord,
                        vres: ValidationResult, alloc, kind: str, constraints: dict[str, str]) -> ExecutionPlan:
+        if proposal.disposition != "plan" or vres is None:
+            raise ExecError("Only a validated plan proposal can become a revision.", 500)
         if m.canonical_goals is not None:
             proposal = proposal.model_copy(update={"mission_goals": list(m.canonical_goals)})
         for old in m.revisions:
@@ -831,6 +849,17 @@ class Executive:
                     self._planner_failed(self.mission, self._gen, f"{type(exc).__name__}: {exc}", None, 0)
         self._planning = asyncio.create_task(run())
 
+    def _ask(self, m: Mission, question: str, options: list[str], phase: str, **data: Any) -> None:
+        """Put a question to the operator, or end the mission once the clarify budget is spent."""
+        if len(m.clarifications) >= MAX_CLARIFICATIONS:
+            return self._block(m, CLARIFY_CAP_REASON)
+        opts = list(options)[:4]
+        m.status = "clarification"
+        m.clarification_question = question
+        m.clarifications = [*m.clarifications, {"question": question, "options": opts, "answer": None,
+                                                "phase": phase}]
+        self.log("clarification", question, **({"options": opts} if opts else {}), **data)
+
     def _block(self, m: Mission, reason: str) -> None:
         m.status = "blocked"
         m.outcome = {"status": "blocked", "reason": reason}
@@ -842,12 +871,43 @@ class Executive:
             return any(b.label == g.object_query.label and b.location_id == g.location_id and b.held_by is None
                        and b.source in ROBOTS for b in self.world.objects.values())
         if g.kind == "object_located":
-            return bool(self.world.instances(g.object_query.label, g.area_id))
+            # A fresh inspection report of the area settles a find goal, found or absent.
+            return bool(self.world.instances(g.object_query.label, g.area_id)) or \
+                self._searched(g.area_id, g.object_query.label, since) is not None
         if g.kind == "route_observed":
             return self.world.route_status(g.route_id) is not None
         if g.kind == "image_captured":
             return self.world.image_for(g.area_id, since) is not None
         return False
+
+    def _searched(self, area_id: str, label: str, since: float):
+        """The fresh absence report for ``label`` covering ``area_id``, made at or after ``since``."""
+        for (rec_area, rec_label), rec in self.world.absences.items():
+            if rec_label == label and rec.observed_at >= since and self.world.is_fresh(rec.fresh_until) \
+                    and (rec_area == area_id or area_contains(rec_area, area_id)):
+                return rec
+        return None
+
+    def _completion_reason(self, goals: list[Goal], since: float) -> str:
+        """Names what find goals found (from beliefs); other goals keep the generic sentence."""
+        parts = []
+        for g in goals:
+            if g.kind != "object_located":
+                continue
+            label, area = g.object_query.label, g.area_id
+            found = self.world.instances(label, area)
+            if found:
+                where = [f"{b.object_id} held by {b.held_by}" if b.held_by else f"{b.object_id} in {b.location_id}"
+                         for b in found]
+                parts.append("Found " + ", ".join(where) + ".")
+            else:
+                rec = self._searched(area, label, since)
+                parts.append(f"Searched {rec.area_id if rec else area}: no {label} found.")
+        if not parts:
+            return "All mission goals satisfied by confirmed results."
+        if any(g.kind != "object_located" for g in goals):
+            parts.append("All mission goals satisfied by confirmed results.")
+        return " ".join(parts)
 
     async def _finish_revision(self, m: Mission, plan: ExecutionPlan) -> None:
         plan.status = "finished"
@@ -856,7 +916,7 @@ class Executive:
         goals = m.canonical_goals or []
         if goals and all(self.goal_satisfied(g, m.created_at) for g in goals):
             m.status = "completed"
-            m.outcome = {"status": "completed", "reason": "All mission goals satisfied by confirmed results."}
+            m.outcome = {"status": "completed", "reason": self._completion_reason(goals, m.created_at)}
             self.log("completed", m.outcome["reason"])
             return
         for g in goals:
@@ -864,14 +924,12 @@ class Executive:
                 label = g.object_query.label
                 inst = self.world.instances(label)
                 held = [b for b in inst if b.held_by]
-                if not inst and self.world.absence("work_area", label):
+                if g.kind == "object_at" and not inst and self.world.absence("work_area", label):
                     return self._block(m, f"Inspection found no {label} in the work area.")
                 if len(inst) > 1 and not held:
-                    m.status = "clarification"
-                    ids = ", ".join(b.object_id for b in inst)
-                    m.clarification_question = f"Several {label} instances were observed ({ids}). Which one?"
-                    self.log("clarification", m.clarification_question)
-                    return
+                    ids = [b.object_id for b in inst]
+                    return self._ask(m, f"Several {label} instances were observed ({', '.join(ids)}). Which one?",
+                                     ids, "evaluation")
             if g.kind == "object_at" and self.world.route_status("pickup_corridor") == "blocked":
                 return self._block(m, "The pickup corridor is observed blocked; transport cannot proceed.")
         if m.stage_count >= MAX_STAGES:
@@ -921,6 +979,7 @@ class Executive:
                 "canonical_goals": [g.model_dump() for g in m.canonical_goals] if m.canonical_goals else None,
                 "active_revision": m.active_revision, "stage_count": m.stage_count,
                 "recovery_used": m.recovery_used, "clarification_question": m.clarification_question,
+                "clarifications": [dict(c) for c in m.clarifications],
                 "outcome": m.outcome, "history": m.history, "planning_log": m.planning_log,
                 "last_proposal": m.last_proposal,
                 "revisions": [self._serialize_plan(m, p) for p in m.revisions],
