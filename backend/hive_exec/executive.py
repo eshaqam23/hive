@@ -394,7 +394,11 @@ class Executive:
             # Fail closed: a disposition this code does not know never becomes a revision.
             return self._block(m, f"Unsupported planner disposition {str(proposal.disposition)[:40]!r}; "
                                   "nothing was planned.")
-        plan = self._make_revision(m, proposal, record, vres, alloc, rev_kind, {})
+        try:
+            plan = self._make_revision(m, proposal, record, vres, alloc, rev_kind, {})
+        except Exception as exc:  # noqa: BLE001 - never leave the mission "planning"; nothing was dispatched
+            return self._planner_failed(m, self._gen, f"Revision could not be built: {type(exc).__name__}: "
+                                        f"{str(exc)[:300]}", record, 1)
         if not plan.validation.ok and phase in ("continuation", "recovery"):
             reasons = "; ".join(f.message for f in plan.validation.findings if f.severity == "error")
             plan.status = "not_executable"
@@ -408,9 +412,6 @@ class Executive:
             raise ExecError("Only a validated plan proposal can become a revision.", 500)
         if m.canonical_goals is not None:
             proposal = proposal.model_copy(update={"mission_goals": list(m.canonical_goals)})
-        for old in m.revisions:
-            if old.status == "awaiting_approval" or old.status == "invalid":
-                old.status = "superseded"
         evidence = sorted({e for b in self.world.objects.values() for e in b.evidence}
                           | {r.evidence for r in self.world.routes.values()})
         plan = ExecutionPlan(
@@ -421,6 +422,9 @@ class Executive:
             planner=record, created_at=self.clock(),
             status="awaiting_approval" if vres.report.ok else "invalid",
         )
+        for old in m.revisions:  # only once the new revision exists
+            if old.status == "awaiting_approval" or old.status == "invalid":
+                old.status = "superseded"
         m.revisions.append(plan)
         self.log("revision", f"Revision {plan.revision} ({kind}, {proposal.scope}) proposed by {record.label}; "
                  f"validation {'passed' if plan.validation.ok else 'FAILED'}.",
@@ -871,8 +875,9 @@ class Executive:
             return any(b.label == g.object_query.label and b.location_id == g.location_id and b.held_by is None
                        and b.source in ROBOTS for b in self.world.objects.values())
         if g.kind == "object_located":
-            # A fresh inspection report of the area settles a find goal, found or absent.
-            return bool(self.world.instances(g.object_query.label, g.area_id)) or \
+            # A fresh fleet report made during the mission settles a find goal, found or absent;
+            # a prior survey (operator_seed) or an older report does not.
+            return bool(self._located(g.object_query.label, g.area_id, since)) or \
                 self._searched(g.area_id, g.object_query.label, since) is not None
         if g.kind == "route_observed":
             return self.world.route_status(g.route_id) is not None
@@ -880,10 +885,15 @@ class Executive:
             return self.world.image_for(g.area_id, since) is not None
         return False
 
+    def _located(self, label: str, area_id: str, since: float) -> list:
+        """Fresh beliefs of ``label`` in ``area_id`` reported by a fleet robot at or after ``since``."""
+        return [b for b in self.world.instances(label, area_id) if b.source in ROBOTS and b.observed_at >= since]
+
     def _searched(self, area_id: str, label: str, since: float):
-        """The fresh absence report for ``label`` covering ``area_id``, made at or after ``since``."""
+        """The fresh fleet absence report for ``label`` covering ``area_id``, made at or after ``since``."""
         for (rec_area, rec_label), rec in self.world.absences.items():
-            if rec_label == label and rec.observed_at >= since and self.world.is_fresh(rec.fresh_until) \
+            if rec_label == label and rec.source in ROBOTS and rec.observed_at >= since \
+                    and self.world.is_fresh(rec.fresh_until) \
                     and (rec_area == area_id or area_contains(rec_area, area_id)):
                 return rec
         return None
@@ -895,7 +905,7 @@ class Executive:
             if g.kind != "object_located":
                 continue
             label, area = g.object_query.label, g.area_id
-            found = self.world.instances(label, area)
+            found = self._located(label, area, since)
             if found:
                 where = [f"{b.object_id} held by {b.held_by}" if b.held_by else f"{b.object_id} in {b.location_id}"
                          for b in found]

@@ -3,6 +3,7 @@
 These prove the deterministic pipeline. They do NOT count as live-Qwen acceptance.
 """
 
+import asyncio
 import json
 
 import pytest
@@ -722,6 +723,72 @@ async def test_make_revision_refuses_unvalidated_proposals(make_exec):
     with pytest.raises(ExecError):
         ex._make_revision(ex.mission, PlanProposal.model_validate(ANSWER), record, None, None, "initial", {})
     assert not ex.mission.revisions
+
+
+# ================================================== WS2 fixes: stale beliefs, revision build failures
+
+PHOTO_FOR_FIND = {"schema_version": V1, "disposition": "plan", "scope": "full", "summary": "Photograph the area.",
+                  "mission_goals": [{"kind": "object_located", "object_query": {"label": "red_block"},
+                                     "area_id": "work_area"}],
+                  "stage_goals": [], "tasks": [{"task_id": "t1", "binding_id": "observer",
+                                                "action": {"kind": "capture_image", "area_id": "work_area"},
+                                                "depends_on": [], "preferred_robot_id": "camera_01"}]}
+
+
+async def test_seeded_belief_does_not_complete_a_find_without_an_inspection(make_exec):
+    ex, _ = await stub_exec(make_exec, [PHOTO_FOR_FIND], scenario="known")
+    await ex.create_mission("Find the red block.")
+    assert ex.world.instances("red_block", "work_area")  # the operator_seed prior survey
+    g = ex.mission.revisions[-1].proposal.mission_goals[0]
+    assert not ex.goal_satisfied(g, ex.mission.created_at)
+    await approve_latest(ex)
+    for _ in range(1000):
+        m = ex.mission
+        if m.status in DONE or (len(m.revisions) > 1 and m.status == "awaiting_approval"):
+            break
+        await asyncio.sleep(0.01)
+    assert ex.mission.status != "completed"
+    assert not (ex.mission.outcome or {}).get("reason", "").startswith("Found")
+    assert {a.envelope["skill"] for a in ex.attempts.values()} == {"capture_image"}  # never inspected
+    assert any(e["kind"] == "evaluation" for e in ex.timeline)  # the normal continuation path ran
+
+
+async def test_object_located_counts_only_fleet_reports_since_mission_start(make_exec):
+    ex = await make_exec("unknown")
+    await ex.create_mission("Find the duck.")
+    g = ex.mission.revisions[-1].proposal.mission_goals[0]
+    start = ex.mission.created_at
+    seen = Observation(kind="object_seen", entity_id="duck_1", location_id="work_area", area_id="work_area",
+                       label="duck")
+    ex.world.accept(seen, source="operator_seed")
+    assert not ex.goal_satisfied(g, start)  # not a fleet robot
+    ex.world.accept(Observation(kind="object_absent", entity_id="work_area:duck", area_id="work_area",
+                                label="duck"), source="operator_seed")
+    assert not ex.goal_satisfied(g, start)  # an absence needs a fleet robot too
+    ex.world.accept(seen, source="camera_01")
+    assert ex.goal_satisfied(g, start)
+    assert not ex.goal_satisfied(g, ex.clock() + 5)  # seen before `since`
+    assert ex._completion_reason([g], start).startswith("Found duck_1")
+
+
+class TasklessPlanner(StubPlanner):
+    """A plan stripped of its tasks without validation: the revision cannot be built."""
+
+    async def propose(self, ctx, repair_feedback=None, previous_output=None):
+        self.contexts.append(ctx)
+        good = PlanProposal.model_validate(self.proposals[0])
+        return PlannerOutput(good.model_copy(update={"tasks": []}),
+                             PlannerRecord(kind="baseline", label="stub", latency_ms=0.0))
+
+
+async def test_revision_build_failure_ends_the_mission_planner_error(make_exec):
+    ex = await make_exec("unknown", planners={"stub": TasklessPlanner([PHOTO_FOR_FIND])})
+    await ex.create_mission("Find the red block.")
+    m = ex.mission
+    assert m.status == "planner_error"
+    assert m.outcome["status"] == "planner_error" and "revision" in m.outcome["reason"].lower()
+    assert not m.revisions and not ex.attempts
+    assert any(e["kind"] == "planner_error" for e in ex.timeline)
 
 
 # ================================================== WS2: baseline intents (find vs fetch vs question)
