@@ -8,8 +8,11 @@ The provider store must be named explicitly (``--providers`` or ``$HIVE_PROVIDER
 fake fleet (validation and the one schema repair included, nothing approved or dispatched). Run r
 uses sampling seed ``--seed + r - 1`` so repeated runs sample differently but reproducibly.
 
-Prints one table row per (run, case) and a summary line; exits 0 when every row passes, 1 when
-any fails, 2 when the store or the provider is unusable. API keys are never printed.
+Before running it prints each executive row's effective sampling and warns when a row plans
+above temperature 0.3 (re-save the row in Settings). Prints one table row per (run, case), a
+summary line, and separate pass rates for the cases whose sentence frame appears in the prompt's
+examples (``in_prompt``: partly a recall test) and for unseen paraphrases. Exits 0 when every row
+passes, 1 when any fails, 2 when the store or the provider is unusable. API keys are never printed.
 """
 
 from __future__ import annotations
@@ -33,24 +36,54 @@ from hive_exec.planner.prompt import PROMPT_VERSION  # noqa: E402
 
 ROLE = "executive"
 GRIPPER_ACTIONS = {"pick_object", "place_object"}
+HOT_TEMPERATURE = 0.3
 
-# goals: (kind, label or None, area/location or None) that mission_goals must contain.
+# disposition: the accepted one, or a tuple of accepted ones. The plan checks (scope, goals,
+# no_gripper, no_scan, no_goal_kinds, needs_issue) apply only when the proposal is a plan.
+# goals: (kind, label or None, area/location/route or None) that mission_goals must contain.
+# in_prompt: True when a prompt example shares the command's sentence frame (same request with at
+# most a word or two changed), so a pass there partly measures recall of the example.
 CASES: list[dict[str, Any]] = [
-    {"id": "find-red-box", "command": "Find a red box in the feild", "disposition": "plan",
+    {"id": "find-red-box", "command": "Find a red box in the feild", "disposition": "plan", "in_prompt": True,
      "goals": [("object_located", "red_block", None)], "no_gripper": True, "no_scan": True},
-    {"id": "find-duck", "command": "find me the duck in the feild", "disposition": "plan",
+    {"id": "find-duck", "command": "find me the duck in the feild", "disposition": "plan", "in_prompt": False,
      "goals": [("object_located", "duck", None)]},
-    {"id": "fetch-to-base", "command": "find the red box and bring it back to base", "disposition": "clarify"},
+    {"id": "fetch-to-base", "command": "find the red box and bring it back to base", "disposition": "clarify",
+     "in_prompt": True},
     {"id": "fetch-to-dropoff", "command": "find the red box and bring it to the drop-off zone",
-     "disposition": "plan", "scope": "observation_stage", "goals": [("object_at", "red_block", "dropoff_zone")]},
-    {"id": "fleet-question", "command": "What can the gripper car do?", "disposition": "answer"},
-    {"id": "photo", "command": "Take a picture of the work area", "disposition": "plan",
+     "disposition": "plan", "in_prompt": True, "scope": "observation_stage",
+     "goals": [("object_at", "red_block", "dropoff_zone")]},
+    {"id": "fleet-question", "command": "What can the gripper car do?", "disposition": "answer", "in_prompt": True},
+    {"id": "photo", "command": "Take a picture of the work area", "disposition": "plan", "in_prompt": True,
      "goals": [("image_captured", None, "work_area")]},
-    {"id": "block-over-here", "command": "Bring the block over here", "disposition": "clarify"},
-    {"id": "fly-drone", "command": "Fly the drone over the warehouse", "disposition": "reject"},
-    {"id": "get-the-block", "command": "get the block", "disposition": "clarify"},
-    {"id": "check-the-thing", "command": "check on the thing", "disposition": "clarify"},
+    {"id": "block-over-here", "command": "Bring the block over here", "disposition": "clarify", "in_prompt": True},
+    {"id": "fly-drone", "command": "Fly the drone over the warehouse", "disposition": "reject", "in_prompt": True},
+    {"id": "get-the-block", "command": "get the block", "disposition": "clarify", "in_prompt": False},
+    {"id": "check-the-thing", "command": "check on the thing", "disposition": "clarify", "in_prompt": False},
+    # Unseen paraphrases (fix W3): no prompt example shares their frame.
+    {"id": "locate-blue-cube", "command": "could you locate the blue cube?", "disposition": "plan",
+     "in_prompt": False, "goals": [("object_located", "blue_block", None)], "no_gripper": True, "no_scan": True},
+    {"id": "photo-pickup", "command": "snap a photo of the pickup zone", "disposition": "plan", "in_prompt": False,
+     "goals": [("image_captured", None, "pickup_zone")]},
+    # No robot observes dropoff_zone, so a photo plan cannot be allocated: refuse or ask.
+    {"id": "photo-dropoff", "command": "snap a photo of the drop-off area", "disposition": ("reject", "clarify"),
+     "in_prompt": False},
+    {"id": "carry-tennis-ball", "command": "carry the tennis ball to the drop-off zone", "disposition": "plan",
+     "in_prompt": False, "scope": "observation_stage", "goals": [("object_at", "tennis_ball", "dropoff_zone")]},
+    # rc_car (1.2 kg) is over the gripper payload: refuse, ask, or plan sensing only with an issue.
+    {"id": "toy-car-over-payload", "command": "grab the toy car and bring it to the drop-off zone",
+     "disposition": ("reject", "clarify", "plan"), "in_prompt": False,
+     "no_goal_kinds": ("object_at",), "no_gripper": True, "needs_issue": True},
+    # Unknown until scanned: answering from the observed state or planning a scan both serve it.
+    {"id": "corridor-clear", "command": "is the corridor clear?", "disposition": ("answer", "plan"),
+     "in_prompt": False, "goals": [("route_observed", None, "pickup_corridor")]},
+    {"id": "duck-home", "command": "take the duck home", "disposition": "clarify", "in_prompt": False},
 ]
+
+
+def accepted(case: dict) -> tuple:
+    d = case["disposition"]
+    return d if isinstance(d, tuple) else (d,)
 
 
 class SeededRouter(Router):
@@ -73,16 +106,18 @@ def _goal_matches(goal: dict, kind: str, label: Optional[str], place: Optional[s
         return False
     if label is not None and (goal.get("object_query") or {}).get("label") != label:
         return False
-    return place is None or place in (goal.get("area_id"), goal.get("location_id"))
+    return place is None or place in (goal.get("area_id"), goal.get("location_id"), goal.get("route_id"))
 
 
 def check(case: dict, proposal: dict, valid: bool) -> list[str]:
     """Every broken expectation of ``case`` in ``proposal`` (empty: pass)."""
     disposition = proposal.get("disposition")
-    if disposition != case["disposition"]:
-        return [f"expected {case['disposition']}, got {disposition}"]
+    if disposition not in accepted(case):
+        return [f"expected {' or '.join(accepted(case))}, got {disposition}"]
+    if disposition != "plan":
+        return []
     notes = []
-    if disposition == "plan" and not valid:
+    if not valid:
         notes.append("plan failed backend validation")
     if "scope" in case and proposal.get("scope") != case["scope"]:
         notes.append(f"expected scope {case['scope']}, got {proposal.get('scope')}")
@@ -96,6 +131,11 @@ def check(case: dict, proposal: dict, valid: bool) -> list[str]:
         notes.append("gripper task in a find-only plan")
     if case.get("no_scan") and any((t.get("action") or {}).get("kind") == "scan_route" for t in tasks):
         notes.append("scan_route in a find-only plan")
+    for kind in case.get("no_goal_kinds", ()):
+        if any(g.get("kind") == kind for g in goals):
+            notes.append(f"{kind} goal not allowed")
+    if case.get("needs_issue") and not proposal.get("issues"):
+        notes.append("plan raises no issue")
     return notes
 
 
@@ -113,7 +153,8 @@ async def run_case(ex: Executive, case: dict, run: int) -> dict:
         scope = proposal.get("scope")
         outcome = f"{proposal.get('disposition')}" + (f"/{scope}" if scope else "")
         notes = check(case, proposal, valid)
-    return {"case": case["id"], "command": case["command"], "run": run, "outcome": outcome,
+    return {"case": case["id"], "command": case["command"], "run": run, "in_prompt": case["in_prompt"],
+            "outcome": outcome,
             "ok": not notes, "note": "; ".join(notes)[:120], "latency_ms": rec.get("latency_ms"),
             "repaired": rec.get("repaired"), "wall_ms": round((time.perf_counter() - t0) * 1000, 1)}
 
@@ -144,7 +185,27 @@ def table(rows: list[dict]) -> str:
                      f"{lat:>10}  {r['note']}")
     passed = sum(r["ok"] for r in rows)
     lines.append(f"prompt_eval {PROMPT_VERSION}: {passed}/{len(rows)} passed")
+    for title, seen in (("unseen (not in prompt examples)", False), ("in prompt examples", True)):
+        part = [r for r in rows if r.get("in_prompt") is seen]
+        lines.append(f"  {title}: {sum(r['ok'] for r in part)}/{len(part)} passed")
     return "\n".join(lines)
+
+
+def sampling_lines(router: Router) -> list[str]:
+    """Each executive row's effective sampling, with a warning for a row that samples hot."""
+    try:
+        cands = router.chain(ROLE)
+    except Exception:  # noqa: BLE001 - the probe reports an unusable store
+        return []
+    lines = []
+    for c in cands:
+        s = c.row.sampling
+        lines.append(f"sampling {c.row.id}: temperature {s.temperature} top_p {s.top_p} top_k {s.top_k} "
+                     f"seed {s.seed}")
+        if s.temperature > HOT_TEMPERATURE:
+            lines.append(f"WARNING: {c.row.id} plans at temperature {s.temperature} (> {HOT_TEMPERATURE}); "
+                         "re-save the executive row in Settings to plan at 0.2.")
+    return lines
 
 
 def _scrub(text: str, router: Router) -> str:
@@ -170,6 +231,8 @@ async def run(argv: Optional[list[str]] = None, transport: Any = None) -> int:
         return 2
     router = SeededRouter(path=path, transport=transport, seed=args.seed)
     planner = LLMPlanner(router, role=ROLE)
+    for line in sampling_lines(router):
+        print(_scrub(line, router))
     probe = await planner.probe()
     if not probe["ok"]:
         print(_scrub(f"LLM probe failed: {probe['error']}\nNo evaluation was run.", router))
