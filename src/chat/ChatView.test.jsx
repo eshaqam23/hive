@@ -282,6 +282,28 @@ describe("stop current", () => {
     expect(posts("/tasks/t2/cancel")).toHaveLength(0);
     await waitFor(() => expect(within(row("t1")).getByText("canceling")).toBeTruthy());
   });
+
+  it("stops a replaced revision's still-running row by that card's revision, not the active one", async () => {
+    const next = clone(running);
+    const r1 = next.mission.revisions[0];
+    r1.status = "superseded";
+    r1.superseded_reason = "operator_message";
+    r1.superseded_by = 2;
+    r1.runtime.t2.state = "succeeded";
+    const r2 = { ...clone(r1), revision: 2, kind: "feedback", status: "executing", superseded_reason: null, superseded_by: null, created_at: r1.created_at + 5 };
+    r2.runtime = { t1: { ...clone(r1.runtime.t1), revision: 2 }, t2: { ...clone(r1.runtime.t2), state: "pending" } };
+    next.mission.revisions = [r1, r2];
+    next.mission.active_revision = 2;
+    next.mission.operator_messages = [];
+    server.state = next;
+    server.post["/tasks/t1/cancel"] = () => reply(200, next);
+    render(<Harness />);
+    await waitFor(() => expect(rowIn(1, "t1")).toBeTruthy());
+    expect(within(rowIn(2, "t1")).getByRole("button", { name: "Stop current" })).toBeTruthy();
+    fireEvent.click(within(rowIn(1, "t1")).getByRole("button", { name: "Stop current" }));
+    await waitFor(() => expect(posts("/tasks/t1/cancel")).toHaveLength(1));
+    expect(posts("/tasks/t1/cancel")[0].body).toEqual({ revision: 1 });
+  });
 });
 
 describe("refresh", () => {
