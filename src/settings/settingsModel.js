@@ -26,7 +26,7 @@ export const SAMPLING_FIELDS = [
   { key: "max_tokens", label: "max_tokens", step: "1", min: 16, max: 131072, int: true, nullable: false },
   { key: "timeout_s", label: "timeout_s", step: "1", min: 0, max: 600, int: false, nullable: false, exclusiveMin: true },
 ];
-export const DEFAULT_SAMPLING = { temperature: 0.7, top_p: 0.8, top_k: 20, seed: 1234, max_tokens: 3072, timeout_s: 60, think: false };
+export const DEFAULT_SAMPLING = { temperature: 0.2, top_p: 0.8, top_k: 20, seed: 1234, max_tokens: 3072, timeout_s: 60, think: false };
 
 /* a template has no id; these are the suggestions (presets bring their own) */
 const TEMPLATE_IDS = { ollama_local: "ollama", vt_arc_vllm: "arc-vllm", hosted_oss: "", local_openai: "local" };

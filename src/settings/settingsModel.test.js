@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { llmErrorText } from "./api.js";
-import { draftErrors, draftFromProvider, draftFromTemplate, editDraft, moveItem, providerBody, rowWithModel, testSummary } from "./settingsModel.js";
+import { DEFAULT_SAMPLING, draftErrors, draftFromProvider, draftFromTemplate, editDraft, moveItem, providerBody, rowWithModel, testSummary } from "./settingsModel.js";
 
 const groq = {
   id: "groq",
@@ -106,5 +106,12 @@ describe("settingsModel", () => {
     expect(llmErrorText(data, 422)).toBe("sampling.top_p: Input should be greater than 0; model: Field required");
     expect(llmErrorText({ detail: "unknown provider 'x'" }, 404)).toBe("unknown provider 'x'");
     expect(llmErrorText({}, 500)).toBe("Request failed (500)");
+  });
+});
+
+describe("default sampling", () => {
+  it("plans at temperature 0.2 like the backend templates", () => {
+    expect(DEFAULT_SAMPLING.temperature).toBe(0.2);
+    expect(DEFAULT_SAMPLING).toMatchObject({ top_p: 0.8, top_k: 20, seed: 1234 });
   });
 });

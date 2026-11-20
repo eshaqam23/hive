@@ -28,9 +28,10 @@ class QwenSettings:
     base_url: str = ""
     model: str = "Qwen/Qwen3-8B"
     api_key: str = ""
-    # Qwen3 published non-thinking recommendation is temperature 0.7, top_p 0.8, top_k 20.
-    # QWEN_TEMPERATURE=0 is an experimental repeatability setting, not a determinism guarantee.
-    temperature: float = 0.7
+    # Qwen3's published non-thinking top_p 0.8 / top_k 20, but temperature 0.2 (not its 0.7) so the
+    # strict-JSON plan is close to repeatable (WS2). QWEN_TEMPERATURE still overrides it; 0 is an
+    # experimental repeatability setting, not a determinism guarantee.
+    temperature: float = 0.2
     top_p: float = 0.8
     top_k: Optional[int] = 20
     seed: int = 1234
@@ -47,7 +48,7 @@ class QwenSettings:
             base_url=os.environ.get("QWEN_BASE_URL", ""),
             model=os.environ.get("QWEN_MODEL", "Qwen/Qwen3-8B"),
             api_key=os.environ.get("QWEN_API_KEY", ""),
-            temperature=_f("QWEN_TEMPERATURE", 0.7),
+            temperature=_f("QWEN_TEMPERATURE", 0.2),
             top_p=_f("QWEN_TOP_P", 0.8),
             top_k=int(top_k) if top_k not in ("", "none", "None") else None,
             seed=int(os.environ.get("QWEN_SEED", "1234")),

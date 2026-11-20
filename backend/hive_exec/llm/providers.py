@@ -18,6 +18,7 @@ HTTP client through the environment variable named by the row
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import tempfile
@@ -29,6 +30,15 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from .templates import preset
+
+log = logging.getLogger(__name__)
+
+#: The sampling every row was saved with before WS2 (temperature 0.7; hosted rows have top_k None).
+#: A saved row whose temperature/top_p/top_k/seed equal one of these sets exactly was never tuned
+#: by the operator, so it plans at the current default temperature instead.
+PRE_WS2_SAMPLING = ({"temperature": 0.7, "top_p": 0.8, "top_k": 20, "seed": 1234},
+                    {"temperature": 0.7, "top_p": 0.8, "top_k": None, "seed": 1234})
+_MIGRATION_LOGGED: set = set()
 
 __all__ = [
     "DEFAULT_RELATIVE_PATH", "DIR_MODE", "ENV_ROW_ID", "FILE_MODE", "KINDS", "MODES_BY_KIND",
@@ -489,10 +499,23 @@ def _row_from_file(pid: str, entry: dict) -> ProviderRow:
     }
     sampling = entry.get("sampling")
     if isinstance(sampling, dict):
-        fields["sampling"] = sampling
+        fields["sampling"] = _migrated_sampling(pid, sampling)
     elif kind != "ollama":
         fields["sampling"] = Sampling(top_k=None)
     return ProviderRow(**fields)
+
+
+def _migrated_sampling(pid: str, sampling: dict) -> dict:
+    """A row saved with the pre-WS2 default sampling plans at today's default temperature."""
+    picked = {k: sampling.get(k, Sampling.model_fields[k].default) for k in PRE_WS2_SAMPLING[0]}
+    if picked not in PRE_WS2_SAMPLING:
+        return sampling
+    temperature = Sampling.model_fields["temperature"].default
+    if pid not in _MIGRATION_LOGGED:
+        _MIGRATION_LOGGED.add(pid)
+        log.info("provider row %s has the pre-WS2 default sampling (temperature 0.7); planning at %s",
+                 pid, temperature)
+    return {**sampling, "temperature": temperature}
 
 
 def _chain_from_file(binding: Any) -> list:

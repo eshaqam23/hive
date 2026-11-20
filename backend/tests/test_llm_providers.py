@@ -503,3 +503,49 @@ def test_every_template_validates_as_a_row():
             ProviderRow(id=p.get("id", t["template_id"]).replace("_", "-"), label=t["label"], kind=t["kind"],
                         base_url=p["base_url"], model=p["model"] or "x",
                         structured_mode=p.get("structured_mode", t["structured_mode"]), sampling=t["sampling"])
+
+
+# -- WS2 fix W1: rows saved with the pre-WS2 default sampling plan at 0.2 ------------------------
+OLD_QWEN = {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "seed": 1234, "max_tokens": 3072,
+            "timeout_s": 60.0, "think": False}
+
+
+def _write_rows(rows: dict) -> None:
+    store_path().parent.mkdir(parents=True, exist_ok=True)
+    store_path().write_text(yaml.safe_dump({"version": 2, "providers": rows,
+                                            "roles": {"executive": list(rows)}}), encoding="utf-8")
+
+
+def _entry(kind: str, sampling: dict, key: str = "") -> dict:
+    entry = {"kind": kind, "base_url": "http://127.0.0.1:11434" if kind == "ollama" else "https://api.example/v1",
+             "model": "qwen3:8b", "structured_mode": "ollama_format" if kind == "ollama" else "json_schema",
+             "sampling": sampling}
+    return dict(entry, api_key=key) if key else entry
+
+
+def test_old_default_sampling_rows_plan_at_low_temperature(caplog):
+    _write_rows({"w1-desk-qwen": _entry("ollama", OLD_QWEN),
+                 "w1-hosted": _entry("openai_compatible", dict(OLD_QWEN, top_k=None), key=FAKE_KEY),
+                 "w1-explicit": _entry("ollama", dict(OLD_QWEN, temperature=0.5)),
+                 "w1-other-seed": _entry("ollama", dict(OLD_QWEN, seed=99))})
+    with caplog.at_level("INFO", logger="hive_exec.llm.providers"):
+        store = load_store()
+        load_store()  # a second load does not log again
+    assert store.row("w1-desk-qwen").sampling.temperature == 0.2
+    assert store.row("w1-desk-qwen").sampling.top_k == 20
+    assert store.row("w1-hosted").sampling.temperature == 0.2
+    assert store.row("w1-hosted").sampling.top_k is None
+    assert store.row("w1-explicit").sampling.temperature == 0.5  # an explicit choice is kept
+    assert store.row("w1-other-seed").sampling.temperature == 0.7  # not the old default set
+    migrated = [r for r in caplog.records if "0.2" in r.getMessage()]
+    assert sorted(r.getMessage().split()[2] for r in migrated) == ["w1-desk-qwen", "w1-hosted"]
+    assert all(r.levelname == "INFO" for r in migrated)
+    assert FAKE_KEY not in caplog.text
+
+
+def test_qwen_env_default_temperature_is_low(monkeypatch):
+    monkeypatch.delenv("QWEN_TEMPERATURE", raising=False)
+    assert QwenSettings().temperature == 0.2
+    assert QwenSettings.from_env().temperature == 0.2
+    monkeypatch.setenv("QWEN_TEMPERATURE", "0.6")
+    assert QwenSettings.from_env().temperature == 0.6
