@@ -44,7 +44,7 @@ Results from either must be labeled as such.
 - [ ] Look at failures from the smoke evaluation: wrong disposition, invalid plans, repairs.
 - [ ] Adjust `backend/hive_exec/planner/prompt.py`: rules and the 5 examples. Bump `PROMPT_VERSION`.
 - [ ] Record the real `usage.prompt_tokens`. Our budget check uses a rough estimate (~2,900 of 9,216).
-- [ ] Compare temperature 0.7 (Qwen's recommendation) with 0 (repeatability experiment).
+- [ ] Compare temperature 0.2 (planning default since WS2) with 0 (repeatability experiment); 0.7 was the Qwen card default.
 
 ### 3. Review and merge
 
