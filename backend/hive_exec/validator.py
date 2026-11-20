@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from .allocator import Allocation, binding_tasks
+from .allocator import Allocation, Allocator, binding_tasks
 from .catalog import BATTERY_RESERVE_PCT, ROBOTS, SKILLS, profile_for, route_between
 from .contracts import (
     AllocatedTask,
@@ -244,7 +244,8 @@ def validate(
     if proposal.disposition == "plan" and not any(r.strip() for r in proposal.rationale):
         for t in order:
             rid = allocation.robots.get(t.binding_id)
-            if rid in ROBOTS and not ROBOTS[rid].sensors and t.action.kind == "navigate_to"                     and moves.get(t.task_id):
+            if (rid in ROBOTS and not ROBOTS[rid].sensors and t.action.kind == "navigate_to"
+                    and moves.get(t.task_id)):
                 err("missing_rationale",
                     f"{rid} has no sensors and moves, but the plan gives no rationale for how it reaches its target.",
                     t.task_id, severity="info")
@@ -286,3 +287,35 @@ def validate(
                          projected_energy_pct={k: round(v, 2) for k, v in energy.items()}),
         ordered,
     )
+
+
+# Findings that only say "the evidence this stage will gather is not here yet": for a preview that is the
+# point, so they are left out (the preview waits_for says what it needs).
+PREVIEW_EVIDENCE_CODES = frozenset({
+    "object_not_located", "ambiguous_object", "route_not_observed_clear", "pick_location_mismatch",
+    "goal_not_projected", "stage_goal_uncovered", "mission_goals_changed", "missing_rationale",
+    "preference_overridden",
+})
+
+
+def validate_preview(proposal: PlanProposal, allocator: Allocator, robots: dict[str, RobotState],
+                     world: ObservedWorld) -> list[ValidationFinding]:
+    """Notes about the next-stage preview, never errors: the preview is not executable and not approved.
+
+    The preview's tasks run through the same checks as a plan, but nothing is allocated for the revision
+    and every finding is kept at warning or info, so a preview can never block approval. Findings that only
+    say the stage-1 evidence has not arrived yet are dropped. A check that raises becomes one info note.
+    """
+    preview = proposal.next_stage_preview
+    if preview is None:
+        return []
+    try:
+        shadow = proposal.model_copy(update={"tasks": list(preview.tasks), "stage_goals": [],
+                                             "next_stage_preview": None, "preview_changes": [],
+                                             "rationale": ["preview"]})
+        res = validate(shadow, allocator.allocate(shadow, robots, {}), robots, world)
+    except Exception as exc:  # noqa: BLE001 - a preview must never break planning
+        return [ValidationFinding(code="preview_unchecked", severity="info",
+                                  message=f"The next-stage preview could not be checked ({type(exc).__name__}).")]
+    return [f.model_copy(update={"severity": "warning" if f.severity == "error" else f.severity})
+            for f in res.report.findings if f.code not in PREVIEW_EVIDENCE_CODES]

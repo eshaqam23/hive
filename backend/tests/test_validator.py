@@ -241,3 +241,84 @@ def test_no_missing_rationale_when_the_sensorless_robot_does_not_move():
 def test_missing_rationale_never_blocks_the_plan():
     res, _ = run(_proposal(CARRY))
     assert res.report.ok and "missing_rationale" not in codes(res)
+
+
+# ================================================== WS4: notes about the next-stage preview
+
+from hive_exec.validator import validate_preview  # noqa: E402
+
+Q_NAV_PICKUP = {"task_id": "t1", "binding_id": "carrier", "depends_on": [], "preferred_robot_id": None,
+                "action": NAV_PICKUP}
+Q_PICK = {"task_id": "t2", "binding_id": "carrier", "depends_on": ["t1"], "preferred_robot_id": None,
+          "action": {"kind": "pick_object", "object_query": {"label": "red_block"}}}
+
+
+def _staged(preview_tasks, waits=("camera_01 sighting of red_block",), **extra):
+    tasks = [_t("t1", "observer", {"kind": "inspect_area", "area_id": "work_area",
+                                   "object_query": {"label": "red_block"}}, robot="camera_01")]
+    goals = [{"kind": "object_at", "object_query": {"label": "red_block"}, "location_id": "dropoff_zone"}]
+    d = _proposal(tasks, scope="observation_stage", goals=goals).model_dump()
+    d["next_stage_preview"] = {"summary": "Carry it over.", "tasks": preview_tasks, "waits_for": list(waits)}
+    d.update(extra)
+    return PlanProposal.model_validate(d)
+
+
+def preview_notes(p, world=None, robots=None):
+    return validate_preview(p, CapabilityAllocator(), robots or initial_robot_states(), world or ObservedWorld())
+
+
+def test_no_preview_means_no_notes():
+    assert preview_notes(_proposal(CARRY)) == []
+
+
+def test_preview_waiting_on_evidence_is_not_flagged_for_missing_evidence():
+    # nothing observed yet: the object is not located and the corridor not scanned; that is what stage 1 is for
+    notes = preview_notes(_staged([Q_NAV_PICKUP, Q_PICK]))
+    assert {n.code for n in notes} & {"object_not_located", "route_not_observed_clear", "ambiguous_object",
+                                      "pick_location_mismatch"} == set()
+
+
+def test_preview_notes_are_never_errors_and_keep_their_code():
+    bad = dict(Q_NAV_PICKUP, binding_id="looker",
+               action={"kind": "inspect_area", "area_id": "dropoff_zone", "object_query": {"label": "x"}})
+    notes = preview_notes(_staged([bad]))
+    assert notes and all(n.severity in ("warning", "info") for n in notes)
+    assert any(n.code == "no_eligible_robot" and n.severity == "warning" for n in notes)
+
+
+def test_preview_pick_of_an_unprofiled_object_is_noted_early():
+    pick = dict(Q_PICK, action={"kind": "pick_object", "object_query": {"label": "duck_toy"}}, depends_on=[])
+    notes = preview_notes(_staged([pick]))
+    assert any(n.code == "unknown_object_profile" and n.severity == "warning" and n.task_id == "t2" for n in notes)
+
+
+def test_preview_over_a_blocked_corridor_is_noted():
+    notes = preview_notes(_staged([Q_NAV_PICKUP]), world=_known_world("route_blocked"))
+    assert any(n.code == "route_blocked" and n.severity == "warning" for n in notes)
+
+
+def test_preview_for_an_unavailable_robot_is_noted():
+    robots = initial_robot_states()
+    robots["gripper_01"].available = False
+    notes = preview_notes(_staged([Q_NAV_PICKUP]), robots=robots)
+    assert any(n.code in ("no_eligible_robot", "robot_unavailable") and n.severity == "warning" for n in notes)
+
+
+def test_preview_checks_leave_the_plan_untouched_and_never_change_ok():
+    p = _staged([Q_NAV_PICKUP, Q_PICK])
+    before = p.model_dump()
+    res, alloc = run(p)
+    assert res.report.ok and p.model_dump() == before
+    assert set(alloc.robots) == {"observer"}  # the preview's "carrier" binding is never allocated
+    assert [t.task_id for t in res.tasks] == ["t1"] and res.tasks[0].robot_id == "camera_01"
+
+
+def test_preview_check_that_raises_becomes_one_info_note():
+    p = _staged([Q_NAV_PICKUP])
+
+    class Boom(CapabilityAllocator):
+        def allocate(self, *a, **k):
+            raise RuntimeError("boom")
+
+    notes = validate_preview(p, Boom(), initial_robot_states(), ObservedWorld())
+    assert [(n.code, n.severity) for n in notes] == [("preview_unchecked", "info")]
