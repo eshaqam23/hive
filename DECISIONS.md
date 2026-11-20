@@ -152,3 +152,10 @@ LLM)".
 - **Baseline:** feedback is applied by keyword rules (find-only, camera-only, negated phrases dropped); it cannot change the approved goals of a later stage and says so in issues.
 - **Frontend details:** DELETE goes through a local `execDelete` in ChatView (api.js has no DELETE helper); a message used as a clarification answer is not repeated as a bubble (it is in the clarification round); queued messages are also delivered at a feedback planning point.
 - **num_ctx clamp (carry-over):** Ollama num_ctx is min(input limit + max_tokens, 12288) and num_predict at most 3072.
+
+## WS5 verifier fixes
+- **Stop names its revision:** `/tasks/{id}/cancel` takes an optional `revision` (default the active one) because task ids repeat across revisions; a confirmed operator stop of a task an older revision left running is logged and the stage-end check runs, with no recovery (the operator asked for it, it is not a fault).
+- **Old-revision failures:** after a live supersede, an old task that ends failed/rejected/uncertain (or canceled unrequested) takes `_on_task_failure` like an active one; the sibling cancel now covers every live attempt, since all live attempts belong to the running stage; the recovery budget is shared so two such failures recover once.
+- **Feedback cap on the rendered form:** `render_feedback` (json.dumps, ASCII) is the one encoder for prompt and cap; older messages stay whole-or-nothing, the newest is cut by code point (binary search) with ` [truncated]`, so no escape or surrogate pair is split. Prompt text unchanged, PROMPT_VERSION stays v3.3.
+- **Delivered means used:** a landed non-live planning records which delivered messages it read; one tagged to a `stage_ended` revision is re-tagged to the revision that used it; at a terminal outcome a delivered message nothing read (live re-plan in flight or dropped) is canceled with a resend note. A live reply without a plan (answer) counts as used.
+- **Notes:** the held-to-queued fallback note is dropped when the message is later delivered, so a note never describes a past state.
