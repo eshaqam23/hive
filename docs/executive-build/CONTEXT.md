@@ -111,7 +111,7 @@ hive-exec venv has FastAPI + pytest-asyncio but no cv2, so test_adapters.py fail
 System pytest 7.4 warns "Unknown config option: asyncio_mode"; that is expected.
 - live-data (system python3, expect 152):
   `python3 -m pytest backend/tests -q --ignore=backend/tests/test_api.py --ignore=backend/tests/test_contracts.py --ignore=backend/tests/test_executive.py --ignore=backend/tests/test_validator.py --ignore=backend/tests/test_operator_messages.py --ignore-glob='backend/tests/test_llm_*'`
-- exec (hive-exec venv, expect 604 after the WS5 fix batch 3; 587 after the WS5 fix batch 2; 569 after the WS5 fixes; 553 after WS5; 518 after WS4; 442 after WS3; 411 after the WS2 fixes; 390 after WS2; 308 after WS1; 244 after prompt 9):
+- exec (hive-exec venv, expect 607 after the WS5 verify 4 notes; 604 after the WS5 fix batch 3; 587 after the WS5 fix batch 2; 569 after the WS5 fixes; 553 after WS5; 518 after WS4; 442 after WS3; 411 after the WS2 fixes; 390 after WS2; 308 after WS1; 244 after prompt 9):
   `~/.venvs/hive-exec/bin/python -m pytest backend/tests/test_api.py backend/tests/test_contracts.py backend/tests/test_executive.py backend/tests/test_validator.py backend/tests/test_operator_messages.py backend/tests/test_llm_*.py -q`
 - Also run `npm test` (Windows Node, expect 358 after the WS5 fix batch 3, 35 files; 357 after the WS5 fix batch 2; 356 after the WS5 fixes; 355 after WS5; 341 after WS4; 322 after WS3; 315 after the WS2 fixes; 313 after WS2; 305 after WS1; 297 before it) and the mock e2e from the Baseline section.
 - Prompt evaluation against a live model (WS2, not part of the suites): `backend/scripts/prompt_eval.py` runs the ten

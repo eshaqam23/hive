@@ -1378,3 +1378,65 @@ def test_fix3_a_lone_surrogate_in_the_previous_output_is_replaced_before_the_rep
     for text in (user_prompt(ctx, ["e1: broken"], bad), fit_user_prompt(ctx, ["e1: broken"], bad, 0)):
         text.encode("utf-8")  # raised UnicodeEncodeError before the fix
         assert ("x" + chr(0xFFFD) + "y") in text and chr(0xD800) not in text
+
+
+# ================================================================ WS5 verify 4 notes
+OMITTED = ("Left out of the planner prompt: it shows only your newest messages (at most 4, about 1200 characters). "
+           "Send it again if it still matters.")
+
+
+async def test_v4_a_message_the_cap_left_out_is_never_marked_applied(make_exec):
+    ex, stub = await stub_exec(make_exec, [OBSERVE_THEN_PICTURE, PICTURE_ONLY])
+    await ex.create_mission("Look around")
+    queued = [await ex.post_message(f"note {i}", "queue") for i in range(4)]
+    now = await ex.post_message("Just take a picture.", "now")
+    assert await wait_for(ex, {"awaiting_approval"} | DONE) == "awaiting_approval"
+    ctx = stub.contexts[-1]
+    assert ctx.operator_feedback == ["note 1", "note 2", "note 3", "Just take a picture."] and ctx.feedback_omitted == 1
+    left_out = msg(ex, queued[0]["id"])
+    assert (left_out["status"], left_out["delivered_to_revision"], left_out.get("note")) == ("delivered", None, OMITTED)
+    await approve_latest(ex)
+    assert _tags(ex, *queued[1:], now) == [("delivered", 2)] * 4
+    assert _tags(ex, queued[0]) == [("delivered", None)]  # the planner never saw it
+    await ex.cancel()
+    assert await wait_for(ex, DONE) in DONE
+    assert msg(ex, queued[0]["id"])["status"] == "canceled" and msg(ex, queued[0]["id"])["note"] == UNAPPLIED
+
+
+async def test_v4_an_operator_stop_the_robot_confirms_with_an_error_still_yields_to_a_real_fault(gated):
+    from hive_exec.contracts import TaskEvent
+
+    class NoConfirm3(ThreeHoldingGateway):
+        async def cancel(self, run_id, attempt_id):
+            return None
+
+    nav = task("t3", "navigate_to", "gripper_01", binding="carrier", location_id="pickup_zone",
+               route_id="pickup_corridor")
+    p1 = dict(plan(INSPECT("t1"), SCAN("t2"), nav), rationale=["gripper_01 drives the known corridor by dead reckoning"])
+    stub = StubPlanner([p1, PICTURE_ONLY])
+    ex = await gated(stub, "known", gateway=NoConfirm3)
+    await ex.create_mission("Look around")
+    await approve_latest(ex)
+    await until(lambda: all(rt(ex, 1, t).state in LIVE for t in ("t1", "t2", "t3")))
+    await ex.cancel_task("t1", revision=1)
+    att = attempt_of(ex, 1, "t1")
+    await ex.handle_event(TaskEvent(event_id="stop-t1", run_id=ex.run_id, attempt_id=att.attempt_id, robot_id="camera_01",
+                                    seq=900, status="canceled",
+                                    error={"code": "goal_canceled", "message": "canceled on request"}))
+    assert rt(ex, 1, "t1").error["code"] == "operator_stop" and "goal_canceled" in rt(ex, 1, "t1").error["message"]
+    await ex.handle_event(_event(ex, 1, "t2", "lidar_01", "failed", "lidar_fault"))
+    await ex.handle_event(_event(ex, 1, "t3", "gripper_01", "canceled"))
+    assert await wait_for(ex, {"awaiting_approval"} | DONE) == "awaiting_approval"
+    f = stub.contexts[-1].failure
+    assert (f["task_id"], f["robot_id"]) == ("t2", "lidar_01")
+
+
+async def test_v4_a_clarification_answer_whose_plan_is_rejected_is_canceled(make_exec):
+    ex, stub = await stub_exec(make_exec, [ask(), OBSERVE_THEN_PICTURE])
+    await ex.create_mission("Look for the block")
+    m = await ex.post_message("the red block", "now")
+    assert ex.mission.status == "awaiting_approval"
+    await ex.reject(1, "no")
+    assert await wait_for(ex, DONE) == "rejected"
+    got = msg(ex, m["id"])
+    assert (got["status"], got["note"]) == ("canceled", UNAPPLIED)

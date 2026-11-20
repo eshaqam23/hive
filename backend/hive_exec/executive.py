@@ -50,6 +50,8 @@ log = logging.getLogger(__name__)
 
 SIM_WORLDS = ("fixed", "random")
 UNAPPLIED_NOTE = "Mission ended before your message was applied; send it again as a new mission."
+OMITTED_NOTE = ("Left out of the planner prompt: it shows only your newest messages (at most 4, about 1200 "
+                "characters). Send it again if it still matters.")
 HELD_REQUEUED_NOTE = "Live replan failed; your message is queued for the next planning step."
 # A context over the input budget: retrying the same mission repeats the same overflow, so it is not retryable.
 # I2: the note a plan-less planning reply leaves on the messages its context included.
@@ -419,12 +421,12 @@ class Executive:
         ids = {x["id"] for x in m.operator_messages if x["status"] in OPEN_MESSAGE}
         if ids:
             self._update_messages(m, ids, status="canceled", note=f"Not delivered: {why}"[:300])
-        self._update_messages(m, self._unapplied(m), status="canceled", note=UNAPPLIED_NOTE)
+        self._update_messages(m, self._unapplied(m, ("feedback", "answer")), status="canceled", note=UNAPPLIED_NOTE)
 
     @staticmethod
-    def _unapplied(m: Mission) -> set[str]:
-        """Delivered feedback that is neither applied to an approved revision nor consumed by a reply."""
-        return {x["id"] for x in m.operator_messages if x["status"] == "delivered" and x["delivered_as"] == "feedback"
+    def _unapplied(m: Mission, kinds: tuple[str, ...] = ("feedback",)) -> set[str]:
+        """Delivered messages (feedback by default) neither applied to an approved revision nor consumed by a reply."""
+        return {x["id"] for x in m.operator_messages if x["status"] == "delivered" and x["delivered_as"] in kinds
                 and x["delivered_to_revision"] is None and x["id"] not in m.consumed_messages}
 
     @staticmethod
@@ -459,6 +461,15 @@ class Executive:
         """Message ids in the context of a revision that is still awaiting approval."""
         return frozenset().union(*(m.message_context.get(p.revision, frozenset()) for p in m.revisions
                                    if p.status == "awaiting_approval"))
+
+    def _context_ids(self, m: Mission, omitted: int) -> frozenset[str]:
+        """I1/I2: the messages a planning context includes (a revision it makes applies them on approval):
+        delivered answers and the feedback the cap rendered. Older feedback the cap left out is not in it; an
+        open one gets a note now (I3 cancels it at the end unless a later approved revision applies it)."""
+        feedback = [x["id"] for x in m.operator_messages if x["status"] == "delivered" and x["delivered_as"] == "feedback"]
+        left_out = set(feedback[:omitted])
+        self._update_messages(m, (self._unapplied(m) & left_out) - self._pending_context(m), note=OMITTED_NOTE)
+        return frozenset(x["id"] for x in m.operator_messages if x["status"] == "delivered" and x["id"] not in left_out)
 
     @staticmethod
     def _feedback_texts(m: Mission) -> list[str]:
@@ -569,8 +580,6 @@ class Executive:
         previous = (self._previous_observation(m)
                     if phase == "continuation" or (phase == "feedback" and not live
                                                    and m.stage_phase == "continuation") else None)
-        # I1/I2: the messages this planning context includes (a revision it makes applies them on approval).
-        read = frozenset(x["id"] for x in m.operator_messages if x["status"] == "delivered")
         ctx = build_context(phase=phase, command=m.command, robots=self.robots, world=self.world,
                             canonical_goals=m.canonical_goals, stage_history=m.history,
                             failure=failure, clarification=clarification,
@@ -578,6 +587,7 @@ class Executive:
                             previous_preview=self._preview_for_context(previous),
                             operator_feedback=self._feedback_texts(m),
                             previous_proposal=m.revising if phase == "feedback" else None)
+        read = self._context_ids(m, ctx.feedback_omitted)
         self.log("planning", f"Requesting {phase} proposal from {planner.kind}"
                  + (" (the active revision keeps running)." if live else "."))
         attempts, first_ok, repaired = 0, None, False
@@ -1162,8 +1172,11 @@ class Executive:
             rt.state = ev.status
             rt.result, rt.finished_at = ev.result, self.clock()
             rt.error = ev.error.model_dump() if ev.error else None
-            if ev.status == "canceled" and att.task_stop_requested and rt.error is None:
-                rt.error = {"code": "operator_stop", "message": f"Operator stopped {att.task_id}; robot confirmed."}
+            if ev.status == "canceled" and att.task_stop_requested:
+                # The confirmed stop, whatever code the robot attached (kept in the message).
+                said = f" ({ev.error.code}: {ev.error.message})" if ev.error else ""
+                rt.error = {"code": "operator_stop",
+                            "message": f"Operator stopped {att.task_id}; robot confirmed{said}."[:300]}
         self.log("event", f"{att.robot_id} {ev.status} {att.task_id}"
                  + (f": {ev.error.code} - {ev.error.message}" if ev.error else ""),
                  attempt_id=att.attempt_id, result=ev.result)
