@@ -111,9 +111,9 @@ hive-exec venv has FastAPI + pytest-asyncio but no cv2, so test_adapters.py fail
 System pytest 7.4 warns "Unknown config option: asyncio_mode"; that is expected.
 - live-data (system python3, expect 152):
   `python3 -m pytest backend/tests -q --ignore=backend/tests/test_api.py --ignore=backend/tests/test_contracts.py --ignore=backend/tests/test_executive.py --ignore=backend/tests/test_validator.py --ignore-glob='backend/tests/test_llm_*'`
-- exec (hive-exec venv, expect 411 after the WS2 fixes; 390 after WS2; 308 after WS1; 244 after prompt 9):
+- exec (hive-exec venv, expect 442 after WS3; 411 after the WS2 fixes; 390 after WS2; 308 after WS1; 244 after prompt 9):
   `~/.venvs/hive-exec/bin/python -m pytest backend/tests/test_api.py backend/tests/test_contracts.py backend/tests/test_executive.py backend/tests/test_validator.py backend/tests/test_llm_*.py -q`
-- Also run `npm test` (Windows Node, expect 315 after the WS2 fixes; 313 after WS2; 305 after WS1; 297 before it) and the mock e2e from the Baseline section.
+- Also run `npm test` (Windows Node, expect 322 after WS3; 315 after the WS2 fixes; 313 after WS2; 305 after WS1; 297 before it) and the mock e2e from the Baseline section.
 - Prompt evaluation against a live model (WS2, not part of the suites): `backend/scripts/prompt_eval.py` runs the ten
   labelled commands through the Executive on the fake fleet with the `executive` role of an explicitly named provider
   store, prints a PASS/FAIL table and exits 1 on any failure (2 when the store or provider is unusable). Keys are never
