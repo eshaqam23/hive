@@ -114,3 +114,47 @@ describe("SharedMap", () => {
     expect(screen.queryByRole("button", { name: /Demo data/ })).toBeNull();
   });
 });
+
+describe("SharedMap provenance tag (A8)", () => {
+  const withEvidence = (evidence) => ({
+    ...builtMap,
+    provenance: { source: "map_area", robot_id: "lidar_01", attempt_id: "run-1:t1:1", coverage: 0.95, evidence },
+  });
+  const mini = (map) => render(<SharedMap compact execState={execState} fleet={fleet} map={map} reachable />);
+
+  it("tags a simulated map SIM on the Map tab and on Chat's mini map, and names its source", () => {
+    page({ map: withEvidence("simulated") });
+    expect(screen.getByTestId("map-tag").textContent).toBe("SIM");
+    expect(screen.getByText(/map_area by lidar_01 · 95% coverage/)).toBeTruthy();
+    cleanup();
+    mini(withEvidence("simulated"));
+    expect(screen.getByTestId("map-tag").textContent).toBe("SIM");
+  });
+
+  it("tags an emulated agent map EMULATED", () => {
+    page({ map: withEvidence("emulated") });
+    expect(screen.getByTestId("map-tag").textContent).toBe("EMULATED");
+    expect(screen.getByTestId("map-tag").getAttribute("title")).toMatch(/Emulated/);
+    cleanup();
+    mini(withEvidence("emulated"));
+    expect(screen.getByTestId("map-tag").textContent).toBe("EMULATED");
+  });
+
+  it("shows no tag for a real map, and none while no map is built", () => {
+    page({ map: withEvidence("real") });
+    expect(screen.queryByTestId("map-tag")).toBe(null);
+    cleanup();
+    mini(withEvidence("real"));
+    expect(screen.queryByTestId("map-tag")).toBe(null);
+    cleanup();
+    page();
+    expect(screen.queryByTestId("map-tag")).toBe(null);
+  });
+
+  it("shows DEMO, not the server map's tag, while the demo fixture is drawn", () => {
+    page({ map: withEvidence("emulated"), demoAllowed: true });
+    fireEvent.click(screen.getByRole("button", { name: /Demo data/ }));
+    expect(screen.getByTestId("demo-watermark")).toBeTruthy();
+    expect(screen.queryByTestId("map-tag")).toBe(null);
+  });
+});

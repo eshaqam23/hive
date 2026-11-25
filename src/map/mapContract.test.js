@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CELL, SCHEMA, cellClass, classifyGrid, knownFraction, parseSharedMap } from "./mapContract.js";
+import { CELL, SCHEMA, cellClass, classifyGrid, knownFraction, mapTag, parseSharedMap } from "./mapContract.js";
 import { DEMO_MAP } from "./demoMap.js";
 import { clampScale, fitView, niceStep, scaleBar, toScreen, toWorld, zoomAt } from "./mapMath.js";
 
@@ -113,5 +113,29 @@ describe("mapMath", () => {
     expect(view.cy).toBe(2.5);
     expect(view.scale).toBeCloseTo(90); // 10 m wide into 1000 px with 10 % margin
     expect(fitView(null, { width: 800, height: 600 })).toEqual({ cx: 0, cy: 0, scale: 50 });
+  });
+});
+
+describe("provenance (A8)", () => {
+  const base = { available: true, schema: SCHEMA, occupancy: null };
+  const prov = { source: "map_area", robot_id: "lidar_01", attempt_id: "run-1:t1:1", coverage: 0.95, evidence: "emulated" };
+
+  it("keeps a map_area provenance and fails safe on an unknown evidence", () => {
+    expect(parseSharedMap({ ...base, provenance: prov }).provenance).toEqual(prov);
+    expect(parseSharedMap({ ...base, provenance: { ...prov, evidence: "hardware" } }).provenance.evidence).toBe("simulated");
+    expect(parseSharedMap({ ...base, provenance: { ...prov, evidence: undefined } }).provenance.evidence).toBe("simulated");
+    expect(parseSharedMap({ ...base, provenance: "lidar" }).provenance).toBe(null);
+    expect(parseSharedMap(base).provenance).toBe(null);
+  });
+
+  it("tags a map SIM or EMULATED, nothing for real; a map without provenance is SIM", () => {
+    const tag = (evidence) => mapTag(parseSharedMap({ ...base, provenance: { ...prov, evidence } }));
+    expect(tag("simulated")).toBe("SIM");
+    expect(tag("emulated")).toBe("EMULATED");
+    expect(tag("real")).toBe(null);
+    expect(tag("hardware")).toBe("SIM");
+    expect(mapTag(parseSharedMap(base))).toBe("SIM");
+    expect(mapTag(parseSharedMap({ available: false, reason: "no map reported in this run" }))).toBe(null);
+    expect(mapTag(null)).toBe(null);
   });
 });

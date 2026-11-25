@@ -167,10 +167,10 @@ def test_synapse_health_reports_bridge_and_rosbridge_separately():
     assert links["bridge"]["connected"] is False and links["rosbridge"]["connected"] is False
 
 
-def test_http_map_stub():
-    with _client() as c:
+def test_http_map_without_a_map_record():
+    with _client() as c:  # A8: the map comes from the run's latest map record (test_shared_map.py)
         assert c.get("/api/exec/map").json() == {
-            "available": False, "reason": "shared perception not built yet", "schema": "hive.shared-map.v0"}
+            "available": False, "reason": "no map reported in this run", "schema": "hive.shared-map.v0"}
 
 
 # -- sim world plumbing ------------------------------------------------------------------
