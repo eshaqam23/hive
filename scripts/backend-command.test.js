@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { backendCommand, launchPlan, serviceCommand, toWslPath, withWslEnv, withWslPaths, wslSignals } from "./backend-command.mjs";
+import {
+  CORE_V2_PATCH,
+  agentsNotUpMessage,
+  backendCommand,
+  coreBuildCommand,
+  coreDirFor,
+  coreStampProblem,
+  launchPlan,
+  serviceCommand,
+  toWslPath,
+  viteArgs,
+  withWslEnv,
+  withWslPaths,
+  wslSignals,
+} from "./backend-command.mjs";
 
 describe("toWslPath", () => {
   it("lower-cases the drive letter and converts backslashes", () => {
@@ -188,6 +202,10 @@ describe("withWslEnv", () => {
   it("carries HIVE_SIM_WORLD so the Executive and the fake fleet in WSL see the launcher's world", () => {
     expect(withWslEnv(undefined, { HIVE_SIM_WORLD: "random" })).toBe("HIVE_SIM_WORLD");
   });
+  it("carries the --agents variables: HIVE_AGENT_ROOT (maps), HIVE_CORE_DIR and HIVE_BRIDGE_TIMEOUT_MARGIN_S (bridge)", () => {
+    const env = { HIVE_AGENT_ROOT: "/home/u/hive_ws/src/agent", HIVE_CORE_DIR: "/home/u/.hive-bridge-a8/core", HIVE_BRIDGE_TIMEOUT_MARGIN_S: "30" };
+    expect(withWslEnv(undefined, env)).toBe("HIVE_AGENT_ROOT:HIVE_CORE_DIR:HIVE_BRIDGE_TIMEOUT_MARGIN_S");
+  });
 });
 
 describe("withWslPaths", () => {
@@ -205,5 +223,80 @@ describe("withWslPaths", () => {
     const win = { HIVE_ROS_SETUP: "C:/x/setup.bash" };
     withWslPaths(win);
     expect(win.HIVE_ROS_SETUP).toBe("C:/x/setup.bash");
+  });
+});
+
+describe("launchPlan --agents and --no-open (A8)", () => {
+  const names = (plan) => plan.steps.map((s) => s.name);
+
+  it("--agents starts the bridge but no fake fleet, after the hive-agent fleet's rosbridge :9090 is up", () => {
+    const plan = launchPlan({ argv: ["--agents"], env: {} });
+    expect(plan.agents).toBe(true);
+    expect(plan.gateway).toBe("synapse");
+    expect(names(plan)).toEqual(["agents", "backend", "bridge", "exec", "vite"]);
+    const wait = plan.steps[0];
+    expect(wait.port).toBe(9090);
+    expect(wait.external).toBe(true); // waited for, never started (no hive_fake_robots next to agents)
+    expect(plan.steps.filter((s) => s.external)).toEqual([wait]);
+  });
+  it("--agents forces HIVE_SIM_WORLD=fixed", () => {
+    expect(launchPlan({ argv: ["--agents"], env: { HIVE_SIM_WORLD: "random" } }).simWorld).toBe("fixed");
+    expect(launchPlan({ argv: ["--agents"], env: {} }).simWorld).toBe("fixed");
+    expect(launchPlan({ argv: [], env: {} }).agents).toBe(false);
+  });
+  it("--agents refuses the in-process gateway and the flags that leave out the bridge or the Executive", () => {
+    expect(launchPlan({ argv: ["--agents"], env: { HIVE_GATEWAY: "fake" } }).error).toMatch(/--agents.*HIVE_GATEWAY=synapse/);
+    for (const flag of ["--no-bridge", "--no-executive", "--backend-only"]) {
+      expect(launchPlan({ argv: ["--agents", flag], env: {} }).error).toMatch(new RegExp(`--agents.*${flag}`));
+    }
+  });
+  it("--no-open starts Vite without opening a browser (WSL has none); the default still opens one", () => {
+    expect(launchPlan({ argv: [], env: {} }).open).toBe(true);
+    expect(launchPlan({ argv: ["--no-open"], env: {} }).open).toBe(false);
+    expect(launchPlan({ argv: ["--agents", "--no-open"], env: {} }).open).toBe(false);
+    expect(viteArgs(true)).toEqual(["--host", "127.0.0.1", "--open"]);
+    expect(viteArgs(false)).toEqual(["--host", "127.0.0.1"]);
+  });
+  it("names the new flags when an option is unknown", () => {
+    expect(launchPlan({ argv: ["--agent"], env: {} }).error).toMatch(/--agents.*--no-open|--no-open.*--agents/);
+  });
+  it("tells how to bring the hive-agent fleet up when :9090 never opens", () => {
+    const msg = agentsNotUpMessage({ port: 9090, waitMs: 60000 });
+    expect(msg).toMatch(/9090/);
+    expect(msg).toMatch(/60 s/);
+    expect(msg).toMatch(/scripts\/fleet_up\.sh/);
+  });
+});
+
+describe("the bridge core stamp for --agents (A8)", () => {
+  const patches = ["corebrum-core-rosbridge-actions.v1.patch", CORE_V2_PATCH];
+  const pkg = (patch) => JSON.stringify({ name: "@corebrum/core", hive: { synapse_commit: "6f7b", patch } });
+  const dir = "/home/u/.hive-bridge-a8/core";
+
+  it("uses HIVE_CORE_DIR, else ~/.hive-bridge/core, like bridge/server.mjs", () => {
+    expect(coreDirFor({}, "/home/u")).toBe("/home/u/.hive-bridge/core");
+    expect(coreDirFor({ HIVE_CORE_DIR: dir }, "/home/u")).toBe(dir);
+  });
+  it("accepts a core whose stamp is the v2 patch, or a later patch of this repo", () => {
+    expect(CORE_V2_PATCH).toBe("corebrum-core-rosbridge-actions.v2.patch");
+    expect(coreStampProblem({ pkgText: pkg(CORE_V2_PATCH), patches, coreDir: dir })).toBe(null);
+    const later = "corebrum-core-rosbridge-actions.v3.patch";
+    expect(coreStampProblem({ pkgText: pkg(later), patches: [...patches, later], coreDir: dir })).toBe(null);
+  });
+  it("refuses a v1-only, unpatched, unstamped, unreadable or foreign core, naming the build command", () => {
+    const cases = [pkg("corebrum-core-rosbridge-actions.v1.patch"), pkg("none"), JSON.stringify({ name: "x" }), "{not json", null, pkg("zzz-other.patch")];
+    for (const pkgText of cases) {
+      const msg = coreStampProblem({ pkgText, patches, coreDir: dir });
+      expect(msg).toMatch(new RegExp(CORE_V2_PATCH.replace(/\./g, "\\.")));
+      expect(msg).toMatch(/120 s/);
+      expect(msg).toContain(dir);
+      expect(msg).toContain("HIVE_BRIDGE_HOME=/home/u/.hive-bridge-a8 HIVE_CORE_PATCH=1 bash bridge/scripts/build-core.sh");
+    }
+  });
+  it("builds the command for the core directory build-core.sh writes ($HIVE_BRIDGE_HOME/core)", () => {
+    expect(coreBuildCommand("/home/u/.hive-bridge/core/")).toBe("HIVE_BRIDGE_HOME=/home/u/.hive-bridge HIVE_CORE_PATCH=1 bash bridge/scripts/build-core.sh");
+    expect(coreBuildCommand("/opt/mycore")).toBe(
+      "HIVE_BRIDGE_HOME=<dir> HIVE_CORE_PATCH=1 bash bridge/scripts/build-core.sh, then HIVE_CORE_DIR=<dir>/core",
+    );
   });
 });
