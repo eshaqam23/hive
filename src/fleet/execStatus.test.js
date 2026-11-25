@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activeMission, execStatus, isSimulated } from "./execStatus.js";
+import { activeMission, execStatus, isFakeFleet, isSimulated, simTag } from "./execStatus.js";
 import { linkState } from "./presets.jsx";
 
 const robotEntry = (over = {}) => ({
@@ -47,6 +47,43 @@ describe("isSimulated", () => {
     expect(isSimulated({ kind: "synapse" })).toBe(true); // today synapse is answered by the fake fleet
     expect(isSimulated(undefined)).toBe(true);
     expect(isSimulated({ kind: "synapse", simulated: false })).toBe(false);
+  });
+});
+
+const EMULATED = { schema: "hive.fleet-report.v1", kind: "hive_agent", profile: "laptop", evidence: "emulated", agent_commit: "fc1fe24" };
+const REAL = { ...EMULATED, profile: "desktop", evidence: "real" };
+
+describe("simTag and isFakeFleet (A8 fleet report)", () => {
+  it("tags SIM for fake fleets, EMULATED for an emulated agent fleet and nothing for a real one", () => {
+    expect(simTag({ kind: "fake", simulated: true, fleet: null })).toBe("SIM");
+    expect(simTag({ kind: "synapse", simulated: true, fleet: null })).toBe("SIM");
+    expect(simTag({ kind: "fake" })).toBe("SIM");
+    expect(simTag(undefined)).toBe("SIM");
+    expect(simTag({ kind: "synapse", simulated: true, fleet: EMULATED })).toBe("EMULATED");
+    expect(simTag({ kind: "synapse", simulated: false, fleet: REAL })).toBeNull();
+    expect(simTag({ kind: "synapse", simulated: true, fleet: { ...EMULATED, evidence: null } })).toBe("SIM");
+  });
+
+  it("never goes SIM-free while the report says emulated, whatever the flag says", () => {
+    expect(simTag({ kind: "synapse", simulated: false, fleet: EMULATED })).toBe("EMULATED");
+    expect(isSimulated({ kind: "synapse", simulated: false, fleet: EMULATED })).toBe(true);
+    expect(isSimulated({ kind: "synapse", simulated: false, fleet: REAL })).toBe(false);
+  });
+
+  it("is a fake fleet only without a fleet report (the in-process fake or the ROS fake fleet)", () => {
+    expect(isFakeFleet({ kind: "fake", label: "Fake fleet (in-process simulation)" })).toBe(true);
+    expect(isFakeFleet({ kind: "synapse", simulated: true, fleet: null })).toBe(true);
+    expect(isFakeFleet({ kind: "synapse", simulated: true, fleet: EMULATED })).toBe(false);
+    expect(isFakeFleet({ kind: "synapse", simulated: false, fleet: REAL })).toBe(false);
+    expect(isFakeFleet({ kind: "synapse", simulated: false })).toBe(false); // fail safe: hide the drawer
+    expect(isFakeFleet(undefined)).toBe(false);
+  });
+
+  it("carries the tag, an unknown battery and an unknown location into the panel status", () => {
+    const agentState = { gateway: { kind: "synapse", simulated: true, fleet: EMULATED }, catalog, robots: [robotEntry({ state: { location_id: null, health: "ok", available: true } })] };
+    expect(execStatus(lidar, exec(agentState))).toMatchObject({ kind: "idle", sim: true, tag: "EMULATED", battery: null, location: null });
+    expect(execStatus(lidar, exec({ ...agentState, gateway: { kind: "fake" } }))).toMatchObject({ sim: true, tag: "SIM" });
+    expect(execStatus(lidar, exec({ ...agentState, gateway: { kind: "synapse", simulated: false, fleet: REAL } }))).toMatchObject({ sim: false, tag: null });
   });
 });
 

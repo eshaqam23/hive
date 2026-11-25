@@ -95,6 +95,27 @@ describe("FleetPanel", () => {
     expect(within(block).getByRole("meter", { name: "Battery (simulated)" }).getAttribute("aria-valuenow")).toBe("64");
   });
 
+  it("tags an emulated agent fleet EMULATED and says battery unknown when the agent sends none", () => {
+    const fleet = { schema: "hive.fleet-report.v1", kind: "hive_agent", profile: "laptop", evidence: "emulated", agent_commit: "fc1fe24" };
+    const entry = { ...lidarEntry, state: { location_id: "lidar_post", health: "ok", available: true } };
+    const exec = execState({ gateway: { kind: "synapse", label: "AgenticROS / Corebrum Synapse", simulated: true, fleet }, robots: [entry] });
+    render(<FleetPanel exec={exec} link={null} robot={rover()} {...handlers()} />);
+    const block = screen.getByRole("group", { name: "Executive status for lidar_01" });
+    expect(within(block).getByText("EMULATED").getAttribute("title")).toMatch(/Emulated/);
+    expect(within(block).queryByText("SIM")).toBeNull();
+    expect(within(block).getByText("battery unknown")).toBeTruthy();
+    expect(within(block).getByRole("meter", { name: "Battery (emulated)" }).getAttribute("aria-valuenow")).toBeNull();
+  });
+
+  it("shows no tag for a real agent fleet", () => {
+    const fleet = { schema: "hive.fleet-report.v1", kind: "hive_agent", profile: "desktop", evidence: "real", agent_commit: "abc1234" };
+    render(<FleetPanel exec={execState({ gateway: { kind: "synapse", simulated: false, fleet } })} link={null} robot={rover()} {...handlers()} />);
+    const block = screen.getByRole("group", { name: "Executive status for lidar_01" });
+    expect(within(block).queryByText("SIM")).toBeNull();
+    expect(within(block).queryByText("EMULATED")).toBeNull();
+    expect(within(block).getByRole("meter", { name: "Battery" }).getAttribute("aria-valuenow")).toBe("64");
+  });
+
   it("names the task and skill while executing, with the command line", () => {
     const mission = {
       mission_id: "m1",

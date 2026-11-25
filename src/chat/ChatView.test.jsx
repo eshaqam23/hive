@@ -671,6 +671,21 @@ describe("sim controls", () => {
     await waitFor(() => expect(row("t1")).toBeTruthy());
     expect(screen.queryByRole("region", { name: "Simulation controls" })).toBeNull();
   });
+
+  it("is hidden for an agent fleet, even an emulated one, whose rail is tagged EMULATED with battery unknown", async () => {
+    const fleet = { schema: "hive.fleet-report.v1", kind: "hive_agent", profile: "laptop", evidence: "emulated", agent_commit: "fc1fe24" };
+    const state = clone(running);
+    state.gateway = { ...running.gateway, kind: "synapse", simulated: true, fleet };
+    for (const r of state.robots) delete r.state.battery_pct;
+    server.state = state;
+    render(<Harness />);
+    await waitFor(() => expect(row("t1")).toBeTruthy());
+    expect(screen.queryByRole("region", { name: "Simulation controls" })).toBeNull();
+    const rail = screen.getByRole("region", { name: "Fleet" });
+    expect(within(rail).getAllByText("EMULATED").length).toBe(state.robots.length);
+    expect(within(rail).queryByText("SIM")).toBeNull();
+    expect(within(rail).getAllByText("battery unknown").length).toBe(state.robots.length);
+  });
 });
 
 describe("operator messages", () => {

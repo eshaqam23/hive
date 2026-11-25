@@ -412,7 +412,7 @@ PROMPT_V32_WS4_CHARS = 12572  # len(system_prompt()) when WS4 landed (a24f8f0)
 PROMPT_FIX_BUDGET = 120  # WS4 fix F6 (preview_changes only with a previous preview) may add this much
 
 
-def _preview_context(preview=True):
+def _preview_context(preview=True, robots=None):
     from hive_exec.contracts import Observation, ObjectAtGoal
     from hive_exec.context import build_context
     from hive_exec.world import ObservedWorld, initial_robot_states
@@ -429,7 +429,8 @@ def _preview_context(preview=True):
                                       "route_id": "pickup_corridor"}, "depends_on": []}],
                 "waits_for": ["camera_01 sighting of green_block"]}
     return build_context(phase="continuation", command="Bring the green block to the drop-off zone.",
-                         robots=initial_robot_states(), world=w, canonical_goals=[goal], previous_preview=prev)
+                         robots=robots or initial_robot_states(), world=w, canonical_goals=[goal],
+                         previous_preview=prev)
 
 
 def test_prompt_is_v3_5_and_says_so():
@@ -610,6 +611,33 @@ def test_prompt_growth_for_map_area_is_budgeted():
 
     assert PROMPT_V34_CHARS < len(system_prompt()) <= PROMPT_V34_CHARS + PROMPT_A8_BUDGET
 
+
+
+# A8 step 5: the fleet report's "ready" text for all three robots (every catalog skill and id: the most a report
+# can list, since it can only remove) plus "unknown" battery, in estimated tokens over the same context (DECISIONS).
+FLEET_REPORT_CONTEXT_BUDGET = 100
+
+
+def test_fleet_report_context_growth_is_budgeted():
+    from hive_exec.context import MAX_INPUT_TOKENS, estimate_tokens
+    from hive_exec.fleet_report import parse_capabilities
+    from hive_exec.llm import wire
+    from hive_exec.planner.prompt import system_prompt, user_prompt
+    from hive_exec.world import initial_robot_states
+
+    from .fleet_stub import full_caps
+
+    robots = initial_robot_states()
+    for rid, c in full_caps().items():
+        robots[rid].capabilities = parse_capabilities(c)
+        robots[rid].battery_pct = None
+    plain, reported = user_prompt(_preview_context()), user_prompt(_preview_context(robots=robots))
+    assert reported.count('"ready":') == 3 and reported.count('"battery_pct":"unknown"') == 3
+    growth = estimate_tokens(reported) - estimate_tokens(plain)
+    assert 0 < growth <= FLEET_REPORT_CONTEXT_BUDGET
+    total = (estimate_tokens(system_prompt()) + estimate_tokens(reported)
+             + estimate_tokens(json.dumps(wire.planning_schema())) // 4)
+    assert total < MAX_INPUT_TOKENS * 62 // 100
 
 
 def test_prompt_has_one_object_held_example_that_validates():

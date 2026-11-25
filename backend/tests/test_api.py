@@ -113,7 +113,8 @@ def test_http_health_reports_each_dependency():
         h = c.get("/api/exec/health").json()
     assert h["ok"] is True and h["ready"] is True and h["missing"] == []
     assert h["gateway"] == {"kind": "fake", "label": h["gateway"]["label"], "connected": True,
-                            "verified_round_trip": False, "detail": h["gateway"]["detail"]}
+                            "verified_round_trip": False, "detail": h["gateway"]["detail"],
+                            "simulated": True, "fleet": None}
     assert h["default_planner"] == "baseline" and h["planner"]["ready"] is True
     llm = h["planners"]["llm"]
     assert llm["role"] == "executive" and llm["bound"] is False and llm["ready"] is False

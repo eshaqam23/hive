@@ -56,6 +56,18 @@ describe("Header", () => {
     expect(onNavigate).toHaveBeenCalledWith("chat");
   });
 
+  it("tags the mission pill EMULATED for an emulated agent fleet and leaves it untagged for a real one", () => {
+    const mission = { status: "executing", active_revision: 1, created_at: Date.now() / 1000 };
+    header({ mission, sim: "EMULATED" });
+    expect(screen.getByText("EMULATED")).toBeTruthy();
+    expect(screen.queryByText("SIM")).toBeNull();
+    cleanup();
+    header({ mission, sim: null });
+    expect(screen.getByTestId("mission-pill")).toBeTruthy();
+    expect(screen.queryByText("SIM")).toBeNull();
+    expect(screen.queryByText("EMULATED")).toBeNull();
+  });
+
   it("has no pill without an active mission", () => {
     header({ mission: { status: "completed", active_revision: 1, created_at: 0 } });
     expect(screen.queryByTestId("mission-pill")).toBeNull();
