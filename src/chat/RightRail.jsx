@@ -1,6 +1,6 @@
 // The chat's right rail: the Executive's fleet (compact), the shared mini map and the agent reports.
 import React from "react";
-import { isSimulated } from "../fleet/execStatus.js";
+import { simTag } from "../fleet/execStatus.js";
 import { useSharedMap } from "../map/MapView.jsx";
 import SharedMap from "../map/SharedMap.jsx";
 import { SimTag } from "../shell/SimTag.jsx";
@@ -22,7 +22,7 @@ function robotChip(robot, mission) {
 }
 
 export function FleetList({ state }) {
-  const sim = isSimulated(state?.gateway);
+  const tag = simTag(state?.gateway);
   const robots = state?.robots || [];
   const place = (id) => state?.catalog?.locations?.find((l) => l.location_id === id)?.label ?? id;
   return (
@@ -42,7 +42,7 @@ export function FleetList({ state }) {
               <li className="rounded-xl border border-line bg-card px-3 py-2" data-robot={robot.robot_id} key={robot.robot_id}>
                 <div className="flex items-center gap-2">
                   <span className="min-w-0 flex-1 truncate text-[14px] font-medium text-ink">{robot.display_name}</span>
-                  {sim && <SimTag className="text-[11px] leading-4" />}
+                  {tag && <SimTag className="text-[11px] leading-4" label={tag} />}
                 </div>
                 <div className="mt-0.5 flex items-center gap-2 text-[12px]">
                   <span className={`inline-flex items-center gap-1 ${chip.tone}`}>
@@ -50,7 +50,7 @@ export function FleetList({ state }) {
                     {chip.label}
                   </span>
                   <span className="text-faint">·</span>
-                  <span className={`font-mono ${Number(battery) < 20 ? "text-warn" : "text-muted"}`}>{Number.isFinite(battery) ? `${Math.round(battery)}%` : "—"}</span>
+                  <span className={`font-mono ${Number(battery) < 20 ? "text-warn" : "text-muted"}`}>{Number.isFinite(battery) ? `${Math.round(battery)}%` : "battery unknown"}</span>
                   <span className="min-w-0 flex-1 truncate text-right text-faint">{robot.state?.carried_object ? `holds ${robot.state.carried_object}` : place(robot.state?.location_id)}</span>
                 </div>
               </li>

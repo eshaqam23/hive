@@ -21,6 +21,7 @@ from .catalog import (
     area_contains,
 )
 from .contracts import Observation
+from .fleet_report import Capabilities
 
 Clock = Callable[[], float]
 
@@ -81,13 +82,14 @@ class MapRecord:
 @dataclass
 class RobotState:
     robot_id: str
-    location_id: str
-    battery_pct: float = BATTERY_START_PCT
+    location_id: Optional[str]  # A8: None = unknown (an agent fleet reported none)
+    battery_pct: Optional[float] = BATTERY_START_PCT  # A8: None = unknown (not measured by the agent)
     health: str = "ok"  # ok | fault
     available: bool = True
     current_attempt_id: Optional[str] = None
     carried_object: Optional[str] = None
     last_update: float = 0.0
+    capabilities: Optional[Capabilities] = None  # A8: the robot's fleet-report capabilities, if any
 
 
 class ObservedWorld:

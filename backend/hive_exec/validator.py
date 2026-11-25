@@ -186,8 +186,11 @@ def validate(
             here = proj_loc.get(rid)
             moves[t.task_id] = a.location_id != here
             if a.location_id != here:
-                route = route_between(here, a.location_id)
-                if route is None:
+                route = None if here is None else route_between(here, a.location_id)
+                if here is None:
+                    err("location_unknown", f"{rid} location unknown: the fleet reports none, so travel to "
+                        f"{a.location_id} has no known start.", t.task_id)
+                elif route is None:
                     err("no_route", f"No route from {here} to {a.location_id}.", t.task_id)
                 else:
                     if a.route_id != route.route_id:
@@ -221,7 +224,8 @@ def validate(
                     err("object_held", f"{oid} is already held by {o['held_by']}.", t.task_id)
                 elif o["location_id"] != proj_loc.get(rid):
                     err("pick_location_mismatch",
-                        f"{rid} would be at {proj_loc.get(rid)} but {oid} is observed at {o['location_id']}.", t.task_id)
+                        f"{rid} would be at {proj_loc.get(rid) or 'an unknown location'} but {oid} is observed "
+                        f"at {o['location_id']}.", t.task_id)
                 if proj_carry.get(rid):
                     err("capacity", f"{rid} would already hold {proj_carry[rid]} (capacity {desc.capacity}).", t.task_id)
                 proj_carry[rid] = oid
@@ -234,7 +238,8 @@ def validate(
                 if proj_carry.get(rid) != oid:
                     err("possession_order", f"{rid} would not hold {oid} when placing (pick must come first).", t.task_id)
                 if proj_loc.get(rid) != a.location_id:
-                    err("place_location_mismatch", f"{rid} would be at {proj_loc.get(rid)}, not {a.location_id}.", t.task_id)
+                    err("place_location_mismatch",
+                        f"{rid} would be at {proj_loc.get(rid) or 'an unknown location'}, not {a.location_id}.", t.task_id)
                 proj_carry[rid] = None
                 proj_obj[oid].update({"held_by": None, "location_id": a.location_id})
         resolved[t.task_id] = AllocatedTask(task_id=t.task_id, binding_id=t.binding_id, robot_id=rid,
@@ -254,7 +259,10 @@ def validate(
     # --- battery
     for rid, need in energy.items():
         state = robots.get(rid)
-        if state and state.battery_pct - need < BATTERY_RESERVE_PCT:
+        if state and state.battery_pct is None:  # A8: an agent fleet that does not measure it
+            err("battery_unmeasured", f"{rid} reports no battery level: {need:.1f}% + {BATTERY_RESERVE_PCT:.0f}% "
+                "reserve cannot be checked.", severity="warning")
+        elif state and state.battery_pct - need < BATTERY_RESERVE_PCT:
             err("insufficient_battery",
                 f"{rid} has {state.battery_pct:.1f}% but needs {need:.1f}% + {BATTERY_RESERVE_PCT:.0f}% reserve.")
 

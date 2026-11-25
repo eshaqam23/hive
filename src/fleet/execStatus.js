@@ -1,6 +1,7 @@
 // What a Fleet panel shows from the Executive's GET /api/exec/state for the robot its preset maps to.
-// Everything here comes from the Executive's world (the fake fleet today), so the panel tags it SIM;
-// connection data (link state, IP, domain, topics) comes only from live-data's backend.
+// Everything here comes from the Executive's world, so the panel tags it SIM (fake fleet) or EMULATED
+// (an agent fleet whose report says evidence emulated); connection data (link state, IP, domain, topics)
+// comes only from live-data's backend.
 
 /* Mission statuses after which nothing moves (backend hive_exec/executive.py TERMINAL_MISSION). */
 export const TERMINAL_MISSION = new Set(["completed", "blocked", "rejected", "canceled", "planner_error", "answered"]);
@@ -8,9 +9,21 @@ export const TERMINAL_MISSION = new Set(["completed", "blocked", "rejected", "ca
 /* Task runtime states that mean the robot is working on the task now. */
 const ACTIVE_TASK = new Set(["dispatched", "accepted", "running", "canceling"]);
 
-/* Fail-safe: SIM unless the Executive says plainly that its gateway is not simulated. No gateway does
-   today (fake and synapse are both answered by the fake fleet), so everything is SIM. */
-export const isSimulated = (gateway) => !(gateway && gateway.simulated === false);
+/* A8: an agent fleet's report says whether its evidence is emulated (docs/instance-agent-contract.md). */
+const isEmulated = (gateway) => gateway?.fleet?.kind === "hive_agent" && gateway?.fleet?.evidence === "emulated";
+
+/* Fail-safe: simulated unless the Executive says plainly that its gateway is not, and never while the
+   fleet report says emulated. Only a hive_agent fleet with evidence real is not simulated. */
+export const isSimulated = (gateway) => isEmulated(gateway) || !(gateway && gateway.simulated === false);
+
+/* The tag every Executive-sourced view shows: "SIM" (fake fleets), "EMULATED" (agent fleet, evidence
+   emulated) or null (an agent fleet with evidence real). */
+export const simTag = (gateway) => (isEmulated(gateway) ? "EMULATED" : isSimulated(gateway) ? "SIM" : null);
+
+/* The sim drawer (resets with world/seed, faults, truth) is for the fake fleets only: the in-process fake
+   or the ROS fake fleet, which send no fleet report. Fail-safe: hidden when the gateway is unknown or
+   says it is not simulated. */
+export const isFakeFleet = (gateway) => Boolean(gateway) && !gateway.fleet && gateway.simulated !== false;
 
 export function activeMission(state) {
   const mission = state?.mission;
@@ -48,6 +61,7 @@ export function execStatus(robot, exec) {
     robotId: entry.robot_id,
     displayName: entry.display_name ?? entry.robot_id,
     sim: isSimulated(state.gateway),
+    tag: simTag(state.gateway),
     battery: Number.isFinite(s.battery_pct) ? s.battery_pct : null,
     location: locationLabel(state, s.location_id),
     task: currentTask(state, entry.robot_id),

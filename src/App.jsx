@@ -11,7 +11,7 @@ import { StopIcon, SendIcon, CloseIcon, TrashIcon, PencilIcon, ChevronLeftIcon, 
 import { DRIVE_CONTROLS, PRESET_KEYS, PRESET_ROBOTS, STATUS, describe, displayStatus } from "./fleet/presets.jsx";
 import { ModelImage, ModelThumb, PageFooter, PlayButton, StatusBadge, modelAlt, stageBg } from "./fleet/parts.jsx";
 import FleetView from "./fleet/FleetView.jsx";
-import { activeMission, isSimulated } from "./fleet/execStatus.js";
+import { activeMission, simTag } from "./fleet/execStatus.js";
 import MapView from "./map/MapView.jsx";
 import Header from "./shell/Header.jsx";
 import { liveStatus } from "./shell/status.js";
@@ -784,7 +784,7 @@ export default function App() {
         onCloseStop={() => setStopRun(null)}
         onNavigate={setView}
         onStopAll={stopAll}
-        sim={isSimulated(exec.state?.gateway ?? exec.health?.gateway)}
+        sim={simTag(exec.state?.gateway ?? exec.health?.gateway)}
         stop={stopLines && { at: stopRun.at, lines: stopLines }}
         view={view}
       />

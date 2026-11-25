@@ -25,6 +25,7 @@ from .agent_commands import describe_command, write_command
 from .allocator import Allocator, CapabilityAllocator
 from .catalog import BATTERY_RESERVE_PCT, LOCATIONS, ROBOTS, SKILLS, area_contains, catalog_dict, route_between
 from .context import ContextBudgetExceeded, build_context
+from .fleet_report import is_agent, measured_battery, parse_capabilities
 from .contracts import (
     RUN_EXPORT_SCHEMA,
     TERMINAL_STATUSES,
@@ -220,6 +221,9 @@ class Executive:
             self.gateway.on_disconnect(self._on_transport_lost)
         await self.gateway.start(self.handle_event)
         try:
+            if scenario == "known" and await self._agent_fleet():
+                self.log("reset", "Agent fleet: scenario known seeds a simulated prior survey, so it starts unknown.")
+                scenario = "unknown"
             # A coordinated reset also stops work a previous Executive process may have left running.
             await self.reset(scenario=scenario)
         except Exception as exc:  # noqa: BLE001 - keep serving; the UI shows the transport as disconnected
@@ -235,15 +239,31 @@ class Executive:
         self.timeline.append({"seq": next(self._tl), "t": self.clock(), "kind": kind, "message": message,
                               "run_id": self.run_id, **({"data": data} if data else {})})
 
+    async def _agent_fleet(self) -> bool:
+        """A8: ask for a status first, so the fleet's report (if any) is known before anything is sent."""
+        try:
+            await self.gateway.status()
+        except Exception:  # noqa: BLE001 - an unreachable fleet keeps the last report it gave
+            pass
+        return is_agent(self.gateway.info().fleet)
+
     async def refresh_status(self, sync_location: bool = False) -> None:
         status = await self.gateway.status()
+        agent = is_agent(self.gateway.info().fleet)
         for rid, st in status.items():
             r = self.robots.get(rid)
             if r is None:
                 continue
-            if sync_location and st.get("location_id") in LOCATIONS:
-                r.location_id = st["location_id"]  # a random world can start a robot elsewhere
-            r.battery_pct = float(st.get("battery_pct", r.battery_pct))
+            if agent:
+                # A8: an agent fleet's report replaces the belief at every refresh; absent or unknown = None.
+                loc = st.get("location_id")
+                r.location_id = loc if isinstance(loc, str) and loc in LOCATIONS else None
+                r.battery_pct = measured_battery(st.get("battery_pct"))
+            else:
+                if sync_location and st.get("location_id") in LOCATIONS:
+                    r.location_id = st["location_id"]  # a random world can start a robot elsewhere
+                r.battery_pct = float(st.get("battery_pct", r.battery_pct))
+            r.capabilities = parse_capabilities(st.get("capabilities"))
             r.health = st.get("health", r.health)
             r.available = bool(st.get("available", r.available))
             r.last_update = self.clock()
@@ -259,6 +279,14 @@ class Executive:
         world = world or self.sim_world
         if world not in SIM_WORLDS:
             raise ExecError(f"unknown sim world {world!r}", 422)
+        agent, asked = await self._agent_fleet(), (world, seed)
+        if agent:  # A8: an agent fleet runs the world it has; simulator options never reach it
+            if scenario == "known":
+                raise ExecError("Scenario known seeds a simulated prior survey; an agent fleet starts from what "
+                                "it reports.", 409)
+            if faults:
+                raise ExecError("Simulator faults never reach an agent fleet.", 409)
+            world, seed = "fixed", None
         if world == "fixed":
             seed = None
         elif seed is None:
@@ -290,6 +318,9 @@ class Executive:
             reported = reported if isinstance(reported, dict) else {}
             self.sim = {"world": reported.get("world") or "fixed", "seed": reported.get("seed")}
             self.robots = initial_robot_states(self.clock)
+            if agent:  # unknown until the agent reports them
+                for r in self.robots.values():
+                    r.location_id, r.battery_pct = None, None
             await self.refresh_status(sync_location=True)
             self.mission = None
             self.attempts.clear()
@@ -299,6 +330,9 @@ class Executive:
             sim = self.sim["world"] + (f" seed={self.sim['seed']}" if self.sim["seed"] is not None else "")
             self.log("reset", f"New run {self.run_id} (scenario={scenario}, faults={self.faults or 'none'}, "
                               f"world={sim}).")
+            if agent and asked != ("fixed", None):
+                self.log("reset", f"Agent fleet: requested world={asked[0]} seed={asked[1]} not sent; "
+                                  "it gets world fixed, seed null.")
             if self.sim["world"] != world or (world == "random" and self.sim["seed"] != seed):
                 self.log("reset", f"Requested world={world} seed={seed}, but the fleet ignored it and runs "
                                   f"world={sim}. Rebuild/restart the fake fleet to get world support.")
@@ -324,6 +358,8 @@ class Executive:
         return False
 
     async def inject_fault(self, fault: str) -> None:
+        if await self._agent_fleet():
+            raise ExecError("Simulator faults never reach an agent fleet.", 409)
         async with self.lock:
             await self.gateway.inject_fault(fault)
             self.faults.append(fault)
@@ -1059,11 +1095,13 @@ class Executive:
             return f"{task.robot_id} unavailable"
         remaining = sum(SKILLS[t.skill].energy_pct for t in plan.tasks if t.robot_id == task.robot_id
                         and m.tasks[f"{plan.revision}:{t.task_id}"].state in ("pending",))
-        if r.battery_pct - remaining < BATTERY_RESERVE_PCT:
+        if r.battery_pct is not None and r.battery_pct - remaining < BATTERY_RESERVE_PCT:
             return (f"{task.robot_id} battery {r.battery_pct:.1f}% < remaining {remaining:.1f}% + "
                     f"{BATTERY_RESERVE_PCT:.0f}% reserve")
         a = task.action
         if a.kind == "navigate_to" and a.location_id != r.location_id:
+            if r.location_id is None:
+                return f"{task.robot_id} location unknown"
             route = route_between(r.location_id, a.location_id)
             if route is None:
                 return f"no route from {r.location_id} to {a.location_id}"
@@ -1072,7 +1110,7 @@ class Executive:
         if a.kind == "pick_object":
             b = self.world.objects.get(a.object_id)
             if b is None or b.held_by or b.location_id != r.location_id:
-                return f"{a.object_id} not observed at {r.location_id}"
+                return f"{a.object_id} not observed at {r.location_id or 'an unknown location'}"
             if r.carried_object:
                 return f"{task.robot_id} already holds {r.carried_object}"
         if a.kind == "place_object" and r.carried_object != a.object_id:

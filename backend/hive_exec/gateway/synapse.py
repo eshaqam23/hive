@@ -19,6 +19,7 @@ from typing import Any, Optional
 import websockets
 
 from ..contracts import TERMINAL_STATUSES, TaskEnvelope, TaskEvent
+from ..fleet_report import is_simulated, parse_fleet
 from .base import EventSink, GatewayInfo, RobotGateway, SubmitReceipt
 
 log = logging.getLogger("hive.synapse")
@@ -42,6 +43,7 @@ class SynapseGateway(RobotGateway):
         self._pending: dict[str, asyncio.Future] = {}
         self._ids = itertools.count(1)
         self._active: set[str] = set()
+        self._fleet: Optional[dict[str, Any]] = None  # A8: last fleet report from a status reply
         self._bridge_info: dict[str, Any] = {}
         self._ros_connected = False
         self._roundtrips = 0
@@ -57,7 +59,8 @@ class SynapseGateway(RobotGateway):
         detail = (f"@corebrum/core {bi.get('core_version', '?')} @ Synapse {str(bi.get('synapse_commit', '?'))[:10]}, "
                   f"patch {bi.get('patch', '?')}, rosbridge {bi.get('rosbridge_url', '?')}; "
                   f"{self._roundtrips} round trip(s) this run") if bi else f"bridge {self.url} not connected"
-        return GatewayInfo(self.kind, self.label, self._roundtrips > 0, self.connected, detail)
+        return GatewayInfo(self.kind, self.label, self._roundtrips > 0, self.connected, detail,
+                           simulated=is_simulated(self._fleet), fleet=dict(self._fleet) if self._fleet else None)
 
     @property
     def connected(self) -> bool:
@@ -188,7 +191,8 @@ class SynapseGateway(RobotGateway):
         try:
             r = await self._request("status")
         except (GatewayUnavailable, asyncio.TimeoutError):
-            return {}
+            return {}  # a lost reply keeps the last fleet report
+        self._fleet = parse_fleet(r.get("fleet"))  # A8: none from the fake fleets
         return r.get("robots", {})
 
     async def active_attempts(self) -> list[str]:

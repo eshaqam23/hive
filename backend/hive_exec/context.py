@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 from .catalog import ROBOTS, ROUTES
 from .contracts import Goal
+from .fleet_report import capability_text
 from .world import ObservedWorld, RobotState
 
 # Budget policy (spec 7): 12,288 total, 3,072 reserved output => 9,216 input max.
@@ -119,15 +120,19 @@ def build_context(
 ) -> PlanningContext:
     robot_rows = []
     for rid, s in sorted(robots.items()):
-        robot_rows.append({
+        row = {
             "robot_id": rid,
             "location_id": s.location_id,
-            "battery_pct": round(s.battery_pct, 1),
+            "battery_pct": "unknown" if s.battery_pct is None else round(s.battery_pct, 1),
             "available": s.available and s.health == "ok",
             "health": s.health,
             "carrying": s.carried_object,
             "busy": s.current_attempt_id is not None,
-        })
+        }
+        ready = capability_text(getattr(s, "capabilities", None), ROBOTS[rid]) if rid in ROBOTS else None
+        if ready is not None:  # A8: only with a fleet report; ready catalog skills (listed ids), bounded
+            row["ready"] = ready
+        robot_rows.append(row)
 
     objects = []
     for b in world.objects.values():

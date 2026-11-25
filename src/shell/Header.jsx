@@ -47,7 +47,7 @@ function MissionPill({ mission, sim, onOpen }) {
           {text}
         </span>
       </button>
-      {sim && <SimTag />}
+      {sim && <SimTag label={sim === "EMULATED" ? "EMULATED" : "SIM"} />}
     </span>
   );
 }
@@ -135,7 +135,8 @@ function StopResults({ stop, onClose }) {
   );
 }
 
-/* live: liveStatus(); mission: the active mission or null; sim: its data is from the fake fleet;
+/* live: liveStatus(); mission: the active mission or null; sim: the tag for its data (execStatus simTag:
+   "SIM" | "EMULATED" | null; true reads as SIM);
    models: { defaultPlanner, llm }; stop: { at, lines: [{ key, label, text, level }] } or null. */
 export default function Header({ view, onNavigate, live, mission, sim, models, stop, onStopAll, onCloseStop }) {
   const theme = useTheme();

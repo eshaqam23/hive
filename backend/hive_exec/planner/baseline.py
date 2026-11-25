@@ -131,7 +131,9 @@ def fleet_answer(text: str, robots: list[dict]) -> str:
         if d.payload_limit_kg:
             line += f"; carries up to {d.payload_limit_kg:g} kg"
         if st:
-            line += f"; now at {st.get('location_id')}, battery {st.get('battery_pct')}%"
+            b = st.get("battery_pct")
+            battery = f"battery {b}%" if isinstance(b, (int, float)) else "battery unknown"
+            line += f"; now at {st.get('location_id') or 'an unknown location'}, {battery}"
         parts.append(line + ".")
     return " ".join(parts)[:600]
 

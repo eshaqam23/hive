@@ -13,6 +13,7 @@ from typing import Optional
 
 from .catalog import ROBOTS, RobotDescriptor
 from .contracts import PlanProposal, TaskSpec
+from .fleet_report import report_ineligibility
 from .world import RobotState
 
 
@@ -67,6 +68,8 @@ class CapabilityAllocator(Allocator):
             for rid in sorted(ROBOTS):
                 reason = static_ineligibility(ROBOTS[rid], tasks)
                 state = robots.get(rid)
+                if reason is None and state is not None:  # A8: the catalog reason, if any, stands
+                    reason = report_ineligibility(getattr(state, "capabilities", None), tasks)
                 if reason is None and state is not None and (not state.available or state.health != "ok"):
                     reason = f"unavailable ({state.health})"
                 if reason:

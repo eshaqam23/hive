@@ -29,6 +29,9 @@ class GatewayInfo:
     verified_transport: bool  # True only when a real adapter round trip has been observed
     connected: bool
     detail: str = ""
+    # A8: from the fleet report (fleet_report.is_simulated); the fake fleets send none, so True.
+    simulated: bool = True
+    fleet: Optional[dict[str, Any]] = None  # the last fleet block an agent fleet reported
 
 
 class RobotGateway(ABC):

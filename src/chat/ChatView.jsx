@@ -5,7 +5,7 @@
 // same thread. Every failed POST lands in a toast with the server's own error text.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EXEC_API_URL, errorText, execGet, execPost } from "../executive/api.js";
-import { TERMINAL_MISSION, isSimulated } from "../fleet/execStatus.js";
+import { TERMINAL_MISSION, isFakeFleet } from "../fleet/execStatus.js";
 import { HiveMark } from "../shell/icons.jsx";
 import {
   DEMO_COMMAND,
@@ -351,7 +351,7 @@ export default function ChatView({ exec, robots = [], showMap = true }) {
   const block = composerBlock({ reachable, error, state, health, planner });
   const shownEarlier = useMemo(() => earlier.filter((r) => r.id !== currentId), [earlier, currentId]);
   const viewed = viewing ? earlier.find((r) => r.id === viewing && r.export) : null;
-  const sim = state && isSimulated(state.gateway);
+  const sim = state && isFakeFleet(state.gateway); // A8: never for an agent fleet, emulated or real
 
   return (
     <div className="lg:grid lg:h-full lg:grid-cols-[minmax(0,1fr)_minmax(300px,340px)]">

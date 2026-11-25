@@ -61,7 +61,8 @@ def exec_health(ex: Executive) -> dict[str, Any]:
         "ok": True, "service": "hive-executive", "run_id": ex.run_id,
         "ready": not missing, "missing": missing,
         "gateway": {"kind": gi.kind, "label": gi.label, "connected": gi.connected,
-                    "verified_round_trip": gi.verified_transport, "detail": gi.detail},
+                    "verified_round_trip": gi.verified_transport, "detail": gi.detail,
+                    "simulated": gi.simulated, "fleet": gi.fleet},
         "default_planner": default["kind"], "planner": default, "planners": planners,
         "bridge": links["bridge"], "rosbridge": links["rosbridge"],
     }

@@ -195,7 +195,7 @@ export function FleetPanel({ robot, link = null, exec, onOpen, onConnect, onDisc
 }
 
 function ExecBlock({ status }) {
-  const { kind, label, reason, robotId, sim, battery, location, task } = status;
+  const { kind, label, reason, robotId, tag, battery, location, task } = status;
   const known = kind !== "missing" && robotId;
   return (
     <div
@@ -207,7 +207,7 @@ function ExecBlock({ status }) {
         <span className="text-[13px] font-medium text-muted">
           Executive{robotId && <span className="font-mono text-faint"> · {robotId}</span>}
         </span>
-        {known && sim && <SimTag />}
+        {known && tag && <SimTag label={tag} />}
       </div>
       <div className="mt-1.5 flex min-w-0 items-center gap-2">
         <span className={`size-2 flex-none rounded-full ${EXEC_DOT[kind]}`} />
@@ -222,7 +222,7 @@ function ExecBlock({ status }) {
           <div className="mt-2.5 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 text-[13px]">
             <div className="flex items-center gap-2">
               <span
-                aria-label={sim ? "Battery (simulated)" : "Battery"}
+                aria-label={tag === "EMULATED" ? "Battery (emulated)" : tag ? "Battery (simulated)" : "Battery"}
                 aria-valuemax={100}
                 aria-valuemin={0}
                 aria-valuenow={battery == null ? undefined : Math.round(battery)}
@@ -236,7 +236,11 @@ function ExecBlock({ status }) {
                   />
                 )}
               </span>
-              <span className="w-10 text-right font-mono tabular-nums text-muted">{battery == null ? "—" : `${Math.round(battery)}%`}</span>
+              {battery == null ? (
+                <span className="text-right text-muted">battery unknown</span>
+              ) : (
+                <span className="w-10 text-right font-mono tabular-nums text-muted">{`${Math.round(battery)}%`}</span>
+              )}
             </div>
             <span className="truncate text-muted" title="Location in the Executive's world">
               {location ?? "location unknown"}
