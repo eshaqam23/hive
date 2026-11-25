@@ -7,7 +7,9 @@
 //
 //   node bridge/server.mjs
 // Env: HIVE_CORE_DIR (~/.hive-bridge/core), ROSBRIDGE_URL (ws://127.0.0.1:9090),
-//      HIVE_BRIDGE_PORT (8790; bound to 127.0.0.1)
+//      HIVE_BRIDGE_PORT (8790; bound to 127.0.0.1),
+//      HIVE_BRIDGE_TIMEOUT_MARGIN_S (30): a goal's wait ends at envelope timeout_s + this margin
+//      (needs the HIVE v2 core patch; the v1-only core waits its own 120 s default)
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
@@ -24,6 +26,8 @@ const PORT = Number(process.env.HIVE_BRIDGE_PORT || 8790);
 const ACTION_TYPE = "hive_interfaces/action/ExecuteSkill";
 const PATCH = corePkg.hive?.patch || "none";
 const ROS_STATUS = { 4: "succeeded", 5: "canceled", 6: "aborted" };
+const MARGIN_RAW = Number(process.env.HIVE_BRIDGE_TIMEOUT_MARGIN_S ?? 30);
+const TIMEOUT_MARGIN_S = Number.isFinite(MARGIN_RAW) && MARGIN_RAW >= 0 ? MARGIN_RAW : 30;
 // robot_id becomes part of a ROS action name, so only the fake fleet's robots are accepted
 // (same list as ROBOTS in ros/hive_fake_robots/hive_fake_robots/fake_fleet.py).
 const ROBOTS = new Set(["camera_01", "lidar_01", "gripper_01"]);
@@ -62,8 +66,20 @@ function info() {
     patch: PATCH,
     rosbridge_url: ROSBRIDGE_URL,
     rosbridge_connected: rosConnected,
+    timeout_margin_s: TIMEOUT_MARGIN_S,
   };
 }
+
+// How long the core waits for a goal's result: the envelope's own timeout plus the margin, so a
+// robot that enforces timeout_s itself reports first. Undefined (core default) if timeout_s is bad.
+function goalTimeoutMs(env) {
+  const t = Number(env.timeout_s);
+  return Number.isFinite(t) && t > 0 ? Math.round((t + TIMEOUT_MARGIN_S) * 1000) : undefined;
+}
+
+// The core rejects a pending goal with "Request <id> timed out after <n>ms" when its wait ends
+// (rosbridge/client.ts registerPending); a lost connection rejects with a different message.
+const isWaitTimeout = (e) => /timed out after/i.test(String(e?.message || e));
 
 async function control(command, args = {}) {
   const r = await transport.callService({
@@ -122,6 +138,7 @@ async function submit(env) {
       envelope_json: JSON.stringify(env),
     },
     goalId: a.goalId, // honoured only with the HIVE v1 patch; ignored by unpatched core
+    timeoutMs: goalTimeoutMs(env), // honoured only with the HIVE v2 patch; v1 waits 120 s
     onFeedback: (fb) => {
       if (a.terminal || fb.attempt_id !== env.attempt_id) return;
       if (fb.phase === "accepted" && !a.accepted) {
@@ -165,9 +182,17 @@ async function submit(env) {
         ros_status: ros ?? null,
       });
     },
-    (e) => {
+    async (e) => {
       // Timeout or connection loss: the robot may still be executing. Never report success.
-      if (!a.terminal) emit(a, "uncertain", { error: { code: "transport_lost", message: String(e?.message || e) } });
+      if (a.terminal) return;
+      let message = String(e?.message || e);
+      if (isWaitTimeout(e)) {
+        // The core never cancels a goal whose wait timed out. Ask the robot to stop this goal
+        // (targeted, by its goal id) before reporting; whether it stopped stays unconfirmed.
+        const sent = await transport.cancelActionGoal(a.action, a.goalId).then(() => true, () => false);
+        message += sent ? "; targeted cancel sent, effect unconfirmed" : "; targeted cancel could not be sent";
+      }
+      if (!a.terminal) emit(a, "uncertain", { error: { code: "transport_lost", message } });
     },
   );
   return { accepted_for_delivery: true, detail: "goal sent via @corebrum/core rosbridge transport" };

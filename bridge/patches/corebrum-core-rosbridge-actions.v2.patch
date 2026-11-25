@@ -1,0 +1,29 @@
+HIVE patch v2 for @corebrum/core 0.8.16 (Corebrum Synapse 6f7b7840e2b3345f66412a0fb800f294cb94667c),
+applied after v1 (build-core.sh applies bridge/patches/*.patch in name order). For the rosbridge
+transport only: (1) ActionGoalOptions.timeoutMs, (2) the adapter passes it to the action client,
+which already honours it (default 120_000 ms).
+
+diff -ruN a/src/transport/rosbridge/adapter.ts b/src/transport/rosbridge/adapter.ts
+--- a/src/transport/rosbridge/adapter.ts	2026-11-25 04:45:52.188031378 -0500
++++ b/src/transport/rosbridge/adapter.ts	2026-11-25 04:45:52.210098697 -0500
+@@ -95,6 +95,8 @@
+       actionType: options.actionType,
+       args: options.args,
+       goalId: options.goalId,
++      // HIVE patch v2: per-goal wait; without it actions.ts always waits 120_000 ms.
++      timeoutMs: options.timeoutMs,
+       onFeedback: options.onFeedback
+         ? (feedback) => options.onFeedback!(feedback.values)
+         : undefined,
+diff -ruN a/src/transport/types.ts b/src/transport/types.ts
+--- a/src/transport/types.ts	2026-11-25 04:45:52.185959303 -0500
++++ b/src/transport/types.ts	2026-11-25 04:45:52.209719163 -0500
+@@ -60,6 +60,8 @@
+   onFeedback?: (feedback: Record<string, unknown>) => void;
+   /** HIVE patch v1: caller-supplied goal id (rosbridge) for targeted cancellation. */
+   goalId?: string;
++  /** HIVE patch v2: how long to wait for the goal's result, in ms (rosbridge; default 120_000). */
++  timeoutMs?: number;
+ }
+ 
+ export interface ActionResult {
