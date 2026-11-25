@@ -32,6 +32,7 @@ from hive_exec.sim.fake_world import DURATION_S, KNOWN_FAULTS, FakeWorld, world_
 
 ROBOTS = ("camera_01", "lidar_01", "gripper_01")
 STEPS = 4
+ENDED_KEEP = 32
 
 
 class FakeFleet(Node):
@@ -45,6 +46,7 @@ class FakeFleet(Node):
         self.busy: dict[str, str] = {}
         self.seen_attempts: set[str] = set()
         self.rejections: dict[str, dict] = {}
+        self.ended: dict[str, str] = {}  # attempt_id -> terminal status, the last ENDED_KEEP of this run
         cb = ReentrantCallbackGroup()
         self._servers = [
             ActionServer(self, ExecuteSkill, f"/{rid}/execute_skill",
@@ -94,6 +96,10 @@ class FakeFleet(Node):
         r.error_code, r.error_message = err.get("code", ""), err.get("message", "")
         r.observations_json = json.dumps(kw.get("observations") or [])
         r.energy_used_pct = float(kw.get("energy", 0.0))
+        with self.lock:  # what each attempt ended as, so a check can see a cancel landed
+            self.ended[goal.attempt_id] = status
+            while len(self.ended) > ENDED_KEEP:
+                del self.ended[next(iter(self.ended))]
         return r
 
     def _feedback(self, goal_handle, phase: str, progress: float) -> None:
@@ -156,7 +162,7 @@ class FakeFleet(Node):
     def _control(self, command: str, args: dict) -> dict:
         if command == "status":
             with self.lock:
-                return {"run_id": self.run_id, "active": dict(self.busy),
+                return {"run_id": self.run_id, "active": dict(self.busy), "ended": dict(self.ended),
                         "robots": {r: dict(self.world.status(r), current_attempt_id=self.busy.get(r)) for r in ROBOTS}}
         if command == "reset":
             world = world_from_args(args)  # validates world/seed/faults before anything is torn down
@@ -172,6 +178,7 @@ class FakeFleet(Node):
                 self.run_id = args["run_id"]
                 self.seen_attempts.clear()
                 self.rejections.clear()
+                self.ended.clear()
             self.get_logger().info(f"reset to {self.run_id} faults={args.get('faults')} world={world.kind} "
                                    f"seed={world.seed} settled={settled}")
             return {"run_id": self.run_id, "settled": settled, "world": world.kind, "seed": world.seed}
