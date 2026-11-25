@@ -140,6 +140,8 @@ export function describeWhat(action, catalog) {
       return `Photograph ${locationLabel(action.area_id, catalog)}`;
     case "scan_route":
       return `Scan ${plain(action.route_id)}`;
+    case "map_area":
+      return `Map ${locationLabel(action.area_id, catalog)}`;
     case "pick_object":
       return `Pick up ${objectName(action)}`;
     case "place_object":
@@ -161,6 +163,7 @@ export function likelyRobots(action, catalog, preferred = null) {
     if (action.kind === "navigate_to" || action.kind === "place_object") return (r.reachable_locations || []).includes(action.location_id);
     if (action.kind === "inspect_area" || action.kind === "capture_image") return (r.observable_areas || []).includes(action.area_id);
     if (action.kind === "scan_route") return (r.observable_routes || []).includes(action.route_id);
+    if (action.kind === "map_area") return (r.map_areas || []).includes(action.area_id);
     return true;
   };
   const eligible = robots.filter(can).map((r) => r.robot_id);
@@ -204,6 +207,9 @@ export function observationsFor(rt, world) {
     .join("; ");
 }
 
+/* A saved map (map_area result: coverage plus map_ref) reads "map saved · NN% coverage" (A8). */
+const isSavedMap = (result) => typeof result?.coverage === "number" && result?.map_ref && typeof result.map_ref === "object";
+
 /* The latest report under a row: the result summary, or the error message plus what was observed. */
 export function reportLine(rt, world) {
   if (!rt) return null;
@@ -212,6 +218,7 @@ export function reportLine(rt, world) {
     const tone = rt.state === "uncertain" ? "warn" : rt.state === "canceled" ? "muted" : "danger";
     return { tone, text: `${rt.error.message}${seen ? ` · observed ${seen}` : ""}` };
   }
+  if (isSavedMap(rt.result)) return { tone: "muted", text: `map saved · ${Math.round(rt.result.coverage * 100)}% coverage` };
   const text = formatResult(rt.result);
   return text ? { tone: "muted", text } : null;
 }

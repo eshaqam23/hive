@@ -279,6 +279,8 @@ def validate(
             if g.kind == "image_captured" and not any(
                     k.kind == "capture_image" and k.area_id == g.area_id for k in kinds):
                 err("stage_goal_uncovered", f"No capture_image task covers {g.area_id}.", severity="warning")
+            if g.kind == "area_mapped" and not any(k.kind == "map_area" and k.area_id == g.area_id for k in kinds):
+                err("stage_goal_uncovered", f"No map_area task maps {g.area_id}.", severity="warning")
 
     ok = not any(f.severity == "error" for f in findings)
     ordered = [resolved[t.task_id] for t in proposal.tasks if t.task_id in resolved]

@@ -39,7 +39,8 @@
         "capture_image",
         "scan_route",
         "pick_object",
-        "place_object"
+        "place_object",
+        "map_area"
       ],
       "title": "Skill",
       "type": "string"

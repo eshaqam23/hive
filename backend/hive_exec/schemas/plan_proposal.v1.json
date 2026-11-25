@@ -1,5 +1,26 @@
 {
   "$defs": {
+    "AreaMappedGoal": {
+      "additionalProperties": false,
+      "properties": {
+        "area_id": {
+          "const": "arena",
+          "title": "Area Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "area_mapped",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "area_id"
+      ],
+      "title": "AreaMappedGoal",
+      "type": "object"
+    },
     "CaptureImage": {
       "additionalProperties": false,
       "properties": {
@@ -77,6 +98,27 @@
         "object_query"
       ],
       "title": "InspectArea",
+      "type": "object"
+    },
+    "MapArea": {
+      "additionalProperties": false,
+      "properties": {
+        "area_id": {
+          "const": "arena",
+          "title": "Area Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "map_area",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "area_id"
+      ],
+      "title": "MapArea",
       "type": "object"
     },
     "NavigateTo": {
@@ -369,6 +411,7 @@
             "mapping": {
               "capture_image": "#/$defs/CaptureImage",
               "inspect_area": "#/$defs/InspectArea",
+              "map_area": "#/$defs/MapArea",
               "navigate_to": "#/$defs/NavigateTo",
               "pick_object": "#/$defs/PickObject",
               "place_object": "#/$defs/PlaceObject",
@@ -394,6 +437,9 @@
             },
             {
               "$ref": "#/$defs/PlaceObject"
+            },
+            {
+              "$ref": "#/$defs/MapArea"
             }
           ],
           "title": "Action"
@@ -508,6 +554,7 @@
       "items": {
         "discriminator": {
           "mapping": {
+            "area_mapped": "#/$defs/AreaMappedGoal",
             "image_captured": "#/$defs/ImageCapturedGoal",
             "object_at": "#/$defs/ObjectAtGoal",
             "object_located": "#/$defs/ObjectLocatedGoal",
@@ -527,6 +574,9 @@
           },
           {
             "$ref": "#/$defs/ImageCapturedGoal"
+          },
+          {
+            "$ref": "#/$defs/AreaMappedGoal"
           }
         ]
       },
@@ -589,6 +639,7 @@
       "items": {
         "discriminator": {
           "mapping": {
+            "area_mapped": "#/$defs/AreaMappedGoal",
             "image_captured": "#/$defs/ImageCapturedGoal",
             "object_at": "#/$defs/ObjectAtGoal",
             "object_located": "#/$defs/ObjectLocatedGoal",
@@ -608,6 +659,9 @@
           },
           {
             "$ref": "#/$defs/ImageCapturedGoal"
+          },
+          {
+            "$ref": "#/$defs/AreaMappedGoal"
           }
         ]
       },

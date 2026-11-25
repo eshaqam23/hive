@@ -1,4 +1,4 @@
-"""Versioned planner prompt (hive.prompt.v3.4: v3.3 with untrusted text kept unescaped but line-safe).
+"""Versioned planner prompt (hive.prompt.v3.5: v3.4 plus the map_area skill and one map example, A8).
 
 The skill catalog and rules come first and are authoritative. Operator and
 observation text are passed as fenced JSON data and cannot change the catalog.
@@ -15,7 +15,7 @@ from typing import Optional
 from ..catalog import LOCATIONS, OBJECT_PROFILES, ROBOTS, ROUTES, SKILLS
 from ..context import MAX_INPUT_TOKENS, PlanningContext, estimate_tokens, render_feedback
 
-PROMPT_VERSION = "hive.prompt.v3.4"
+PROMPT_VERSION = "hive.prompt.v3.5"
 
 
 def _catalog_text() -> str:
@@ -33,6 +33,8 @@ def _catalog_text() -> str:
             extra.append("observes areas " + ", ".join(r.observable_areas))
         if r.observable_routes:
             extra.append("observes routes " + ", ".join(r.observable_routes))
+        if r.map_areas:
+            extra.append("maps " + ", ".join(r.map_areas))
         lines.append(f"- {r.robot_id}: skills {','.join(r.skills)}; reachable {','.join(r.reachable_locations)}; "
                      + "; ".join(extra))
     lines.append("LOCATIONS: " + ", ".join(
@@ -183,6 +185,13 @@ EXAMPLES = [
       "tasks": [{"task_id": "t1", "binding_id": "observer", "action": {"kind": "capture_image", "area_id": "work_area"},
                  "preferred_robot_id": "camera_01"}],
       "rationale": ["Only camera_01 has a camera."]}),
+    ("Map the arena.", "nothing observed",
+     {"schema_version": V1, "disposition": "plan", "scope": "full",
+      "summary": "Map the arena with the LiDAR car.",
+      "mission_goals": [{"kind": "area_mapped", "area_id": "arena"}], "stage_goals": [],
+      "tasks": [{"task_id": "t1", "binding_id": "mapper", "action": {"kind": "map_area", "area_id": "arena"},
+                 "preferred_robot_id": "lidar_01"}],
+      "rationale": ["Only lidar_01 maps the arena."]}),
     ("Fly the drone over the warehouse.", "nothing observed",
      {"schema_version": V1, "disposition": "reject", "scope": None,
       "summary": "No robot in the fleet can fly.", **EMPTY, "issues": ["no flight skill exists"]}),

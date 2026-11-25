@@ -48,6 +48,8 @@ def static_ineligibility(desc: RobotDescriptor, tasks: list[TaskSpec]) -> Option
             return f"cannot observe {a.area_id}"
         if a.kind == "scan_route" and a.route_id not in desc.observable_routes:
             return f"cannot scan {a.route_id}"
+        if a.kind == "map_area" and a.area_id not in desc.map_areas:
+            return f"cannot map {a.area_id}"
         if a.kind == "place_object" and a.location_id not in desc.reachable_locations:
             return f"cannot place at {a.location_id}"
     return None

@@ -57,6 +57,8 @@ export function describeGoal(goal) {
       return `${goal.route_id} observed`;
     case "image_captured":
       return `image of ${goal.area_id}`;
+    case "area_mapped":
+      return `${goal.area_id} mapped`;
     default:
       return JSON.stringify(goal);
   }

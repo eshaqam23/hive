@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import itertools
+import secrets
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Callable, Optional
@@ -63,6 +64,21 @@ class RouteBelief:
 
 
 @dataclass
+class MapRecord:
+    """A saved map, taken only from the area_mapped observation of a succeeded map_area (A8)."""
+
+    id: str  # unique per record; the shared map's epoch
+    seq: int  # 1, 2, ... within this world; the shared map's revision
+    area_id: str
+    coverage: float
+    map_ref: dict  # {id, path relative to the fleet's root, sha256 of the image}
+    robot_id: str
+    attempt_id: Optional[str]
+    observed_at: float
+    source: str
+
+
+@dataclass
 class RobotState:
     robot_id: str
     location_id: str
@@ -83,6 +99,7 @@ class ObservedWorld:
         self.absences: dict[tuple[str, str], ObservationRecord] = {}
         self.routes: dict[str, RouteBelief] = {}
         self.images: list[ObservationRecord] = []
+        self.maps: list[MapRecord] = []
         self._ids = itertools.count(1)
 
     # ------------------------------------------------------------ ingestion
@@ -122,6 +139,18 @@ class ObservedWorld:
             )
         elif obs.kind == "image":
             self.images.append(rec)
+        self.version += 1
+        return rec
+
+    def record_map(self, obs: Observation, source: str, attempt_id: Optional[str]) -> MapRecord:
+        """Record a saved map. The caller has checked the evidence (executive.map_report)."""
+        seq = len(self.maps) + 1
+        rec = MapRecord(
+            id=f"map-{seq}-{secrets.token_hex(4)}", seq=seq, area_id=obs.area_id or "",
+            coverage=float(obs.attrs["coverage"]), map_ref=dict(obs.attrs["map_ref"]), robot_id=source,
+            attempt_id=attempt_id, observed_at=self.clock(), source=source,
+        )
+        self.maps.append(rec)
         self.version += 1
         return rec
 
@@ -170,6 +199,18 @@ class ObservedWorld:
                 return rec
         return None
 
+    def latest_map(self, area_id: Optional[str] = None) -> Optional[MapRecord]:
+        for rec in reversed(self.maps):
+            if area_id is None or rec.area_id == area_id:
+                return rec
+        return None
+
+    def map_for(self, area_id: str, since: float = 0.0) -> Optional[MapRecord]:
+        for rec in reversed(self.maps):
+            if rec.area_id == area_id and rec.observed_at >= since:
+                return rec
+        return None
+
     def snapshot(self) -> dict:
         now = self.clock()
         return {
@@ -178,6 +219,7 @@ class ObservedWorld:
             "routes": [dict(asdict(r), fresh=r.fresh_until >= now) for r in self.routes.values()],
             "absences": [asdict(r) for r in self.absences.values()],
             "images": [asdict(r) for r in self.images[-10:]],
+            "maps": [asdict(m) for m in self.maps[-10:]],
             "reports": [asdict(r) for r in self.reports],
         }
 

@@ -136,7 +136,7 @@ class FakeFleet(Node):
                 if not hang:
                     self._feedback(goal_handle, "running", i / STEPS)
             with self.lock:
-                out = self.world.execute(robot_id, skill, params)
+                out = self.world.execute(robot_id, skill, params, attempt_id=goal.attempt_id)
             res = self._result(goal, out.status, result=out.result, error=out.error,
                                observations=out.observations, energy=out.energy_used_pct)
             if out.status == "succeeded":

@@ -28,11 +28,12 @@ RobotId = Literal["camera_01", "lidar_01", "gripper_01"]
 LocationId = Literal["camera_post", "lidar_post", "pickup_zone", "dropoff_zone", "work_area"]
 AreaId = Literal["work_area", "pickup_zone", "dropoff_zone"]
 RouteId = Literal["pickup_corridor"]
+MapAreaId = Literal["arena"]  # A8: areas a robot can map (catalog.MAP_AREAS)
 # Object labels are open vocabulary (lowercase snake_case); catalog.OBJECT_PROFILES says
 # which labels have a trusted profile (mass known) and may therefore be carried.
 ObjectLabel = Annotated[str, Field(pattern=LABEL_PATTERN)]
 SkillKind = Literal[
-    "navigate_to", "inspect_area", "capture_image", "scan_route", "pick_object", "place_object"
+    "navigate_to", "inspect_area", "capture_image", "scan_route", "pick_object", "place_object", "map_area"
 ]
 
 ObjectId = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,31}_[0-9]{1,3}$")]
@@ -101,8 +102,13 @@ class PlaceObject(_ObjectRef):
     location_id: LocationId
 
 
+class MapArea(Strict):
+    kind: Literal["map_area"]
+    area_id: MapAreaId
+
+
 Action = Annotated[
-    Union[NavigateTo, InspectArea, CaptureImage, ScanRoute, PickObject, PlaceObject],
+    Union[NavigateTo, InspectArea, CaptureImage, ScanRoute, PickObject, PlaceObject, MapArea],
     Field(discriminator="kind"),
 ]
 
@@ -131,8 +137,13 @@ class ImageCapturedGoal(Strict):
     area_id: AreaId
 
 
+class AreaMappedGoal(Strict):
+    kind: Literal["area_mapped"]
+    area_id: MapAreaId
+
+
 Goal = Annotated[
-    Union[ObjectAtGoal, ObjectLocatedGoal, RouteObservedGoal, ImageCapturedGoal],
+    Union[ObjectAtGoal, ObjectLocatedGoal, RouteObservedGoal, ImageCapturedGoal, AreaMappedGoal],
     Field(discriminator="kind"),
 ]
 
@@ -430,7 +441,7 @@ class TaskError(Strict):
 class Observation(Strict):
     """A report from a robot. ``observed_at`` is stamped by the backend on acceptance."""
 
-    kind: Literal["object_seen", "object_absent", "route_clear", "route_blocked", "image"]
+    kind: Literal["object_seen", "object_absent", "route_clear", "route_blocked", "image", "area_mapped"]
     entity_id: str
     area_id: Optional[str] = None
     route_id: Optional[str] = None

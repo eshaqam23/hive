@@ -99,8 +99,11 @@ def find_label(text: str) -> Optional[str]:
 QUESTION_START = re.compile(r"^\s*(what|which|where|how|can|could|is|are|does|do|who|why|tell me)\b")
 FLEET_WORDS = re.compile(r"\b(cars?|robots?|fleet|gripper|camera|lidar|rovers?|you|battery|batteries|skills?|"
                          r"capabilit\w*)\b")
+# A8: "map (out) (the) arena|room|field" and "explore" ask for a map of the arena (map_area on lidar_01).
+MAP = re.compile(r"\b(?:map(?:ping)?\s+(?:out\s+)?(?:the\s+)?(?:arena|room|field)|explor(?:e|ing))\b")
 ACTION_WORDS = re.compile(r"\b(bring|deliver|carry|move|transport|fetch|get|grab|find|locate|look for|search|"
-                          r"picture|photo|image|snapshot|scan|inspect|survey|pick up)\b")
+                          r"picture|photo|image|snapshot|scan|inspect|survey|pick up|"
+                          r"map(?:ping)?\s+(?:out\s+)?(?:the\s+)?(?:arena|room|field)|explor(?:e|ing))\b")
 ROBOT_WORDS = {"gripper": "gripper_01", "camera": "camera_01", "lidar": "lidar_01"}
 
 
@@ -187,8 +190,10 @@ def parse_goals(text: str) -> tuple[list[dict], list[str], Optional[str]]:
         goals.append({"kind": "object_located", "object_query": {"label": label}, "area_id": area})
     if scan:
         goals.append({"kind": "route_observed", "route_id": "pickup_corridor"})
+    if MAP.search(t):
+        goals.append({"kind": "area_mapped", "area_id": "arena"})
     if not goals:
-        return [], ["no supported intent recognized (deliver, inspect, photograph, scan)"], None
+        return [], ["no supported intent recognized (deliver, inspect, photograph, scan, map)"], None
     return goals, [], None
 
 
@@ -197,8 +202,10 @@ def _why_observers(tasks: list[dict]) -> list[str]:
     out = []
     if any(t["preferred_robot_id"] == "camera_01" for t in tasks):
         out.append("camera_01 is the only car with a camera, so it does the looking.")
-    if any(t["preferred_robot_id"] == "lidar_01" for t in tasks):
+    if any(t["action"]["kind"] == "scan_route" for t in tasks):
         out.append("lidar_01 is the only car that scans pickup_corridor, so it checks the route.")
+    if any(t["action"]["kind"] == "map_area" for t in tasks):
+        out.append("lidar_01 is the only car that maps the arena (LiDAR SLAM), so it builds the map.")
     return out
 
 
@@ -319,11 +326,14 @@ def plan_for_goals(goals: list[dict], ctx: PlanningContext) -> PlanProposal:
                                                       "object_query": g["object_query"]}, robot="camera_01"))
         elif g["kind"] == "route_observed":
             tasks.append(_task(f"t{n}", "surveyor", {"kind": "scan_route", "route_id": g["route_id"]}, robot="lidar_01"))
-    # camera tasks share one robot: chain them
-    cam = [t for t in tasks if t["preferred_robot_id"] == "camera_01"]
-    for prev, cur in zip(cam, cam[1:]):
-        cur["binding_id"] = prev["binding_id"]
-        cur["depends_on"] = [prev["task_id"]]
+        elif g["kind"] == "area_mapped":
+            tasks.append(_task(f"t{n}", "mapper", {"kind": "map_area", "area_id": g["area_id"]}, robot="lidar_01"))
+    # tasks for one robot share it: chain them (camera tasks; a lidar scan and a map)
+    for rid in ("camera_01", "lidar_01"):
+        same = [t for t in tasks if t["preferred_robot_id"] == rid]
+        for prev, cur in zip(same, same[1:]):
+            cur["binding_id"] = prev["binding_id"]
+            cur["depends_on"] = [prev["task_id"]]
     return _p(disposition="plan", scope="full", summary="Run the requested observations.", mission_goals=goals,
               tasks=tasks, rationale=_why_observers(tasks))
 

@@ -12,9 +12,13 @@ servers in ``ros/hive_fake_robots`` reuse the exact same semantics.
 from __future__ import annotations
 
 import copy
+import hashlib
+import os
 import random
+import re
 import secrets
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 
 # Duplicated minimal fixture (kept standalone for ROS reuse; a test checks it
@@ -22,11 +26,12 @@ from typing import Any, Optional
 START_LOCATIONS = {"camera_01": "camera_post", "lidar_01": "lidar_post", "gripper_01": "dropoff_zone"}
 SKILLS = {
     "camera_01": {"inspect_area", "capture_image", "navigate_to"},
-    "lidar_01": {"scan_route", "navigate_to"},
+    "lidar_01": {"scan_route", "navigate_to", "map_area"},
     "gripper_01": {"pick_object", "place_object", "navigate_to"},
 }
 OBSERVABLE_AREAS = {"camera_01": {"work_area", "pickup_zone"}}
 OBSERVABLE_ROUTES = {"lidar_01": {"pickup_corridor"}}
+MAP_AREAS = {"lidar_01": {"arena"}}
 REACHABLE = {
     "camera_01": {"camera_post"},
     "lidar_01": {"lidar_post"},
@@ -36,9 +41,9 @@ ROUTES = {"pickup_corridor": ("dropoff_zone", "pickup_zone")}
 WITHIN = {"pickup_zone": "work_area"}
 PAYLOAD_LIMIT = {"gripper_01": 0.25}
 DURATION_S = {"navigate_to": 4.0, "inspect_area": 3.0, "capture_image": 2.0, "scan_route": 3.0,
-              "pick_object": 3.0, "place_object": 2.0}
+              "pick_object": 3.0, "place_object": 2.0, "map_area": 6.0}
 ENERGY_PCT = {"navigate_to": 3.0, "inspect_area": 1.0, "capture_image": 0.5, "scan_route": 1.0,
-              "pick_object": 2.0, "place_object": 1.0}
+              "pick_object": 2.0, "place_object": 1.0, "map_area": 4.0}
 BATTERY_START = 80.0
 
 # Object pool for the random world (synthetic masses). PROFILE_MASS_KG mirrors
@@ -68,7 +73,55 @@ KNOWN_FAULTS = {
     "hang_navigate": "navigate_to never finishes until canceled.",
     "hang_scan": "scan_route never finishes until canceled.",
     "low_battery_gripper": "gripper_01 battery drops to 24% (below transport work + 20% reserve).",
+    "map_incomplete": "map_area stops at 60% coverage (COVERAGE_INCOMPLETE, partial map saved); persists.",
 }
+
+# Synthetic occupancy map written by the fake map_area (A8). 80 x 60 cells at 0.05 m = the 4.0 x 3.0 m
+# arena. It is labelled synthetic in the PGM header, the YAML and the result; it is never sensor data.
+MAP_W, MAP_H, MAP_RES = 80, 60, 0.05
+MAP_FREE, MAP_UNKNOWN, MAP_OCCUPIED = 254, 205, 0  # map_saver trinary shades
+MAP_COVERAGE_TARGET = 0.95
+MAP_PARTIAL_FROM_COL = 48  # map_incomplete: columns 48..79 stay unknown, giving 0.60 coverage
+
+
+def sim_map_root() -> Path:
+    """Where fake map files go: HIVE_SIM_MAP_ROOT (tests) or the Hive repo root."""
+    env = os.environ.get("HIVE_SIM_MAP_ROOT")
+    return Path(env) if env else Path(__file__).resolve().parents[3]
+
+
+def _safe_name(text: str, fallback: str) -> str:
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", text or "").lstrip(".")
+    return name[:80] or fallback
+
+
+def _synthetic_grid(partial: bool) -> list[list[int]]:
+    """Rows bottom-first (row 0 is y = origin). Walls on the border, one box near the origin."""
+    grid = [[MAP_FREE] * MAP_W for _ in range(MAP_H)]
+    for y in range(MAP_H):
+        for x in range(MAP_W):
+            if x in (0, MAP_W - 1) or y in (0, MAP_H - 1) or (10 <= x <= 15 and 6 <= y <= 11):
+                grid[y][x] = MAP_OCCUPIED
+            if (60 <= x and 48 <= y) or (partial and x >= MAP_PARTIAL_FROM_COL):
+                grid[y][x] = MAP_UNKNOWN
+    return grid
+
+
+def write_synthetic_map(root: Path, run_id: str, stem: str, partial: bool) -> tuple[dict[str, str], float]:
+    """Write <root>/runs/sim_maps/<run>/<stem>.synthetic.{pgm,yaml}; return (map_ref, coverage)."""
+    grid = _synthetic_grid(partial)
+    body = bytes(v for row in reversed(grid) for v in row)  # PGM rows are top-first
+    coverage = round(1 - body.count(MAP_UNKNOWN) / len(body), 4)
+    rel = Path("runs") / "sim_maps" / _safe_name(run_id, "norun") / f"{stem}.synthetic.pgm"
+    pgm = root / rel
+    pgm.parent.mkdir(parents=True, exist_ok=True)
+    data = b"P5\n# synthetic HIVE fake-fleet map (not sensor data)\n%d %d\n255\n" % (MAP_W, MAP_H) + body
+    pgm.write_bytes(data)
+    pgm.with_suffix(".yaml").write_text(
+        "# synthetic HIVE fake-fleet map (not sensor data)\n"
+        f"image: {pgm.name}\nmode: trinary\nresolution: {MAP_RES}\norigin: [0.0, 0.0, 0.0]\n"
+        "negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n")
+    return {"id": stem, "path": rel.as_posix(), "sha256": hashlib.sha256(data).hexdigest()}, coverage
 
 
 def _within(area: str, loc: Optional[str]) -> bool:
@@ -87,11 +140,14 @@ class Outcome:
 class FakeWorld:
     """Hidden simulator truth for one run."""
 
-    def __init__(self, faults: Optional[list[str]] = None, seed: Optional[int] = None, world: str = "fixed"):
+    def __init__(self, faults: Optional[list[str]] = None, seed: Optional[int] = None, world: str = "fixed",
+                 run_id: str = ""):
         if world not in WORLD_KINDS:
             raise ValueError(f"unknown world {world!r} (expected one of {list(WORLD_KINDS)})")
         _check_seed(seed)
         self.kind = world
+        self.run_id = run_id  # names the folder of the synthetic maps this run writes
+        self.maps_written = 0
         self.seed: Optional[int] = None
         self.objects: dict[str, dict[str, Any]] = {
             "red_block_1": {"label": "red_block", "location_id": "pickup_zone", "held_by": None, "mass_kg": 0.10},
@@ -195,6 +251,9 @@ class FakeWorld:
         elif skill == "scan_route":
             if params.get("route_id") not in OBSERVABLE_ROUTES.get(robot_id, set()):
                 return {"code": "not_observable", "message": f"cannot scan {params.get('route_id')}"}
+        elif skill == "map_area":
+            if params.get("area_id") not in MAP_AREAS.get(robot_id, set()):
+                return {"code": "not_mappable", "message": f"cannot map {params.get('area_id')}"}
         elif skill == "pick_object":
             if r["carried"]:
                 return {"code": "already_holding", "message": f"holding {r['carried']}"}
@@ -206,7 +265,7 @@ class FakeWorld:
         return None
 
     # ------------------------------------------------------------ execute
-    def execute(self, robot_id: str, skill: str, params: dict[str, Any]) -> Outcome:
+    def execute(self, robot_id: str, skill: str, params: dict[str, Any], attempt_id: str = "") -> Outcome:
         """Apply the skill at its commit point and return the robot's report."""
         r = self.robots[robot_id]
         energy = ENERGY_PCT[skill]
@@ -283,6 +342,23 @@ class FakeWorld:
                                           "label": o["label"], "attrs": {"placed_by": robot_id}}],
                            energy_used_pct=energy)
 
+        if skill == "map_area":
+            # Like the agent: the area_mapped observation rides in the result only, success or not.
+            area = params["area_id"]
+            self.maps_written += 1
+            stem = f"{_safe_name(area, 'area')}-{_safe_name(attempt_id, f'map{self.maps_written}')}"
+            partial = "map_incomplete" in self.faults
+            ref, coverage = write_synthetic_map(sim_map_root(), self.run_id, stem, partial)
+            result = {"area_id": area, "coverage": coverage, "map_ref": ref, "synthetic": True,
+                      "observation": {"kind": "area_mapped", "entity_id": f"map:{area}", "area_id": area,
+                                      "attrs": {"coverage": coverage, "map_ref": ref}}}
+            if coverage < MAP_COVERAGE_TARGET:
+                return Outcome("failed", result, {"code": "COVERAGE_INCOMPLETE",
+                                                  "message": f"coverage {coverage:.2f} below target "
+                                                             f"{MAP_COVERAGE_TARGET:.2f} (synthetic)"},
+                               energy_used_pct=energy)
+            return Outcome("succeeded", result, energy_used_pct=energy)
+
         return Outcome("failed", {}, {"code": "unsupported_skill", "message": skill})
 
     def snapshot(self) -> dict[str, Any]:
@@ -307,4 +383,5 @@ def _check_seed(seed: Any) -> None:
 
 def world_from_args(args: dict[str, Any]) -> FakeWorld:
     """Build a world from reset arguments (fake gateway and ROS fake fleet share this)."""
-    return FakeWorld(list(args.get("faults") or []), seed=args.get("seed"), world=args.get("world") or "fixed")
+    return FakeWorld(list(args.get("faults") or []), seed=args.get("seed"), world=args.get("world") or "fixed",
+                     run_id=str(args.get("run_id") or ""))

@@ -147,6 +147,35 @@ OPEN_MESSAGE = ("queued", "held")
 HASH_EXCLUDED = {"next_stage_preview", "preview_changes"}
 
 
+def map_report(area_id: str, result: Any, observations: list) -> tuple[Optional[Observation], str]:
+    """The area_mapped evidence of a succeeded map_area, or (None, why it was refused).
+
+    An area_mapped entry in the event's observations wins; otherwise result["observation"] is used (the
+    agent and the fake fleet send it there). Coverage must be a number in [0, 1] and map_ref must carry
+    string id, path and sha256; the map file itself is only read, path- and hash-checked, by GET /api/exec/map.
+    """
+    obs = next((o for o in observations if o.kind == "area_mapped"), None)
+    if obs is None:
+        raw = result.get("observation") if isinstance(result, dict) else None
+        if not isinstance(raw, dict):
+            return None, "no area_mapped observation in the result"
+        try:
+            obs = Observation.model_validate(raw)
+        except ValueError as exc:
+            return None, f"malformed area_mapped observation ({str(exc).splitlines()[0]})"
+    if obs.kind != "area_mapped":
+        return None, f"observation kind {obs.kind} is not area_mapped"
+    if obs.area_id != area_id:
+        return None, f"the map is for {obs.area_id}, not {area_id}"
+    cov = obs.attrs.get("coverage")
+    if isinstance(cov, bool) or not isinstance(cov, (int, float)) or not 0.0 <= cov <= 1.0:
+        return None, "coverage must be a number in [0, 1]"
+    ref = obs.attrs.get("map_ref")
+    if not isinstance(ref, dict) or not all(isinstance(ref.get(k), str) and ref[k] for k in ("id", "path", "sha256")):
+        return None, "map_ref needs string id, path and sha256"
+    return obs, ""
+
+
 def _hash(obj: Any) -> str:
     return hashlib.sha256(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
@@ -1280,6 +1309,14 @@ class Executive:
             robot.carried_object = None
             self.world.set_possession(res["object_id"], None, res["location_id"], robot.robot_id, att.attempt_id)
             self.log("effect", f"Placement confirmed: {res['object_id']} at {res['location_id']}.")
+        elif skill == "map_area":
+            obs, why = map_report(params["area_id"], res, ev.observations)
+            if obs is None:
+                self.log("effect", f"Map from {robot.robot_id} not recorded: {why}.")
+            else:
+                rec = self.world.record_map(obs, robot.robot_id, att.attempt_id)
+                self.log("effect", f"Map saved: {rec.area_id} {round(rec.coverage * 100)}% coverage by "
+                                   f"{robot.robot_id}.", map_id=rec.id)
 
     # ===================================================== failure/recovery
     async def _on_task_failure(self, m: Mission, rt: TaskRuntime, status: str, cancel_siblings: bool = True) -> None:
@@ -1424,6 +1461,8 @@ class Executive:
             return self.world.route_status(g.route_id) is not None
         if g.kind == "image_captured":
             return self.world.image_for(g.area_id, since) is not None
+        if g.kind == "area_mapped":
+            return self.world.map_for(g.area_id, since) is not None
         return False
 
     def _located(self, label: str, area_id: str, since: float) -> list:
@@ -1440,9 +1479,14 @@ class Executive:
         return None
 
     def _completion_reason(self, goals: list[Goal], since: float) -> str:
-        """Names what find goals found (from beliefs); other goals keep the generic sentence."""
+        """Names what find goals found (from beliefs) and the maps saved; other goals keep the generic sentence."""
         parts = []
         for g in goals:
+            if g.kind == "area_mapped":
+                rec = self.world.map_for(g.area_id, since)
+                if rec is not None:
+                    parts.append(f"Mapped {rec.area_id}: {round(rec.coverage * 100)}% coverage ({rec.robot_id}).")
+                continue
             if g.kind != "object_located":
                 continue
             label, area = g.object_query.label, g.area_id
@@ -1456,7 +1500,7 @@ class Executive:
                 parts.append(f"Searched {rec.area_id if rec else area}: no {label} found.")
         if not parts:
             return "All mission goals satisfied by confirmed results."
-        if any(g.kind != "object_located" for g in goals):
+        if any(g.kind not in ("object_located", "area_mapped") for g in goals):
             parts.append("All mission goals satisfied by confirmed results.")
         return " ".join(parts)
 

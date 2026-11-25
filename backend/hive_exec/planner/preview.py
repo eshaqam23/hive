@@ -32,7 +32,7 @@ def _params(action: Any) -> dict[str, Optional[str]]:
         out["location_id"] = action.location_id
     if kind == "navigate_to":
         out["route_id"] = action.route_id
-    if kind in ("inspect_area", "capture_image"):
+    if kind in ("inspect_area", "capture_image", "map_area"):
         out["area_id"] = action.area_id
     if kind == "scan_route":
         out["route_id"] = action.route_id

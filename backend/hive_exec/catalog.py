@@ -51,6 +51,12 @@ SKILLS: dict[str, SkillDef] = {
         SkillDef("place_object", "place_object(object_id, location_id)",
                  "Gripper releases the held object at its current location (= location_id).",
                  2.0, 1.0, "gripper confirms release at location_id", timeout_s=120.0),
+        # A8: 480 s = the agent's 300 s exploration budget + 60 s navigation + path check, map save
+        # and margin (DECISIONS.md). The effect is a map record, never a robot location change.
+        SkillDef("map_area", "map_area(area_id)",
+                 "Lidar explores an area it can map and saves an occupancy map; reports coverage. "
+                 "May fail with a partial map (coverage below target).",
+                 6.0, 4.0, "robot reports a saved map with coverage >= target", timeout_s=480.0),
     ]
 }
 
@@ -65,6 +71,7 @@ class RobotDescriptor:
     reachable_locations: tuple[str, ...]
     observable_areas: tuple[str, ...] = ()
     observable_routes: tuple[str, ...] = ()
+    map_areas: tuple[str, ...] = ()  # A8: areas the robot can map with map_area
     payload_limit_kg: float = 0.0
     capacity: int = 0
     ros_action: str = ""  # Delivery B adapter routing
@@ -82,6 +89,7 @@ class RobotDescriptor:
             "reachable_locations": list(self.reachable_locations),
             "observable_areas": list(self.observable_areas),
             "observable_routes": list(self.observable_routes),
+            "map_areas": list(self.map_areas),
             "payload_limit_kg": self.payload_limit_kg,
             "capacity": self.capacity,
             "adapter": {"fake": self.robot_id, "ros_action": self.ros_action},
@@ -106,9 +114,9 @@ ROBOTS: dict[str, RobotDescriptor] = {
         ),
         RobotDescriptor(
             "lidar_01", "LiDAR RC Car", "lidarRcCar",
-            ("scan_route", "navigate_to"),
+            ("scan_route", "navigate_to", "map_area"),
             start_location="lidar_post", reachable_locations=("lidar_post",),
-            observable_routes=("pickup_corridor",),
+            observable_routes=("pickup_corridor",), map_areas=("arena",),
             ros_action="/lidar_01/execute_skill",
             sensors=("2d_lidar",),
             localization="fixed at lidar_post (synthetic)",
@@ -149,6 +157,7 @@ LOCATIONS: dict[str, Location] = {
 }
 
 AREAS = ("work_area", "pickup_zone", "dropoff_zone")
+MAP_AREAS = ("arena",)  # A8: the whole arena, mapped by map_area (contracts.MapAreaId)
 
 
 @dataclass(frozen=True)

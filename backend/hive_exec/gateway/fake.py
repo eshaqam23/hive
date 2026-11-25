@@ -60,7 +60,7 @@ class FakeGateway(RobotGateway):
         self._tasks.clear()
         self._cancel.clear()
         self._busy.clear()
-        self.world = FakeWorld(faults, seed=seed, world=world)
+        self.world = FakeWorld(faults, seed=seed, world=world, run_id=run_id)
         self.run_id = run_id
         return {"world": self.world.kind, "seed": self.world.seed}
 
@@ -119,7 +119,7 @@ class FakeGateway(RobotGateway):
                 i += 1
                 if not hang:
                     await self._emit(env, "running", progress=i / self.progress_steps)
-            out = self.world.execute(rid, skill, env.params)
+            out = self.world.execute(rid, skill, env.params, attempt_id=env.attempt_id)
             await self._emit(env, out.status, progress=1.0, result=out.result, error=out.error,
                              observations=out.observations, energy_used_pct=out.energy_used_pct)
         except asyncio.CancelledError:
