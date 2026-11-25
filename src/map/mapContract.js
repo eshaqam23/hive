@@ -1,6 +1,7 @@
-// The shared perception map the Executive will serve at GET /api/exec/map, schema hive.shared-map.v0.
-// Nothing builds it yet: today the route answers { available: false }. This file is the contract the
-// map UI is drawn against, so the real map just plugs in. docs/shared-map-contract.md says the same.
+// The shared perception map the Executive serves at GET /api/exec/map, schema hive.shared-map.v0.
+// Since A8 the route serves the run's latest map_area map (occupancy only, with provenance); fused shared
+// perception is not built yet. This file is the contract the map UI is drawn against, so the real map just
+// plugs in. docs/shared-map-contract.md says the same.
 //
 // Frames and units: everything is in the map frame ("map"), metres and radians, x right / y up,
 // theta counter-clockwise from +x. Ages are seconds since the data was last refreshed.
@@ -78,6 +79,17 @@ export const SCHEMA = "hive.shared-map.v0";
  * @property {MapRegion[]} regions
  * @property {MapScan[]} [scans]
  * @property {number} known_fraction  0..1, share of grid cells whose value is not -1
+ * @property {MapProvenance|null} [provenance]  where the grid came from (A8); absent for a fused map
+ */
+
+/**
+ * A8: the map_area result the grid was read from.
+ * @typedef {Object} MapProvenance
+ * @property {"map_area"} source
+ * @property {string} robot_id
+ * @property {string|null} attempt_id
+ * @property {number} coverage                         the coverage the skill reported, 0..1
+ * @property {"simulated"|"emulated"|"real"} evidence  fake fleet: simulated; agent fleet: its report's evidence
  */
 
 /**
@@ -125,6 +137,13 @@ export function knownFraction(grid) {
 }
 
 const list = (value) => (Array.isArray(value) ? value : []);
+const EVIDENCE = ["simulated", "emulated", "real"];
+
+/* Fail-safe: an evidence this UI does not know reads as simulated, never as real. */
+function provenance(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  return { ...raw, evidence: EVIDENCE.includes(raw.evidence) ? raw.evidence : "simulated" };
+}
 const unavailable = (reason, schema) => ({ available: false, reason, ...(schema ? { schema } : {}) });
 
 function gridProblem(g) {
@@ -154,5 +173,14 @@ export function parseSharedMap(raw) {
     regions: list(raw.regions),
     scans: list(raw.scans),
     known_fraction: Number.isFinite(raw.known_fraction) ? raw.known_fraction : knownFraction(occupancy),
+    provenance: provenance(raw.provenance),
   };
+}
+
+/* The tag a served map carries, like the fleet's SIM / EMULATED tag: "EMULATED" for an emulated agent map,
+   null for a real one, "SIM" for everything else, including a map with no provenance (fail-safe). */
+export function mapTag(map) {
+  if (!map || map.available !== true) return null;
+  const evidence = map.provenance?.evidence;
+  return evidence === "real" ? null : evidence === "emulated" ? "EMULATED" : "SIM";
 }

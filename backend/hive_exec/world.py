@@ -77,6 +77,8 @@ class MapRecord:
     attempt_id: Optional[str]
     observed_at: float
     source: str
+    evidence: str = "simulated"  # A8: shared_map.map_evidence of the fleet that reported it
+    agent: bool = False  # A8: an agent fleet's map (its file is under HIVE_AGENT_ROOT, not the Hive repo)
 
 
 @dataclass
@@ -144,13 +146,14 @@ class ObservedWorld:
         self.version += 1
         return rec
 
-    def record_map(self, obs: Observation, source: str, attempt_id: Optional[str]) -> MapRecord:
+    def record_map(self, obs: Observation, source: str, attempt_id: Optional[str], *,
+                   evidence: str = "simulated", agent: bool = False) -> MapRecord:
         """Record a saved map. The caller has checked the evidence (executive.map_report)."""
         seq = len(self.maps) + 1
         rec = MapRecord(
             id=f"map-{seq}-{secrets.token_hex(4)}", seq=seq, area_id=obs.area_id or "",
             coverage=float(obs.attrs["coverage"]), map_ref=dict(obs.attrs["map_ref"]), robot_id=source,
-            attempt_id=attempt_id, observed_at=self.clock(), source=source,
+            attempt_id=attempt_id, observed_at=self.clock(), source=source, evidence=evidence, agent=agent,
         )
         self.maps.append(rec)
         self.version += 1

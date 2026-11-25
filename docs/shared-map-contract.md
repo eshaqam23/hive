@@ -1,14 +1,15 @@
 # Shared perception map contract — `hive.shared-map.v0`
 
-The Map tab and Chat's mini map draw one shared map of the room. Many cars feed it. Nothing builds that map yet.
+The Map tab and Chat's mini map draw one shared map of the room. Many cars will feed it; fused shared perception is not built yet.
 
-- Today `GET /api/exec/map` (`backend/hive_exec/api.py`) answers:
+- Since A8, `GET /api/exec/map` (`backend/hive_exec/api.py`, `backend/hive_exec/shared_map.py`) serves the run's latest **map_area** map: its occupancy grid, every catalog robot with `pose: null`, no objects or regions, and a `provenance` block. See [Served from a map_area record](#served-from-a-map_area-record-a8).
+- With no map record in the run (a reset starts a new run) it answers:
 
   ```json
-  { "available": false, "reason": "shared perception not built yet", "schema": "hive.shared-map.v0" }
+  { "available": false, "reason": "no map reported in this run", "schema": "hive.shared-map.v0" }
   ```
 
-- The UI then shows its empty state: "Shared perception map not built yet".
+- The UI then shows its empty state with that reason.
 
 This document is the contract the UI is built against, so a real map can plug in without UI changes. `src/map/mapContract.js` says the same thing as JSDoc and holds the parser (`parseSharedMap`) and the cell classifier the UI uses.
 
@@ -107,6 +108,41 @@ The build prompt names these fields:
 - `known_fraction`
 
 The Map tab also has a **LiDAR scans** layer, so the contract adds an optional `scans` list for it. It holds the latest hit points per robot, already in the map frame. A map without `scans` is valid and shows an empty layer.
+
+## Served from a map_area record (A8)
+
+The Executive records a map only from the `area_mapped` observation of a succeeded `map_area` (`world.MapRecord`). Its `map_ref` is `{id, path, sha256}`: `path` is relative to the fleet's root and `sha256` is the image file's hash. The route reads that file and serves it only when all of this holds; otherwise it answers not-available with the reason:
+
+- **Root.** `HIVE_AGENT_ROOT` (the hive-agent repo root) for an agent fleet's record; the Hive repo root for the fake fleets' records (`fake_world.sim_map_root`; tests point it elsewhere with `HIVE_SIM_MAP_ROOT`). An agent record without `HIVE_AGENT_ROOT` is not served.
+- **Path.** Relative, no `..`, first part `runs`, and its realpath inside `<root>/runs/`: no absolute path, no symlink out. The YAML beside it (same stem, `.yaml`) passes the same check.
+- **Hash.** The image's sha256 equals `map_ref.sha256`.
+- **Image.** Binary PGM `P5`, maxval 255, `#` comments allowed in the header, exactly `width × height` bytes after it, at most `MAP_MAX_CELLS` (4,000,000) cells.
+- **YAML** (what map_server / map_saver write): `image` names that same file; `mode` is `trinary` (the default when absent); `negate` 0 or 1; `resolution` > 0; `origin` `[x, y, yaw]`; `0 ≤ free_thresh < occupied_thresh ≤ 1`.
+
+Cells follow ROS map_server's trinary rule (nav2 `map_io`): `shade = value / 255`, `occ = shade` if `negate` else `1 − shade`; `occ > occupied_thresh` is `100`, `occ < free_thresh` is `0`, anything else `-1`. PGM row 0 is the top of the image and the contract's row 0 is at the origin, so the rows are flipped. With the default thresholds, 254 is free, 205 unknown and 0 occupied.
+
+Other fields:
+
+- `origin` is the YAML's `[x, y, yaw]` as `{x, y, theta}`.
+- `revision` is the record's `seq` (1, 2, ... in the run) and `epoch` is the record's `id`, so every new map refits the view.
+- `known_fraction` is worked out from the served grid.
+- `robots` is every catalog robot with `pose: null`, `source: null`, `age_s: null`; `objects` and `regions` are `[]`.
+
+### `provenance` — an addition
+
+```jsonc
+"provenance": {
+  "source": "map_area",
+  "robot_id": "lidar_01",
+  "attempt_id": "run-1a2b:t1:1",   // or null
+  "coverage": 0.95,                // what the skill reported, 0..1
+  "evidence": "simulated"          // "simulated" | "emulated" | "real"
+}
+```
+
+`evidence` comes from the fleet that reported the map: `simulated` for the fake fleets, and the fleet report's `evidence` for a hive-agent fleet (`emulated` or `real`; anything else is `simulated`). It is optional in the contract: a fused map may leave it out.
+
+The Map tab and Chat's mini map tag a served map the way the Fleet tab tags robots: **SIM** for `simulated`, **EMULATED** for `emulated`, no tag for `real`. A map with no `provenance`, or an `evidence` the UI does not know, is tagged **SIM** (fail-safe). While the Demo data toggle is on, only **DEMO** is shown. `mapTag` in `src/map/mapContract.js` decides the tag.
 
 ## Shape when not available
 

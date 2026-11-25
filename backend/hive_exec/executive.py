@@ -44,6 +44,7 @@ from .contracts import (
 from .gateway.base import RobotGateway
 from .planner.base import Planner, PlannerError
 from .planner.preview import compute_preview_diff
+from .shared_map import map_evidence
 from .validator import ValidationResult, validate, validate_preview
 from .world import ObservedWorld, RobotState, initial_robot_states
 
@@ -246,6 +247,11 @@ class Executive:
         except Exception:  # noqa: BLE001 - an unreachable fleet keeps the last report it gave
             pass
         return is_agent(self.gateway.info().fleet)
+
+    def _record_map(self, obs: Observation, robot_id: str, attempt_id: Optional[str]):
+        """A8: record a map with the evidence of the fleet that reported it (GET /api/exec/map tags it)."""
+        fleet = self.gateway.info().fleet
+        return self.world.record_map(obs, robot_id, attempt_id, evidence=map_evidence(fleet), agent=is_agent(fleet))
 
     async def refresh_status(self, sync_location: bool = False) -> None:
         status = await self.gateway.status()
@@ -1352,7 +1358,7 @@ class Executive:
             if obs is None:
                 self.log("effect", f"Map from {robot.robot_id} not recorded: {why}.")
             else:
-                rec = self.world.record_map(obs, robot.robot_id, att.attempt_id)
+                rec = self._record_map(obs, robot.robot_id, att.attempt_id)
                 self.log("effect", f"Map saved: {rec.area_id} {round(rec.coverage * 100)}% coverage by "
                                    f"{robot.robot_id}.", map_id=rec.id)
 

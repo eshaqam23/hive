@@ -22,6 +22,7 @@ from .contracts import plan_proposal_json_schema
 from .executive import ExecError, Executive
 from .gateway.base import RobotGateway
 from .health import exec_health, not_ready_reason
+from .shared_map import build_shared_map
 from .planner.baseline import BaselinePlanner
 from .llm import api as llm_api
 from .llm.router import Router
@@ -180,7 +181,8 @@ def create_app(settings: Optional[ExecSettings] = None, gateway: Optional[RobotG
 
     @app.get("/api/exec/map")
     async def shared_map():
-        return {"available": False, "reason": "shared perception not built yet", "schema": "hive.shared-map.v0"}
+        # A8: the run's latest map record (a reset starts a new world, so no record); file I/O off the loop.
+        return await asyncio.to_thread(build_shared_map, ex.world.latest_map())
 
     @app.get("/api/exec/state")
     async def state():

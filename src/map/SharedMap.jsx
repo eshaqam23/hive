@@ -4,7 +4,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { LINK_TONE, linkState } from "../fleet/presets.jsx";
 import { useTheme } from "../shell/theme.js";
-import { CELL, classifyGrid, parseSharedMap } from "./mapContract.js";
+import { CELL, classifyGrid, mapTag, parseSharedMap } from "./mapContract.js";
+import { SimTag } from "../shell/SimTag.jsx";
 import { DEMO_MAP } from "./demoMap.js";
 import { fitView, niceStep, scaleBar, toScreen, toWorld, zoomAt } from "./mapMath.js";
 
@@ -275,6 +276,7 @@ export default function SharedMap({ map: raw = null, reachable = null, error = n
   const showDemo = demo && demoAllowed && !compact;
   const map = useMemo(() => parseSharedMap(showDemo ? DEMO_MAP : raw), [showDemo, raw]);
   const grid = map.available ? map.occupancy : null;
+  const tag = showDemo ? null : mapTag(map); // A8: SIM / EMULATED / none, like the fleet; the demo shows DEMO
 
   const boxRef = useRef(null);
   const svgRef = useRef(null);
@@ -355,6 +357,7 @@ export default function SharedMap({ map: raw = null, reachable = null, error = n
           </span>
         </div>
       )}
+      {compact && tag && <SimTag className="absolute left-2 top-2 text-[11px] leading-4" data-testid="map-tag" label={tag} />}
       {!compact && (
         <div className="absolute right-3 top-3 flex flex-col gap-1.5">
           <button aria-label="Zoom in" className={ctlClass} onClick={() => zoom(1.25)} type="button">
@@ -406,6 +409,12 @@ export default function SharedMap({ map: raw = null, reachable = null, error = n
           </ul>
           <div className="flex items-center gap-4 font-mono text-[13px] text-faint">
             {showDemo && <span className="rounded border border-warn/60 px-1.5 font-semibold text-warn">DEMO</span>}
+            {map.available && map.provenance && Number.isFinite(map.provenance.coverage) && (
+              <span data-testid="provenance">
+                {`${map.provenance.source} by ${map.provenance.robot_id} · ${Math.round(map.provenance.coverage * 100)}% coverage`}
+              </span>
+            )}
+            {tag && <SimTag data-testid="map-tag" label={tag} />}
             <span>
               <span className="text-[15px] font-semibold text-ink" data-testid="known">
                 {known}
