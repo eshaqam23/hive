@@ -48,44 +48,124 @@ export function backendCommand({ platform, repoDir, env, pidfile }) {
 // the fake fleet (rosbridge :9090) and the bridge (:8790) are up before the Executive, and Vite is
 // last. The ports are fixed: Vite's origin is the only one the backends accept.
 const STEPS = {
+  // --agents (A8): the hive-agent fleet's rosbridge, which its scripts/fleet_up.sh starts. Waited for,
+  // never started here (external), so no fake fleet ever runs next to the agents.
+  agents: { name: "agents", label: "hive-agent fleet's rosbridge", port: 9090, waitMs: 60000, external: true },
   backend: { name: "backend", label: "car backend", port: 8787, waitMs: 60000 },
   fleet: { name: "fleet", label: "fake fleet (rosbridge)", port: 9090, waitMs: 90000 },
   bridge: { name: "bridge", label: "bridge", port: 8790, waitMs: 30000 },
   exec: { name: "exec", label: "Executive", port: 8788, waitMs: 60000 },
   vite: { name: "vite", label: "Vite dev server", port: 5173, waitMs: 30000 },
 };
-const FLAGS = new Set(["--backend-only", "--no-executive", "--no-bridge"]);
+const FLAGS = new Set(["--agents", "--no-open", "--backend-only", "--no-executive", "--no-bridge"]);
+const NOT_WITH_AGENTS = ["--backend-only", "--no-executive", "--no-bridge"];
 const GATEWAYS = ["synapse", "fake"];
 const SIM_WORLDS = ["fixed", "random"];
 
-// argv: the launcher's own arguments. Returns { gateway, simWorld, steps } or { error }.
+// argv: the launcher's own arguments. Returns { gateway, simWorld, agents, open, steps } or { error }.
 // HIVE_GATEWAY=synapse (default): the fake fleet + bridge carry the Executive's actions over ROS 2.
 // HIVE_GATEWAY=fake: the Executive's in-process sim, no ROS. --no-bridge: an Executive that talks to
 // a bridge you run yourself. --no-executive: live-data's backend + Vite. --backend-only: the car
-// backend alone.
+// backend alone. --agents (A8): the bridge and the Executive against the hive-agent fleet already
+// up on :9090, no fake fleet, HIVE_SIM_WORLD forced to fixed. --no-open: Vite opens no browser.
 export function launchPlan({ argv = [], env = {} }) {
   const unknown = argv.find((a) => !FLAGS.has(a));
-  if (unknown) return { error: `unknown option ${unknown} (use --backend-only, --no-executive or --no-bridge)` };
+  if (unknown) return { error: `unknown option ${unknown} (use --agents, --no-open, --backend-only, --no-executive or --no-bridge)` };
+  const has = (f) => argv.includes(f);
+  const open = !has("--no-open");
   const gateway = env.HIVE_GATEWAY || "synapse";
   if (!GATEWAYS.includes(gateway)) return { error: `HIVE_GATEWAY must be "synapse" or "fake" (got "${gateway}")` };
+  if (has("--agents")) {
+    if (gateway !== "synapse") return { error: `--agents needs HIVE_GATEWAY=synapse (got "${gateway}"): the agent fleet is reached through the bridge` };
+    const clash = NOT_WITH_AGENTS.find(has);
+    if (clash) return { error: `--agents starts the bridge and the Executive, so it does not go with ${clash}` };
+    // The agent fleet never gets a world or seed; the Executive's own sim world stays the fixed one.
+    return { gateway, simWorld: "fixed", agents: true, open, steps: [STEPS.agents, STEPS.backend, STEPS.bridge, STEPS.exec, STEPS.vite] };
+  }
   // The launcher is for people trying the app, so it starts a seeded random world unless told otherwise.
   const simWorld = env.HIVE_SIM_WORLD || "random";
   if (!SIM_WORLDS.includes(simWorld)) return { error: `HIVE_SIM_WORLD must be "fixed" or "random" (got "${simWorld}")` };
-  const has = (f) => argv.includes(f);
-  if (has("--backend-only")) return { gateway, simWorld, steps: [STEPS.backend] };
+  if (has("--backend-only")) return { gateway, simWorld, agents: false, open, steps: [STEPS.backend] };
   const executive = !has("--no-executive");
   const synapse = executive && gateway === "synapse" && !has("--no-bridge");
   const steps = [STEPS.backend];
   if (synapse) steps.push(STEPS.fleet, STEPS.bridge);
   if (executive) steps.push(STEPS.exec);
   steps.push(STEPS.vite);
-  return { gateway, simWorld, steps };
+  return { gateway, simWorld, agents: false, open, steps };
+}
+
+// Vite's arguments: --open unless --no-open (WSL has no browser to open).
+export function viteArgs(open) {
+  return ["--host", "127.0.0.1", ...(open ? ["--open"] : [])];
+}
+
+// --agents: what to do when the hive-agent fleet's rosbridge never opens.
+export function agentsNotUpMessage({ port, waitMs }) {
+  return (
+    `nothing listened on rosbridge :${port} within ${waitMs / 1000} s. --agents runs against the hive-agent fleet and ` +
+    `does not start one: inside Linux, in the hive-agent repo, run scripts/fleet_up.sh (it starts the robots, ` +
+    `/hive/fleet_control and rosbridge on 127.0.0.1:${port}) and wait for FLEET: UP, then run npm run hive -- --agents again.`
+  );
+}
+
+// --agents: the bridge core must carry the v2 patch (per-goal timeouts from the envelope), or every
+// goal is cut at the unpatched core's 120 s cap. build-core.sh stamps the last patch it applied into
+// <core>/package.json "hive".patch, applying bridge/patches/*.patch in glob order.
+export const CORE_V2_PATCH = "corebrum-core-rosbridge-actions.v2.patch";
+
+// The core directory bridge/server.mjs loads: HIVE_CORE_DIR, else ~/.hive-bridge/core.
+export function coreDirFor(env, home) {
+  return env.HIVE_CORE_DIR || `${home}/.hive-bridge/core`;
+}
+
+// The command that builds a patched core into coreDir (build-core.sh writes $HIVE_BRIDGE_HOME/core).
+export function coreBuildCommand(coreDir) {
+  const build = "HIVE_CORE_PATCH=1 bash bridge/scripts/build-core.sh";
+  const dir = String(coreDir).replace(/\/+$/, "");
+  const home = dir.endsWith("/core") ? dir.slice(0, -"/core".length) : "";
+  if (home) return `HIVE_BRIDGE_HOME=${home} ${build}`;
+  return `HIVE_BRIDGE_HOME=<dir> ${build}, then HIVE_CORE_DIR=<dir>/core`;
+}
+
+// null when the core's stamp is the v2 patch or a later patch of this repo (patches: the file names in
+// bridge/patches); otherwise why --agents refuses, naming the build command. pkgText: the core's
+// package.json text, or null when it could not be read.
+export function coreStampProblem({ pkgText, patches, coreDir }) {
+  let stamp;
+  try {
+    stamp = JSON.parse(pkgText)?.hive?.patch;
+  } catch {
+    stamp = undefined;
+  }
+  if (typeof stamp === "string" && patches.includes(stamp) && stamp >= CORE_V2_PATCH) return null;
+  const found =
+    pkgText == null
+      ? "has no readable package.json"
+      : typeof stamp === "string"
+        ? `is stamped ${JSON.stringify(stamp.length <= 80 ? stamp : `${stamp.slice(0, 77)}...`)}`
+        : "has no Hive patch stamp";
+  return (
+    `the bridge core at ${coreDir} ${found}; --agents needs one built with ${CORE_V2_PATCH} or later, because an ` +
+    `agent fleet never runs with the core's 120 s goal cap. From this repo's root, build it with: ${coreBuildCommand(coreDir)}`
+  );
 }
 
 // Variables that must reach the WSL side (WSLENV lists them; plain names, no path translation).
 // Only the ones set in env: WSL turns a listed but unset variable into an empty string, which
 // float("") and friends then reject.
-const WSL_VARS = ["PYTHONUNBUFFERED", "HIVE_GATEWAY", "HIVE_PROVIDERS_FILE", "HIVE_SIM_TIME_SCALE", "HIVE_EXEC_PYTHON", "HIVE_ROS_SETUP", "HIVE_SIM_WORLD"];
+const WSL_VARS = [
+  "PYTHONUNBUFFERED",
+  "HIVE_GATEWAY",
+  "HIVE_PROVIDERS_FILE",
+  "HIVE_SIM_TIME_SCALE",
+  "HIVE_EXEC_PYTHON",
+  "HIVE_ROS_SETUP",
+  "HIVE_SIM_WORLD",
+  "HIVE_AGENT_ROOT", // --agents: where the Executive reads an agent fleet's map_area maps
+  "HIVE_CORE_DIR", // the bridge's core
+  "HIVE_BRIDGE_TIMEOUT_MARGIN_S", // the bridge's margin over a skill's own timeout
+];
 export function withWslEnv(existing, env) {
   const parts = (existing || "").split(":").filter(Boolean);
   const names = new Set(parts.map((p) => p.split("/")[0]));

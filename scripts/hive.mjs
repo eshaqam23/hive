@@ -2,11 +2,26 @@
 // Start Hive: the car backend, then (HIVE_GATEWAY=synapse, the default) the fake fleet and the
 // bridge, then the Executive, then Vite. Each one's port must open before the next starts. One
 // Ctrl+C stops all of them, the car backend first so it stops every robot.
-// Flags: --no-executive, --no-bridge, --backend-only (see launchPlan in backend-command.mjs).
-import { spawn } from "node:child_process";
+// Flags: --agents, --no-open, --no-executive, --no-bridge, --backend-only (see launchPlan in
+// backend-command.mjs). --agents waits for the hive-agent fleet's rosbridge instead of starting the
+// fake fleet, and refuses a bridge core without the v2 patch.
+import { spawn, spawnSync } from "node:child_process";
+import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { backendCommand, launchPlan, serviceCommand, withWslEnv, withWslPaths, wslSignals } from "./backend-command.mjs";
+import {
+  agentsNotUpMessage,
+  backendCommand,
+  coreDirFor,
+  coreStampProblem,
+  launchPlan,
+  serviceCommand,
+  viteArgs,
+  withWslEnv,
+  withWslPaths,
+  wslSignals,
+} from "./backend-command.mjs";
 import { busyPorts, portInUseMessage, waitForPort } from "./ports.mjs";
 import { pipePrefixed } from "./prefix.mjs";
 import { shutdownAll } from "./shutdown.mjs";
@@ -47,7 +62,7 @@ function inWsl(script) {
 
 function commandFor(name, pidfile) {
   if (name === "backend") return backendCommand({ platform: process.platform, repoDir, env: process.env, pidfile });
-  if (name === "vite") return { cmd: process.execPath, args: [viteBin, "--host", "127.0.0.1", "--open"] };
+  if (name === "vite") return { cmd: process.execPath, args: [viteBin, ...viteArgs(plan.open)] };
   return serviceCommand(name, { platform: process.platform, repoDir, env: process.env, pidfile, home: homedir(), nodePath: process.execPath });
 }
 
@@ -158,33 +173,74 @@ async function stopAll(code = 0) {
   process.exit(code);
 }
 
+// --agents: the core directory the bridge will load and its package.json text (null when unreadable).
+// Windows: the bridge runs in WSL, so the file is read there, with the same HIVE_CORE_DIR (WSLENV).
+function readCoreStamp() {
+  if (isWin) {
+    const distro = process.env.HIVE_WSL_DISTRO ? ["-d", process.env.HIVE_WSL_DISTRO] : [];
+    const script = 'cat "${HIVE_CORE_DIR:-$HOME/.hive-bridge/core}/package.json"';
+    const r = spawnSync("wsl.exe", [...distro, "--exec", "sh", "-c", script], { env, encoding: "utf8", windowsHide: true });
+    return { coreDir: process.env.HIVE_CORE_DIR || "~/.hive-bridge/core", pkgText: r.status === 0 ? r.stdout : null };
+  }
+  const coreDir = coreDirFor(process.env, homedir());
+  try {
+    return { coreDir, pkgText: readFileSync(join(coreDir, "package.json"), "utf8") };
+  } catch {
+    return { coreDir, pkgText: null };
+  }
+}
+
+function checkAgentsMode() {
+  const patches = readdirSync(join(repoDir, "bridge", "patches")).filter((f) => f.endsWith(".patch"));
+  const problem = coreStampProblem({ ...readCoreStamp(), patches });
+  if (problem) {
+    console.error(`hive: ${problem}`);
+    process.exit(1);
+  }
+  if (process.env.HIVE_SIM_WORLD && process.env.HIVE_SIM_WORLD !== "fixed") say(`--agents: HIVE_SIM_WORLD=${process.env.HIVE_SIM_WORLD} ignored, the world is fixed`);
+  if (!process.env.HIVE_AGENT_ROOT) say("--agents: HIVE_AGENT_ROOT is not set, so the Map tab cannot read the agent fleet's maps (set it to the hive-agent repo root)");
+}
+
 function banner() {
   const has = (n) => plan.steps.some((s) => s.name === n);
   const parts = [];
   if (has("vite")) parts.push("UI http://127.0.0.1:5173");
   parts.push("car backend :8787");
   if (has("exec")) {
-    const sim = plan.gateway === "fake" ? "in-process sim, SIM data" : has("fleet") ? "fake fleet on ROS_DOMAIN_ID 77, SIM data" : "your own bridge on :8790";
+    const sim = plan.agents
+      ? "the hive-agent fleet; the Fleet tab shows its evidence"
+      : plan.gateway === "fake"
+        ? "in-process sim, SIM data"
+        : has("fleet")
+          ? "fake fleet on ROS_DOMAIN_ID 77, SIM data"
+          : "your own bridge on :8790";
     parts.push(`Executive :8788/api/exec (gateway ${plan.gateway}: ${sim})`);
   }
   if (has("bridge")) parts.push("bridge :8790");
   if (has("fleet")) parts.push("rosbridge :9090");
+  if (has("agents")) parts.push("rosbridge :9090 (hive-agent fleet, not started here)");
   say(`ready · ${parts.join(" · ")} · Ctrl+C stops everything`);
 }
 
 async function main() {
-  const busy = await busyPorts(plan.steps.map((s) => s.port));
+  if (plan.agents) checkAgentsMode();
+  const busy = await busyPorts(plan.steps.filter((s) => !s.external).map((s) => s.port));
   if (busy.length) {
     for (const port of busy) console.error(`hive: ${portInUseMessage(port, process.platform)}`);
     process.exit(1);
   }
   const gateway = plan.steps.some((s) => s.name === "exec") ? ` (HIVE_GATEWAY=${plan.gateway})` : "";
-  say(`starting ${plan.steps.map((s) => s.name).join(", ")}${gateway}`);
+  say(`starting ${plan.steps.filter((s) => !s.external).map((s) => s.name).join(", ")}${gateway}`);
   for (const step of plan.steps) {
     if (stopping) return;
-    start(step);
+    if (step.external) say(`waiting up to ${step.waitMs / 1000} s for the ${step.label} on :${step.port}`);
+    else start(step);
     const r = await waitForPort(step.port, { timeoutMs: step.waitMs, signal: abort.signal });
     if (r === "aborted") return;
+    if (r === "timeout" && step.external) {
+      console.error(`hive: ${agentsNotUpMessage(step)}`);
+      return stopAll(1);
+    }
     if (r === "timeout") {
       console.error(`[hive] the ${step.label} did not open port ${step.port} within ${step.waitMs / 1000} s; stopping everything`);
       return stopAll(1);
