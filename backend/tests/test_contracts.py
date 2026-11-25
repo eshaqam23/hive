@@ -630,3 +630,19 @@ def test_execution_plan_and_report_defaults_for_the_preview_fields():
 
     assert ValidationReport(ok=True, world_version=1).preview_findings == []
     assert ExecutionPlan.model_fields["preview_diff"].default is None
+
+
+# ---- A8: per-skill timeouts (an agent's own bounds must fit inside them; the envelope allows 600 s)
+A8_TIMEOUTS = {"navigate_to": 240.0, "pick_object": 300.0, "place_object": 120.0,
+               "inspect_area": 60.0, "capture_image": 60.0, "scan_route": 60.0}
+
+
+@pytest.mark.parametrize("skill,timeout_s", sorted(A8_TIMEOUTS.items()))
+def test_a8_per_skill_timeouts(skill, timeout_s):
+    assert catalog.SKILLS[skill].timeout_s == timeout_s
+
+
+def test_a8_every_skill_timeout_fits_the_envelope():
+    for skill in catalog.SKILLS.values():
+        TaskEnvelope(run_id="r", mission_id="m", revision=1, task_id="t", attempt_id="a", robot_id="camera_01",
+                     skill=skill.kind, params={}, timeout_s=skill.timeout_s)

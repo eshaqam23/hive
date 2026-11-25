@@ -22,6 +22,8 @@ class SkillDef:
     duration_s: float  # synthetic
     energy_pct: float  # synthetic
     effect_commit: str  # when the effect is considered committed
+    # Sent as the envelope timeout_s (<= 600). It must cover the slowest real agent run of the skill;
+    # the bridge waits timeout_s + HIVE_BRIDGE_TIMEOUT_MARGIN_S for the result (A8, DECISIONS.md).
     timeout_s: float = 60.0
 
 
@@ -31,7 +33,7 @@ SKILLS: dict[str, SkillDef] = {
         SkillDef("navigate_to", "navigate_to(location_id, route_id|null)",
                  "Drive to a named location. Moving between pickup_zone and dropoff_zone requires "
                  "route_id=pickup_corridor and a fresh observation that the corridor is clear.",
-                 4.0, 3.0, "robot reports arrival at location_id"),
+                 4.0, 3.0, "robot reports arrival at location_id", timeout_s=240.0),
         SkillDef("inspect_area", "inspect_area(area_id, object_query)",
                  "Camera looks for objects matching a label in an area it can observe. "
                  "May succeed with nothing found.",
@@ -45,10 +47,10 @@ SKILLS: dict[str, SkillDef] = {
                  3.0, 1.0, "scan report accepted"),
         SkillDef("pick_object", "pick_object(object_id)",
                  "Gripper picks a uniquely observed object at its current location.",
-                 3.0, 2.0, "gripper confirms object held"),
+                 3.0, 2.0, "gripper confirms object held", timeout_s=300.0),
         SkillDef("place_object", "place_object(object_id, location_id)",
                  "Gripper releases the held object at its current location (= location_id).",
-                 2.0, 1.0, "gripper confirms release at location_id"),
+                 2.0, 1.0, "gripper confirms release at location_id", timeout_s=120.0),
     ]
 }
 
