@@ -30,6 +30,10 @@ describe("describeGoal", () => {
   it("names an area_mapped goal", () => {
     expect(describeGoal({ kind: "area_mapped", area_id: "arena" })).toBe("arena mapped");
   });
+
+  it("names an object_held goal", () => {
+    expect(describeGoal({ kind: "object_held", object_query: { label: "red_block" } })).toBe("red_block held");
+  });
 });
 
 describe("errorText", () => {

@@ -361,3 +361,20 @@ def test_a8_area_mapped_goal_without_a_map_task_is_warned():
     res, _ = run(_proposal([_t("t1", "surveyor", scan)], goals=MAPPED))
     warn = [f for f in res.report.findings if f.code == "stage_goal_uncovered"]
     assert warn and warn[0].severity == "warning" and "arena" in warn[0].message
+
+
+# ---------------------------------------------------------------- A8: object_held ends at pick_object
+HELD = [{"kind": "object_held", "object_query": {"label": "red_block"}}]
+
+
+def test_a8_object_held_plan_navigate_and_pick_is_valid():
+    tasks = [_t("t1", "carrier", NAV_PICKUP), _t("t2", "carrier", PICK, ["t1"])]
+    res, alloc = run(_proposal(tasks, goals=HELD))
+    assert res.report.ok, res.report.findings
+    assert alloc.robots == {"carrier": "gripper_01"}
+
+
+def test_a8_object_held_plan_without_a_pick_does_not_project_the_goal():
+    res, _ = run(_proposal([_t("t1", "carrier", NAV_PICKUP)], goals=HELD))
+    msgs = [f.message for f in res.report.findings if f.code == "goal_not_projected"]
+    assert msgs == ["Plan does not project red_block held."]

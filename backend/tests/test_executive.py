@@ -1627,6 +1627,83 @@ async def test_a8_baseline_maps_the_arena_in_one_full_task(cmd):
     assert p.rationale
 
 
+# ---------------------------------------------------------------- A8: object_held (pick up, no place)
+HOLD = "Pick up the red block."
+
+
+async def test_a8_story_pick_up_unknown_object_stages_find_then_pick(make_exec):
+    ex = await make_exec("unknown")
+    await ex.create_mission(HOLD)
+    r1 = ex.mission.revisions[-1]
+    assert r1.proposal.scope == "observation_stage" and r1.validation.ok
+    assert [(g.kind, g.object_query.label) for g in r1.proposal.mission_goals] == [("object_held", "red_block")]
+    assert {t.skill for t in r1.tasks} == {"inspect_area", "scan_route"}
+    preview = r1.proposal.next_stage_preview
+    assert [t.action.kind for t in preview.tasks][-1] == "pick_object"
+    assert "place_object" not in [t.action.kind for t in preview.tasks]
+    await approve_latest(ex)
+    await wait_for(ex, {"awaiting_approval"} | DONE)
+    r2 = ex.mission.revisions[-1]
+    assert r2.revision == 2 and r2.proposal.scope == "full" and r2.validation.ok
+    assert [t.skill for t in r2.tasks][-1] == "pick_object" and "place_object" not in [t.skill for t in r2.tasks]
+    assert {t.robot_id for t in r2.tasks} == {"gripper_01"}
+    await approve_latest(ex)
+    assert await wait_for(ex, DONE) == "completed"
+    b = ex.world.objects["red_block_1"]
+    assert b.held_by == "gripper_01" and b.source == "gripper_01"
+    assert ex.robots["gripper_01"].carried_object == "red_block_1"
+
+
+async def test_a8_story_grab_known_object_is_one_full_pick(make_exec):
+    ex = await make_exec("known")
+    await ex.create_mission("Grab the red block.")
+    p = ex.mission.revisions[-1]
+    assert p.proposal.scope == "full" and p.validation.ok
+    assert [t.skill for t in p.tasks] in (["navigate_to", "pick_object"], ["pick_object"])
+    await approve_latest(ex)
+    assert await wait_for(ex, DONE) == "completed"
+    assert ex.world.objects["red_block_1"].held_by == "gripper_01"
+
+
+async def test_a8_story_pick_up_missing_object_blocks_after_the_find(make_exec):
+    ex = await make_exec("unknown", ["block_missing"])
+    await ex.create_mission(HOLD)
+    await approve_latest(ex)
+    assert await wait_for(ex, DONE) == "blocked"
+    assert "Inspection found no red_block" in ex.mission.outcome["reason"]
+    assert not any(a.robot_id == "gripper_01" for a in ex.attempts.values())
+
+
+async def test_a8_object_held_goal_needs_a_robot_possession_record_from_the_mission(make_exec):
+    from hive_exec.contracts import ObjectHeldGoal
+
+    ex = await make_exec("known")
+    g = ObjectHeldGoal(kind="object_held", object_query={"label": "red_block"})
+    assert not ex.goal_satisfied(g, 0.0)
+    ex.world.set_possession("red_block_1", "gripper_01", "pickup_zone", "gripper_01", "a1")
+    assert ex.goal_satisfied(g, 0.0)
+    assert not ex.goal_satisfied(g, ex.world.clock() + 10)
+    ex.world.set_possession("red_block_1", None, "dropoff_zone", "gripper_01", "a2")
+    assert not ex.goal_satisfied(g, 0.0)  # placed: no longer held
+
+
+@pytest.mark.parametrize("cmd,label", [("pick up the red block", "red_block"), ("Grab the duck.", "duck"),
+                                       ("grip the blue block", "blue_block"),
+                                       ("secure the traffic cone", "traffic_cone"),
+                                       ("acquire the green block", "green_block")])
+def test_a8_parse_goals_hold_verbs_without_a_destination_give_object_held(cmd, label):
+    goals, issues, ask = parse_goals(cmd)
+    assert goals == [{"kind": "object_held", "object_query": {"label": label}}], (cmd, issues, ask)
+
+
+def test_a8_parse_goals_hold_keeps_delivery_photos_and_asks():
+    assert parse_goals("grab the red block and bring it to the drop-off zone")[0][0]["kind"] == "object_at"
+    assert parse_goals("move the red block")[2] is not None  # a delivery verb still asks where
+    assert parse_goals("take a picture of the pickup zone")[0][0]["kind"] == "image_captured"
+    goals, _, ask = parse_goals("grab the block")
+    assert goals == [] and ask == "Which object should I pick up? (e.g. the red block)"
+
+
 def test_a8_parse_goals_map_does_not_swallow_other_intents():
     assert parse_goals("find the duck on the map")[0][0]["kind"] == "object_located"
     assert parse_goals("Map the arena.")[0] == [{"kind": "area_mapped", "area_id": "arena"}]

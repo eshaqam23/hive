@@ -784,3 +784,20 @@ def test_a8_sim_map_root_defaults_to_the_hive_repo_root(monkeypatch):
     monkeypatch.delenv("HIVE_SIM_MAP_ROOT", raising=False)
     root = fake_world.sim_map_root()
     assert (root / "backend" / "hive_exec" / "sim" / "fake_world.py").is_file()
+
+
+# ---- A8: object_held (Executive-only goal; the agent only sees pick_object)
+def test_a8_object_held_goal_parses_and_is_strict():
+    from hive_exec.contracts import ObjectHeldGoal
+
+    plan = {**MAP_PLAN, "mission_goals": [{"kind": "object_held", "object_query": {"label": "red_block"}}],
+            "tasks": [{"task_id": "t1", "binding_id": "carrier", "action": {"kind": "pick_object",
+                                                                           "object_query": {"label": "red_block"}}}]}
+    p = PlanProposal.model_validate(plan)
+    assert isinstance(p.mission_goals[0], ObjectHeldGoal) and p.mission_goals[0].object_query.label == "red_block"
+    for bad in ({"kind": "object_held"}, {"kind": "object_held", "object_query": {"label": "red_block"},
+                                          "location_id": "dropoff_zone"}):
+        with pytest.raises(ValidationError):
+            PlanProposal.model_validate({**plan, "mission_goals": [bad]})
+    saved = json.loads((Path(catalog.__file__).parent / "schemas" / "plan_proposal.v1.json").read_text())
+    assert "ObjectHeldGoal" in saved["$defs"]

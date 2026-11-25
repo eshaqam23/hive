@@ -1046,7 +1046,7 @@ SHAPES = {
 SHAPE_FITS = {
     "emoji_command_500_and_emoji_feedback": (True, False),  # A8: v3.5 + map_area schema; repair 9348 fails closed
     "emoji_command_1000": (False, False),
-    "cjk_command_1000": (True, False),
+    "cjk_command_1000": (False, False),  # A8: + object_held (prompt +633 chars, schema); first 9339 fails closed
     "emoji_answers_3x500": (False, False),
     "emoji_feedback_4x500": (True, True),
     "cjk_feedback_4x500": (True, True),

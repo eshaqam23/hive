@@ -350,7 +350,8 @@ def test_prompt_v3_fits_the_token_budget_with_clarification_history():
                         robots=initial_robot_states(), world=ObservedWorld(), clarifications=hist)
     total = (estimate_tokens(system_prompt()) + estimate_tokens(user_prompt(ctx))
              + estimate_tokens(json.dumps(wire.planning_schema())) // 4)
-    assert total < MAX_INPUT_TOKENS * 6 // 10  # WS4: was 50 %; the preview rules and schema need the room
+    # WS4: was 50 %; the preview rules and schema need the room. A8: 62 % for map_area + object_held (DECISIONS)
+    assert total < MAX_INPUT_TOKENS * 62 // 100
 
 
 # ---------------------------------------------------------------- WS3: plan rationale and sensorless navigation
@@ -494,7 +495,8 @@ def test_schema_with_a_nested_optional_preview_still_fits_the_structured_output_
     assert "next_stage_preview" in schema["properties"] and "next_stage_preview" not in schema["required"]
     total = (estimate_tokens(system_prompt()) + estimate_tokens(user_prompt(_preview_context()))
              + estimate_tokens(json.dumps(schema)) // 4)
-    assert total < MAX_INPUT_TOKENS * 6 // 10  # WS4: was 50 %; the preview rules and schema need the room
+    # WS4: was 50 %; the preview rules and schema need the room. A8: 62 % for map_area + object_held (DECISIONS)
+    assert total < MAX_INPUT_TOKENS * 62 // 100
 
 
 async def test_llm_proposal_with_a_preview_becomes_a_revision_with_the_preview_never_allocated(make_exec):
@@ -579,7 +581,8 @@ def test_prompt_growth_for_the_f6_fix_is_small():
 # ---------------------------------------------------------------- A8: map_area in the prompt
 PROMPT_V34_CHARS = 12667  # len(system_prompt()) of hive.prompt.v3.4 at 4d0ae65 (A8 baseline)
 PROMPT_A8_MAP_BUDGET = 650  # A8 step 3: map_area catalog line, "maps arena", one example; measured +610 (DECISIONS)
-PROMPT_A8_BUDGET = PROMPT_A8_MAP_BUDGET
+PROMPT_A8_HOLD_BUDGET = 650  # A8 step 4: object_held rule sentence and one pick-up example; measured +633 (DECISIONS)
+PROMPT_A8_BUDGET = PROMPT_A8_MAP_BUDGET + PROMPT_A8_HOLD_BUDGET
 
 
 def test_prompt_lists_map_area_and_who_maps_what():
@@ -606,3 +609,15 @@ def test_prompt_growth_for_map_area_is_budgeted():
     from hive_exec.planner.prompt import system_prompt
 
     assert PROMPT_V34_CHARS < len(system_prompt()) <= PROMPT_V34_CHARS + PROMPT_A8_BUDGET
+
+
+
+def test_prompt_has_one_object_held_example_that_validates():
+    from hive_exec.planner.prompt import RULES
+
+    p = _example("Pick up the blue block")
+    assert p.disposition == "plan" and p.scope == "full"
+    assert [(g.kind, g.object_query.label) for g in p.mission_goals] == [("object_held", "blue_block")]
+    kinds = [t.action.kind for t in p.tasks]
+    assert kinds[-1] == "pick_object" and "place_object" not in kinds
+    assert "object_held" in RULES
