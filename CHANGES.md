@@ -130,6 +130,54 @@ reconnect, stop on disconnect/exit) is unchanged, and all of its tests pass unch
 
 ---
 
+## Update: branch `feature/agent-integration` (Executive ready for real agents, phase A8)
+
+Starts from `origin/feature/executive` (4d0ae65). The hive-agent fleet (`Bhavya007-17/hive-agent`, its
+A9) is the consumer. Choices: `DECISIONS.md` "A8"; rule exceptions: `docs/executive-build/CONTEXT.md` "A8
+exceptions"; the agent side: `docs/instance-agent-contract.md`. Live-data's safety behaviour is
+unchanged.
+
+- **Bridge clock (core patch v2):** a goal's wait is its envelope `timeout_s` + 30 s, then a targeted
+  cancel and uncertain `transport_lost`. `bridge/timeout-check.mjs` proves it, red on the v1 core.
+- **Per-skill timeouts:** navigate_to 240, pick_object 300, place_object 120, map_area 480 s.
+- **map_area and area_mapped:** lidar_01 maps the arena. The fake fleet writes a small synthetic map
+  under `runs/sim_maps/<run_id>/` (coverage 0.95; fault `map_incomplete`), and `/api/exec/map` serves
+  the latest map record as `hive.shared-map.v0` with SIM / EMULATED provenance. The chat row reads
+  "map saved · NN% coverage".
+- **object_held:** "pick up the red block" plans a find stage, then a pick, and no place.
+- **Fleet report:** optional `fleet` and per-robot `capabilities` in the FleetControl status reply.
+  SIM / EMULATED labels, agent resets (world fixed, no seed; "known" refused), battery unknown, location
+  from the agent, capability narrowing.
+- **Launcher:** `--agents` (wait for the hive-agent rosbridge, refuse a pre-v2 core, no fake fleet) and
+  `--no-open`. README "Executive" says how to build the v2 core and to run it from inside Linux.
+
+**How it was checked** (2026-11-25, laptop, WSL2 Ubuntu 24.04, fake fleet on domain 77, Baseline planner):
+
+| Check | Result |
+| --- | --- |
+| Executive pytest (hive-exec venv) | 740 passed |
+| live-data pytest (system `python3`) | 152 passed |
+| `npm test` (WSL Node 22) | 383 of 387 passed; the 4 failures are `scripts/ports.test.js` under WSL mirrored networking, the same 4 as at the A8 baseline. One earlier full run also failed `SettingsPage.test.jsx` once; it passed alone 10/10 three times and in the next full run (flake). |
+| mock e2e | 61/62, the same failure as the A8 baseline (mixed topic list, /tf `watch_failed`) |
+| `bridge/timeout-check.mjs` | v1-only core: 0/2, goal still running at 15 s. v1+v2 core: 2/2, `transport_lost` at 7.0 s with the fake fleet's attempt canceled |
+| `node bridge/check.mjs` / `bridge/origin-check.mjs` (v2 core) | 8/8 / 5/5 |
+| `backend/scripts/b_e2e.py` | 12/12 stories (the old 9 + map_area, map_incomplete, object_held; `docs/evidence/b-e2e.json`) |
+| Fleet-report and map tests against the test stub | 71 passed |
+| UI tests (Executive API client, chat, header, Fleet, Map) | 154 passed (8 files) |
+| Headless screenshots | Map tab with the SIM map, Fleet tab with the EMULATED stub (`docs/evidence/ui/README.md` "A8") |
+
+**Not tested:**
+
+- **No hive-agent fleet.** Every goal was answered by the fake fleet; the EMULATED Fleet view came
+  from a test stub. hive-agent sends no fleet report yet (its A9 adds it), so narrowing, EMULATED
+  labels and agent maps under `HIVE_AGENT_ROOT` have run only against stubs and temp dirs.
+- The per-skill timeouts were not checked against real agent run times; hive-agent's A9 gate does that.
+- `--agents` was not run on Windows, and not against a real agent fleet.
+- No LLM planned an A8 mission (map_area, object_held); prompt v3.5 is checked by tests only.
+- Nothing ran on a car or on the desktop (Phase D).
+
+---
+
 ## Summary
 
 | Area | State |

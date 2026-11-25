@@ -153,3 +153,14 @@ These steps were run after a full page reload:
 - Console: 0 errors.
 
 The Map tab, with the demo toggle on and then off, also logged no console errors or warnings.
+
+## A8: Map with the SIM map, Fleet with the EMULATED stub (branch feature/agent-integration)
+
+Captured 2026-11-25 on the laptop (WSL Ubuntu 24.04) in headless Chromium 151 (Playwright's
+cached chrome-headless-shell, no system packages installed), dark theme, viewport 1440×1000.
+Images are in `a8/`. Nothing here comes from a car or from hive-agent.
+
+| Image | Stack | What it shows |
+|---|---|---|
+| `a8/map-sim.png` | `node scripts/hive.mjs --no-open` with `HIVE_ROS_SETUP=backend/test/mock_ros/setup.bash`, `HIVE_CORE_DIR=~/.hive-bridge-a8/core` (patch v2) and a throwaway `HIVE_PROVIDERS_FILE`: car backend on the mock ROS, fake fleet (ROS_DOMAIN_ID 77), bridge, Executive (gateway synapse), Vite. Then, through the API: reset (world fixed), mission "Map the arena" with the Baseline planner, approve rev 1. | Run run-7b1f4810, mission m1-26a012 completed. One task, `map_area` on lidar_01. `GET /api/exec/map`: available, 80×60 cells, provenance `{source: map_area, robot_id: lidar_01, attempt_id: 1.t1.a1-6810, coverage: 0.95, evidence: simulated}`. The Map tab reads "map_area by lidar_01 · 95% coverage", with the SIM tag. The fake fleet's map is synthetic. |
+| `a8/fleet-emulated.png` | The Executive in-process on the test fixture `StubFleetGateway(agent_robots(full_caps()), EMULATED_FLEET)` from `backend/tests/fleet_stub.py` (no fleet, no bridge, no skill runs), and Vite. Three saved cars were put in the page's localStorage first, because the Fleet tab shows Executive blocks only on saved cars. | Fleet report `{kind: hive_agent, profile: laptop, evidence: emulated}`. Each car's Executive block has the EMULATED tag, "idle", "battery unknown" (the stub sends no battery_pct) and the stub's location. The car links are offline: no car backend ran. |

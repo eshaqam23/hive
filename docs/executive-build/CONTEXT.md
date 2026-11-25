@@ -96,6 +96,19 @@ Executive venv: ~/.venvs/hive-exec (inside WSL on Windows). Provider store:
 8. At every GATE, paste real output (test counts, curl bodies, screenshot paths). If a gate
    fails, fix it or stop and say so.
 
+## A8 exceptions
+Phase A8 (branch `feature/agent-integration` from `origin/feature/executive` 4d0ae65, pushed once with
+`git push -u origin feature/agent-integration`, no PR) may change hard rule 2 for these four only, each
+with a line in DECISIONS.md "A8":
+1. New kinds: skill `map_area`, goals `area_mapped` and `object_held`, observation `area_mapped`
+   (catalog: map_area on lidar_01). Schema labels stay v1.
+2. Per-skill timeouts (catalog `SkillDef.timeout_s`): navigate_to 240, pick_object 300,
+   place_object 120, map_area 480; the others 60.
+3. Fleet-report narrowing: a robot's reported capabilities can only remove what the catalog offers.
+4. Unknown battery and location for agent fleets: `battery_unmeasured` warning, `location_unknown` error.
+Every other hard rule stands: live-data safety untouched, no secrets, SIM (and EMULATED) labels, ask
+before sudo or system installs, small commits.
+
 ## Baseline
 Taken 2026-11-18 before any code change, on feature/executive = origin/feature/live-data
 (76dc4d4) + this doc. Machine: Windows 11 laptop (RTX 5070 Laptop GPU), WSL2 Ubuntu 24.04.
@@ -110,10 +123,10 @@ live-data's deps (cv2) but no pytest-asyncio, so it skips the 24 async exec test
 hive-exec venv has FastAPI + pytest-asyncio but no cv2, so test_adapters.py fails to collect.
 System pytest 7.4 warns "Unknown config option: asyncio_mode"; that is expected.
 - live-data (system python3, expect 152):
-  `python3 -m pytest backend/tests -q --ignore=backend/tests/test_api.py --ignore=backend/tests/test_contracts.py --ignore=backend/tests/test_executive.py --ignore=backend/tests/test_validator.py --ignore=backend/tests/test_operator_messages.py --ignore-glob='backend/tests/test_llm_*'`
-- exec (hive-exec venv, expect 607 after the WS5 verify 4 notes; 604 after the WS5 fix batch 3; 587 after the WS5 fix batch 2; 569 after the WS5 fixes; 553 after WS5; 518 after WS4; 442 after WS3; 411 after the WS2 fixes; 390 after WS2; 308 after WS1; 244 after prompt 9):
-  `~/.venvs/hive-exec/bin/python -m pytest backend/tests/test_api.py backend/tests/test_contracts.py backend/tests/test_executive.py backend/tests/test_validator.py backend/tests/test_operator_messages.py backend/tests/test_llm_*.py -q`
-- Also run `npm test` (Windows Node, expect 358 after the WS5 fix batch 3, 35 files; 357 after the WS5 fix batch 2; 356 after the WS5 fixes; 355 after WS5; 341 after WS4; 322 after WS3; 315 after the WS2 fixes; 313 after WS2; 305 after WS1; 297 before it) and the mock e2e from the Baseline section.
+  `python3 -m pytest backend/tests -q --ignore=backend/tests/test_api.py --ignore=backend/tests/test_contracts.py --ignore=backend/tests/test_executive.py --ignore=backend/tests/test_validator.py --ignore=backend/tests/test_operator_messages.py --ignore=backend/tests/test_fleet_report.py --ignore=backend/tests/test_shared_map.py --ignore-glob='backend/tests/test_llm_*'`
+- exec (hive-exec venv, expect 740 after A8; 607 after the WS5 verify 4 notes; 604 after the WS5 fix batch 3; 587 after the WS5 fix batch 2; 569 after the WS5 fixes; 553 after WS5; 518 after WS4; 442 after WS3; 411 after the WS2 fixes; 390 after WS2; 308 after WS1; 244 after prompt 9):
+  `~/.venvs/hive-exec/bin/python -m pytest backend/tests/test_api.py backend/tests/test_contracts.py backend/tests/test_executive.py backend/tests/test_validator.py backend/tests/test_operator_messages.py backend/tests/test_fleet_report.py backend/tests/test_shared_map.py backend/tests/test_llm_*.py -q`
+- Also run `npm test` (Windows Node, expect 387 after A8, 35 files; under WSL Node with mirrored networking the 4 `scripts/ports.test.js` tests fail because a closed localhost port accepts connections; 358 after the WS5 fix batch 3, 35 files; 357 after the WS5 fix batch 2; 356 after the WS5 fixes; 355 after WS5; 341 after WS4; 322 after WS3; 315 after the WS2 fixes; 313 after WS2; 305 after WS1; 297 before it) and the mock e2e from the Baseline section (61/62 on the laptop at A8's start and end: the mixed-topic-list test misses the /tf watch_failed status, before and after A8).
 - Prompt evaluation against a live model (WS2, not part of the suites): `backend/scripts/prompt_eval.py` runs the ten
   labelled commands through the Executive on the fake fleet with the `executive` role of an explicitly named provider
   store, prints a PASS/FAIL table and exits 1 on any failure (2 when the store or provider is unusable). Keys are never
