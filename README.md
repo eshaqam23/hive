@@ -80,6 +80,8 @@ to start and names the leftover process and the `pkill` that stops it.
 | `--no-executive` | car backend + Vite only (no Executive, bridge or fake fleet) |
 | `--no-bridge` | no bridge or fake fleet; the Executive uses `HIVE_GATEWAY` as set (bring your own bridge on :8790 for `synapse`) |
 | `--backend-only` | the car backend alone (`npm run backend`) |
+| `--agents` | no fake fleet: the bridge and Executive run against the hive-agent fleet's rosbridge on :9090 (see [Running against hive-agent](#running-against-hive-agent---agents)) |
+| `--no-open` | do not open a browser (Vite without `--open`; WSL has none) |
 
 Pass flags after `--`, for example `npm run hive -- --no-executive`.
 
@@ -112,8 +114,8 @@ hive
 
 The Executive turns a typed mission into a plan: tasks, the car each task goes to, and the exact
 command that car's instance agent will receive. Nothing moves until you approve. Approved tasks go
-out over the AgenticROS / Synapse bridge as ROS 2 `ExecuteSkill` actions. Today a fake fleet
-answers them; the real instance agent will sit behind the same action names
+out over the AgenticROS / Synapse bridge as ROS 2 `ExecuteSkill` actions. The fake fleet answers
+them, or, with `--agents`, the hive-agent fleet (the instance agents) behind the same action names
 ([docs/instance-agent-contract.md](docs/instance-agent-contract.md)).
 
 ### Tabs
@@ -127,9 +129,11 @@ answers them; the real instance agent will sit behind the same action names
   Baseline (no LLM). Earlier missions are listed above the thread.
 - **Fleet:** one panel per car with its link state and Executive status. Clicking a panel opens
   the existing car page (Live view, hold-to-drive, Activity). The command log lives here.
-- **Map:** the UI shell for the shared perception map on the `hive.shared-map.v0` contract
-  ([docs/shared-map-contract.md](docs/shared-map-contract.md)). Until that map exists it says
-  "Shared perception map not built yet"; the DEMO toggle shows a fixture, watermarked DEMO.
+- **Map:** the shared map on the `hive.shared-map.v0` contract
+  ([docs/shared-map-contract.md](docs/shared-map-contract.md)): the latest map a succeeded
+  `map_area` saved, from `GET /api/exec/map`, tagged SIM or EMULATED like the fleet. Until there is
+  one it says "Shared perception map not built yet" with the Executive's reason; the DEMO toggle
+  shows a fixture, watermarked DEMO.
 - **Models** (gear in the header): roles on top (Executive: plans missions; Instance agent: not
   built yet), each bound to a provider, a model and an ordered fallback chain. Provider cards
   below with Test, Edit and Delete. Add provider starts from a template.
@@ -137,7 +141,9 @@ answers them; the real instance agent will sit behind the same action names
 The header also has the LIVE dot, a mission pill (`mission running · rev N · mm:ss`), the theme
 toggle and **STOP ALL**, which stops every connected car through the car backend and cancels the
 Executive mission. Anything that comes from the fake world or fake fleet (location, battery,
-availability) carries a **SIM** tag.
+availability, maps) carries a **SIM** tag. An agent fleet whose fleet report gives its evidence as
+emulated carries **EMULATED**; only an agent fleet that reports real evidence carries neither. A
+battery an agent fleet does not report reads "battery unknown".
 
 ### Models setup
 
@@ -178,13 +184,41 @@ Test proved. While no store file exists, `QWEN_*` variables (see `.env.example`)
 | `HIVE_GATEWAY=fake npm run hive` | car backend, Executive with its in-process simulation (no ROS, no bridge), Vite |
 | `npm run hive -- --no-bridge` | no fake fleet or bridge; the Executive uses `HIVE_GATEWAY` as set (bring your own bridge on :8790 for `synapse`) |
 | `npm run hive -- --no-executive` | car backend + Vite only |
+| `npm run hive -- --agents --no-open` | car backend, bridge, Executive and Vite against the hive-agent fleet (no fake fleet); from inside Linux |
 | `npm run backend` | the car backend alone (`--backend-only`) |
 | `HIVE_ROS_SETUP=$PWD/backend/test/mock_ros/setup.bash npm run hive` | everything above with the car backend on the mock `rclpy` (three simulated cars) |
 
 In PowerShell, set the variables first (`$env:HIVE_GATEWAY = "fake"`). `HIVE_GATEWAY`,
-`HIVE_PROVIDERS_FILE`, `HIVE_SIM_TIME_SCALE`, `HIVE_EXEC_PYTHON` and `HIVE_ROS_SETUP` reach WSL
-through `WSLENV`; a Windows path in `HIVE_ROS_SETUP` is converted to `/mnt/<drive>/...`.
+`HIVE_PROVIDERS_FILE`, `HIVE_SIM_TIME_SCALE`, `HIVE_EXEC_PYTHON`, `HIVE_ROS_SETUP`,
+`HIVE_AGENT_ROOT`, `HIVE_CORE_DIR` and `HIVE_BRIDGE_TIMEOUT_MARGIN_S` reach WSL through `WSLENV`; a
+Windows path in `HIVE_ROS_SETUP` is converted to `/mnt/<drive>/...`.
 `HIVE_SIM_TIME_SCALE` (default 1.0) speeds up or slows down the fake robots.
+
+### Running against hive-agent (`--agents`)
+
+Run it from inside Linux (an Ubuntu terminal, or a WSL shell on Windows), not from PowerShell: the
+agent fleet, its maps and the bridge core all live on the Linux filesystem.
+
+1. In the hive-agent repo, run `scripts/fleet_up.sh` and wait for `FLEET: UP`. It starts the robots,
+   `/hive/fleet_control` and rosbridge on `127.0.0.1:9090`. Never run the fake fleet at the same time:
+   both would serve `/<robot>/execute_skill`.
+2. Build the bridge core with the v2 patch once (below). Every skill's wait then follows its own
+   `timeout_s`; an unpatched or v1-only core cuts every goal at 120 s, and `--agents` refuses it,
+   naming the build command.
+3. In this repo:
+
+   ```bash
+   export HIVE_AGENT_ROOT=$HOME/hive_ws/src/agent   # the hive-agent repo root: agent maps are read from its runs/
+   npm run hive -- --agents --no-open
+   ```
+
+`--agents` needs `HIVE_GATEWAY=synapse` (the default) and does not go with `--no-bridge`,
+`--no-executive` or `--backend-only`. It starts no fleet: it waits up to 60 s for :9090 and otherwise
+stops with the `fleet_up.sh` instruction. It reads `<HIVE_CORE_DIR or ~/.hive-bridge/core>/package.json`
+before anything starts. `HIVE_SIM_WORLD` is ignored (an agent fleet runs the world it has); scenario
+`known` and simulator faults are refused. Without `HIVE_AGENT_ROOT` it warns, and the Map tab cannot
+read an agent's map. `HIVE_BRIDGE_TIMEOUT_MARGIN_S` (default 30) is the bridge's wait past a skill's
+`timeout_s`. `--no-open` keeps Vite from opening a browser; open http://127.0.0.1:5173 yourself.
 
 ### Ports and the Executive venv
 
@@ -194,7 +228,7 @@ through `WSLENV`; a Windows path in `HIVE_ROS_SETUP` is converted to `/mnt/<driv
 | 8787 | car backend (`backend/server.py`) |
 | 8788 | Executive (`python -m hive_exec`, FastAPI, under `/api/exec`) |
 | 8790 | Synapse bridge (`bridge/server.mjs`) |
-| 9090 | the fake fleet's rosbridge |
+| 9090 | rosbridge: the fake fleet's, or with `--agents` the hive-agent fleet's (the launcher does not start that one) |
 
 The fake fleet runs on `ROS_DOMAIN_ID=77` with LOCALHOST discovery and Cyclone DDS, whatever the
 shell inherits; the cars use 42, 43 and 44. The bridge and rosbridge refuse any WebSocket
@@ -216,7 +250,19 @@ Once, inside Ubuntu 24.04 (WSL on Windows), with Node 20 or newer in WSL:
 ```bash
 sudo apt install ros-jazzy-rosbridge-suite ros-jazzy-rmw-cyclonedds-cpp build-essential python3-colcon-common-extensions
 bash ros/build.sh                                    # hive_interfaces + hive_fake_robots, colcon build into ~/hive_ros_ws
-HIVE_CORE_PATCH=1 bash bridge/scripts/build-core.sh  # @corebrum/core 0.8.16 at the pinned Synapse commit + patch v1, into ~/.hive-bridge/core
+HIVE_CORE_PATCH=1 bash bridge/scripts/build-core.sh  # @corebrum/core 0.8.16 at the pinned Synapse commit + patches v1 and v2, into ~/.hive-bridge/core
+```
+
+`HIVE_CORE_PATCH=1` applies every `bridge/patches/*.patch` in order and stamps the last one into the
+core's `package.json` (`"hive": {"synapse_commit", "patch"}`). The v2 patch
+(`corebrum-core-rosbridge-actions.v2.patch`) lets the bridge set each goal's wait to `timeout_s` +
+`HIVE_BRIDGE_TIMEOUT_MARGIN_S` instead of the core's fixed 120 s; `--agents` needs it. To build a core
+somewhere else, set `HIVE_BRIDGE_HOME` (the core lands in `$HIVE_BRIDGE_HOME/core`) and point the
+bridge and launcher at it with `HIVE_CORE_DIR`:
+
+```bash
+HIVE_BRIDGE_HOME=$HOME/.hive-bridge-a8 HIVE_CORE_PATCH=1 bash bridge/scripts/build-core.sh
+export HIVE_CORE_DIR=$HOME/.hive-bridge-a8/core
 ```
 
 Then, with the fake fleet and bridge running (`npm run hive` starts both):
@@ -224,8 +270,13 @@ Then, with the fake fleet and bridge running (`npm run hive` starts both):
 ```bash
 node bridge/check.mjs          # 8 Synapse compatibility checks against rosbridge
 node bridge/origin-check.mjs   # localhost hardening (5 checks)
-cd backend && ~/.venvs/hive-exec/bin/python scripts/b_e2e.py   # 9 mission stories through Synapse
+cd backend && ~/.venvs/hive-exec/bin/python scripts/b_e2e.py   # 12 mission stories through Synapse
 ```
+
+`node bridge/timeout-check.mjs` checks the per-goal wait. Start the bridge for it with
+`HIVE_BRIDGE_TIMEOUT_MARGIN_S=2`: a `hang_scan` goal with `timeout_s` 5 must end, canceled, as
+`uncertain` `transport_lost` well before 15 s. On a core without the v2 patch it fails. It is kept out
+of `check.mjs`, whose 8 results hive-agent's gate counts.
 
 Details, the pinned dependency and the limits: [docs/delivery-b-agenticros.md](docs/delivery-b-agenticros.md).
 What a real instance agent must implement: [docs/instance-agent-contract.md](docs/instance-agent-contract.md).

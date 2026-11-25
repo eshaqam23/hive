@@ -2,11 +2,12 @@
 
 What a robot's instance agent must do to take work from the HIVE Executive. The Executive plans,
 validates, gets approval and schedules. The agent on each robot runs one skill at a time and reports
-what really happened. Everything here is what the code does today on `feature/executive`; where the
-fake fleet falls short of the contract, the gap is named.
+what really happened. Everything here is what the code does today on `feature/agent-integration`
+(A8: `map_area`, per-skill timeouts, the bridge margin and the optional fleet report); where the fake
+fleet or hive-agent falls short of the contract, the gap is named.
 
 Sources: `ros/hive_interfaces/action/ExecuteSkill.action`, `backend/hive_exec/contracts.py`
-(`TaskEnvelope`), `backend/hive_exec/catalog.py`, `bridge/server.mjs`,
+(`TaskEnvelope`), `backend/hive_exec/catalog.py`, `backend/hive_exec/fleet_report.py`, `bridge/server.mjs`,
 `ros/hive_fake_robots/hive_fake_robots/fake_fleet.py`, `backend/hive_exec/sim/fake_world.py`.
 
 ## Transport path
@@ -59,9 +60,9 @@ the Executive sent, so the text is compact and an integral float such as `timeou
 | `task_id`        | string  | task inside that revision, e.g. `t2` |
 | `attempt_id`     | string  | unique per dispatch: `<revision>.<task_id>.a<n>-<4 hex>`, e.g. `1.t2.a1-2d21` |
 | `robot_id`       | string  | the robot that must run it |
-| `skill`          | string  | one of `navigate_to`, `inspect_area`, `capture_image`, `scan_route`, `pick_object`, `place_object` |
+| `skill`          | string  | one of `navigate_to`, `inspect_area`, `capture_image`, `scan_route`, `pick_object`, `place_object`, `map_area` |
 | `params`         | object  | skill parameters, see [Skills per robot](#skills-per-robot) |
-| `timeout_s`      | number  | > 0 and ≤ 600; 60 for every skill today |
+| `timeout_s`      | number  | > 0 and ≤ 600; the skill's catalog timeout, see [Timeouts](#timeouts-and-uncertain) |
 
 No other fields are allowed (`additionalProperties: false`).
 
@@ -104,7 +105,7 @@ From `catalog.py`. Durations are synthetic fake-fleet values, not measurements.
 | robot_id     | preset         | skills |
 |--------------|----------------|--------|
 | `camera_01`  | `cameraRcCar`  | `inspect_area`, `capture_image`, `navigate_to` |
-| `lidar_01`   | `lidarRcCar`   | `scan_route`, `navigate_to` |
+| `lidar_01`   | `lidarRcCar`   | `scan_route`, `navigate_to`, `map_area` |
 | `gripper_01` | `gripperRcCar` | `pick_object`, `place_object`, `navigate_to` |
 
 | skill           | params | effect is committed when | duration (s) |
@@ -115,6 +116,7 @@ From `catalog.py`. Durations are synthetic fake-fleet values, not measurements.
 | `scan_route`    | `route_id` | scan report accepted | 3 |
 | `pick_object`   | `object_id` | gripper confirms object held | 3 |
 | `place_object`  | `object_id`, `location_id` | gripper confirms release at `location_id` | 2 |
+| `map_area`      | `area_id` (`"arena"`, the only map area) | robot reports a saved map with coverage ≥ target | 6 |
 
 Moving between `pickup_zone` and `dropoff_zone` needs `route_id = "pickup_corridor"` and a fresh
 observation that the corridor is clear; the validator checks that before a plan can be approved.
@@ -175,7 +177,8 @@ when empty). Unparseable text is treated as empty.
 
 `result_json` holds what the skill produced, e.g. `{"route_id": "pickup_corridor", "status": "clear"}`
 for `scan_route`, `{"found": ["red_block_1"]}` for `inspect_area`, `{"object_id": ..., "held": true,
-"location_id": ...}` for `pick_object`. A canceled attempt returns `{"effect_committed": false}`.
+"location_id": ...}` for `pick_object`, `{"area_id": "arena", "coverage": 0.95, "map_ref": {...},
+"observation": {...}}` for `map_area`. A canceled attempt returns `{"effect_committed": false}`.
 
 `observations_json` holds facts about the world, each with `kind` and `entity_id`:
 
@@ -185,7 +188,29 @@ for `scan_route`, `{"found": ["red_block_1"]}` for `inspect_area`, `{"object_id"
 | `object_absent` | `inspect_area` | `area_id`, `label` |
 | `route_clear`, `route_blocked` | `scan_route` | `route_id` |
 | `image`         | `capture_image` | `area_id`, `attrs.image_ref` |
+| `area_mapped`   | `map_area` | `entity_id` `map:<area_id>`, `area_id`, `attrs.coverage` (0..1), `attrs.map_ref` `{id, path, sha256}` |
 
+### map_area and area_mapped (A8)
+
+`map_area(area_id)` maps the whole area and saves the map. Its evidence is one `area_mapped`
+observation. An `area_mapped` entry in `observations_json` wins; otherwise the Executive reads it from
+`result_json.observation`, where hive-agent and the fake fleet both put it, on success and on failure.
+
+- **The map record.** The Executive records a map only from a `succeeded` `map_area` whose
+  `area_mapped` is for the goal's area, has `attrs.coverage` a number in [0, 1], and has a `map_ref`
+  with string `id`, `path` and `sha256`. An `area_mapped` goal is satisfied by such a record.
+- **`map_ref`.** `path` is relative to the fleet's root (the hive-agent repo root, `HIVE_AGENT_ROOT`
+  on the Executive's side; the Hive repo root for the fake fleets) and must stay under its `runs/`;
+  `sha256` is the image file's hash. The Executive never reads the file when it records the map: only
+  `GET /api/exec/map` reads it, path- and hash-checked (`docs/shared-map-contract.md`).
+- **Short coverage.** Coverage below the target (0.95) is `failed` with `COVERAGE_INCOMPLETE`, carrying
+  the partial map's `map_ref`. The Executive keeps no map record from a failure.
+
+### object_held is Executive-only
+
+The `object_held` goal ("pick up the red block" with no drop-off) adds no skill and nothing an agent
+sees: the plan ends at `pick_object`, and the goal is satisfied by the possession record from a
+succeeded `pick_object` with `held: true`.
 The Executive takes effects only from accepted results. Feedback never changes the world model.
 
 ## Cancel
@@ -217,19 +242,38 @@ The Executive never re-sends an `attempt_id`. A retry or recovery is a new attem
 The bridge ignores a second submit of an `attempt_id` it already holds ("duplicate submission
 ignored").
 
-Gap today: the fake fleet rejects a repeated `attempt_id` with `duplicate_attempt` instead of
-returning the recorded result. Its record is also cleared by every coordinated reset.
+Gap today, kept on purpose: the fake fleet and hive-agent both reject a repeated `attempt_id` with
+`duplicate_attempt` instead of returning the recorded result, and the fake fleet's record is cleared by
+every coordinated reset. The Executive never re-sends an `attempt_id`, so it never meets the gap.
 
 ## Timeouts and "uncertain"
 
-`timeout_s` (60 today) is the agent's budget for the skill. When the budget runs out the agent must
-stop and send a terminal result: `failed` with `error_code = "timeout"` if it knows the effect did
-not happen, `uncertain` if it cannot tell.
+`timeout_s` is the agent's budget for the skill. Since A8 it is per skill (`catalog.py`
+`SkillDef.timeout_s`; the envelope allows at most 600):
 
-Today nothing enforces `timeout_s`. The fake fleet ignores it, and its `hang_*` faults run until
-canceled. The only clock is @corebrum/core's action timeout of 120 s: when it fires, or the
-rosbridge link drops, the bridge reports `uncertain` with `transport_lost`, because the robot may
-still be working. A transport failure is never reported as success.
+| skill | `timeout_s` |
+|-------|-------------|
+| `navigate_to` | 240 |
+| `pick_object` | 300 |
+| `place_object` | 120 |
+| `map_area` | 480 |
+| `inspect_area`, `capture_image`, `scan_route` | 60 |
+
+Each must cover the slowest run of that skill on an agent; hive-agent's A9 gate checks them against
+the agents' own bounds. When the budget runs out the agent must stop and send a terminal result:
+`failed` if it knows the effect did not happen, `uncertain` if it cannot tell. This doc used to name the
+code `timeout`; hive-agent reports `COMMAND_EXPIRED`. The Executive treats both as an ordinary failure.
+
+**The bridge's clock.** `bridge/server.mjs` waits `timeout_s + HIVE_BRIDGE_TIMEOUT_MARGIN_S` (default
+30) seconds for the result. That needs the bridge core built with
+`bridge/patches/corebrum-core-rosbridge-actions.v2.patch`, which passes the per-goal wait through: an
+unpatched or v1-only core cuts every goal at @corebrum/core's fixed 120 s (`npm run hive -- --agents`
+refuses such a core). When the wait runs out, the bridge first sends the targeted cancel for that
+attempt (its effect is unconfirmed), then reports `uncertain` with `transport_lost`, because the robot
+may still be working. A rosbridge link that drops is reported the same way. A transport failure is never
+reported as success.
+
+The fake fleet ignores `timeout_s`; its `hang_*` faults run until the bridge's wait ends them.
 
 `uncertain` means the Executive does not know whether the effect happened. It blocks the mission
 and does not retry, since retrying a pick or place that might have happened could do it twice.
@@ -250,6 +294,65 @@ A goal is rejected at goal time, before anything moves. The fake fleet rejects f
 A ROS goal rejection carries no reason, so the bridge asks `/hive/fleet_control` for
 `{"command": "rejection", "attempt_id": ...}`. An agent without that service gets the generic code
 `goal_rejected`.
+
+## Fleet report (optional, A8)
+
+A `/hive/fleet_control` `status` reply is `{"robots": {<robot_id>: {...}}, ...}`. An agent fleet may add
+the fields below; every one is optional. The fake fleet sends none of them, and nothing changes for it.
+`backend/hive_exec/fleet_report.py` parses them.
+
+```jsonc
+{
+  "fleet": {                                   // top level
+    "schema": "hive.fleet-report.v1",
+    "kind": "hive_agent",
+    "profile": "laptop",                       // or "desktop"
+    "evidence": "emulated",                    // or "real"
+    "agent_commit": "0123abc"
+  },
+  "robots": {
+    "lidar_01": {
+      "location_id": null,                     // null = unknown
+      // "battery_pct" absent = unknown
+      "capabilities": {
+        "schema": "hive.capabilities.v1",
+        "skills": {
+          "map_area": {"ready": true, "code": null, "reason": null},
+          "scan_route": {"ready": false, "code": "NOT_TAUGHT", "reason": "no route taught"}
+        },
+        "areas": [],                           // inspect_area / capture_image
+        "routes": ["pickup_corridor"],         // scan_route
+        "places": ["lidar_post"],              // navigate_to
+        "map_areas": ["arena"],                // map_area
+        "place_locations": []                  // place_object
+      }
+    }
+  }
+}
+```
+
+What the Executive does with it:
+
+- **Labels.** `simulated` is false only for `kind` `hive_agent` with `evidence` `real`.
+  `GET /api/exec/health` and `/api/exec/state` carry `simulated` and the `fleet` block. The UI tags
+  robots SIM for the fake fleets, EMULATED for an agent fleet with `evidence` `emulated`, and nothing for
+  `real`; the simulator drawer shows only for the fake fleets.
+- **Resets.** An agent fleet always gets `world` `"fixed"` and `seed` `null`. Scenario `known` (a
+  simulated prior survey) and simulator faults are refused with 409 and never reach it.
+- **Battery.** An agent fleet that leaves out `battery_pct` keeps the battery unknown, never a default.
+  The validator gives the warning `battery_unmeasured` for that robot (not an error), and the context and
+  UI read "battery unknown".
+- **Location.** An agent fleet's `location_id` replaces the Executive's belief at every refresh; `null`,
+  absent or not a catalog location is unknown. Travel from an unknown location is the validator error
+  `location_unknown`.
+- **Narrowing.** With `capabilities`, a task is ineligible for the robot when its skill is absent or not
+  `ready` (the finding carries the agent's `code` and `reason`), or when its area, route, place, map area
+  or place location is not listed. The planner context lists only the robot's ready skills and listed ids,
+  as bounded text; agent codes and reasons never reach the prompt. A malformed `capabilities` block offers
+  nothing. A report only removes what the catalog offers: unknown skills and ids are dropped, and the
+  catalog stays the vocabulary.
+
+hive-agent does not send a fleet report yet; its A9 adds it.
 
 ## Robot ids and frontend presets
 
@@ -275,10 +378,14 @@ plus rosbridge on `127.0.0.1:9090`. It always uses `ROS_DOMAIN_ID=77` with
   `rejection` and `truth`.
 - **Faults** for testing: `route_blocked`, `block_missing`, `two_red_blocks`,
   `gripper_unavailable`, `nav_fault_after_pickup`, `gripper_fault_after_pickup`, `uncertain_place`,
-  `hang_navigate`, `hang_scan`, `low_battery_gripper`.
+  `hang_navigate`, `hang_scan`, `low_battery_gripper`, `map_incomplete` (A8: `map_area` stops at 60 %
+  coverage, `COVERAGE_INCOMPLETE` with the partial map).
+- **`map_area`** (A8) writes a small synthetic map pair, labelled synthetic, under
+  `runs/sim_maps/<run_id>/` in the Hive repo and reports its coverage (0.95 when complete) with its `map_ref`.
+- **No fleet report**: its robots are tagged SIM.
 - **Cancel** is always accepted and returns `canceled` with `{"effect_committed": false}`.
-- **Not done:** `timeout_s` is not enforced, and a repeated `attempt_id` is rejected rather than
-  answered with its recorded result.
+- **Not done:** `timeout_s` is not enforced (the bridge's wait is the clock), and a repeated
+  `attempt_id` is rejected rather than answered with its recorded result.
 
 All fake-fleet data is simulated and shown with a SIM tag in the UI.
 
