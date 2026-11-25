@@ -121,6 +121,12 @@ class ObjectAtGoal(Strict):
     location_id: LocationId
 
 
+# A8: a robot holds the object (a succeeded pick_object with held true); no place follows.
+class ObjectHeldGoal(Strict):
+    kind: Literal["object_held"]
+    object_query: ObjectQuery
+
+
 class ObjectLocatedGoal(Strict):
     kind: Literal["object_located"]
     object_query: ObjectQuery
@@ -143,7 +149,7 @@ class AreaMappedGoal(Strict):
 
 
 Goal = Annotated[
-    Union[ObjectAtGoal, ObjectLocatedGoal, RouteObservedGoal, ImageCapturedGoal, AreaMappedGoal],
+    Union[ObjectAtGoal, ObjectHeldGoal, ObjectLocatedGoal, RouteObservedGoal, ImageCapturedGoal, AreaMappedGoal],
     Field(discriminator="kind"),
 ]
 

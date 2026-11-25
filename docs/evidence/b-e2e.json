@@ -1,5 +1,5 @@
 {
-  "checked_at": "2026-11-19T13:25:15",
+  "checked_at": "2026-11-25T05:35:51",
   "planner": "baseline",
   "results": [
     {
@@ -7,7 +7,7 @@
       "expected": "completed",
       "final": "completed",
       "pass": true,
-      "run_id": "run-4ebd2c13",
+      "run_id": "run-f8c0e08d",
       "revisions": [
         {
           "rev": 1,
@@ -36,37 +36,37 @@
       ],
       "attempts": [
         {
-          "attempt": "1.t1.a1-0d5b",
+          "attempt": "1.t1.a1-5f41",
           "robot": "camera_01",
           "skill": "inspect_area",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t2.a1-0d08",
+          "attempt": "1.t2.a1-aae9",
           "robot": "lidar_01",
           "skill": "scan_route",
           "status": "succeeded"
         },
         {
-          "attempt": "2.t1.a1-077f",
+          "attempt": "2.t1.a1-8b6f",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "2.t2.a1-9308",
+          "attempt": "2.t2.a1-3656",
           "robot": "gripper_01",
           "skill": "pick_object",
           "status": "succeeded"
         },
         {
-          "attempt": "2.t3.a1-e28e",
+          "attempt": "2.t3.a1-4b8d",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "2.t4.a1-58cc",
+          "attempt": "2.t4.a1-a2fc",
           "robot": "gripper_01",
           "skill": "place_object",
           "status": "succeeded"
@@ -89,7 +89,7 @@
         "label": "AgenticROS / Corebrum Synapse",
         "verified_transport": true,
         "connected": true,
-        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 6 round trip(s) this run"
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v2.patch, rosbridge ws://127.0.0.1:9090; 6 round trip(s) this run"
       }
     },
     {
@@ -97,7 +97,7 @@
       "expected": "completed",
       "final": "completed",
       "pass": true,
-      "run_id": "run-daf8523e",
+      "run_id": "run-a0851b8d",
       "revisions": [
         {
           "rev": 1,
@@ -115,25 +115,25 @@
       ],
       "attempts": [
         {
-          "attempt": "1.t1.a1-c7c9",
+          "attempt": "1.t1.a1-1484",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t2.a1-c613",
+          "attempt": "1.t2.a1-8333",
           "robot": "gripper_01",
           "skill": "pick_object",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t3.a1-4655",
+          "attempt": "1.t3.a1-cc20",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t4.a1-a914",
+          "attempt": "1.t4.a1-6cf3",
           "robot": "gripper_01",
           "skill": "place_object",
           "status": "succeeded"
@@ -154,7 +154,7 @@
         "label": "AgenticROS / Corebrum Synapse",
         "verified_transport": true,
         "connected": true,
-        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 4 round trip(s) this run"
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v2.patch, rosbridge ws://127.0.0.1:9090; 4 round trip(s) this run"
       }
     },
     {
@@ -162,7 +162,7 @@
       "expected": "completed",
       "final": "completed",
       "pass": true,
-      "run_id": "run-c24adcd2",
+      "run_id": "run-e0ba206b",
       "revisions": [
         {
           "rev": 1,
@@ -177,7 +177,7 @@
       ],
       "attempts": [
         {
-          "attempt": "1.t1.a1-9dc1",
+          "attempt": "1.t1.a1-67e2",
           "robot": "camera_01",
           "skill": "capture_image",
           "status": "succeeded"
@@ -198,7 +198,7 @@
         "label": "AgenticROS / Corebrum Synapse",
         "verified_transport": true,
         "connected": true,
-        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 1 round trip(s) this run"
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v2.patch, rosbridge ws://127.0.0.1:9090; 1 round trip(s) this run"
       }
     },
     {
@@ -206,7 +206,7 @@
       "expected": "clarification",
       "final": "clarification",
       "pass": true,
-      "run_id": "run-4f25bd70",
+      "run_id": "run-a3becb0d",
       "revisions": [],
       "attempts": [],
       "robots_dispatched": [],
@@ -219,7 +219,7 @@
         "label": "AgenticROS / Corebrum Synapse",
         "verified_transport": false,
         "connected": true,
-        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 0 round trip(s) this run"
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v2.patch, rosbridge ws://127.0.0.1:9090; 0 round trip(s) this run"
       }
     },
     {
@@ -227,7 +227,7 @@
       "expected": "completed",
       "final": "completed",
       "pass": true,
-      "run_id": "run-3e948381",
+      "run_id": "run-f75dfcbe",
       "revisions": [
         {
           "rev": 1,
@@ -256,31 +256,31 @@
       ],
       "attempts": [
         {
-          "attempt": "1.t1.a1-7497",
+          "attempt": "1.t1.a1-93d7",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t2.a1-80e0",
+          "attempt": "1.t2.a1-8b3c",
           "robot": "gripper_01",
           "skill": "pick_object",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t3.a1-e8f6",
+          "attempt": "1.t3.a1-e6f5",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "failed"
         },
         {
-          "attempt": "2.t1.a1-09c1",
+          "attempt": "2.t1.a1-984e",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "2.t2.a1-ed6b",
+          "attempt": "2.t2.a1-0f97",
           "robot": "gripper_01",
           "skill": "place_object",
           "status": "succeeded"
@@ -301,7 +301,7 @@
         "label": "AgenticROS / Corebrum Synapse",
         "verified_transport": true,
         "connected": true,
-        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 5 round trip(s) this run"
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v2.patch, rosbridge ws://127.0.0.1:9090; 5 round trip(s) this run"
       }
     },
     {
@@ -309,7 +309,7 @@
       "expected": "blocked",
       "final": "blocked",
       "pass": true,
-      "run_id": "run-d351cb77",
+      "run_id": "run-9b3ba78e",
       "revisions": [
         {
           "rev": 1,
@@ -327,13 +327,13 @@
       ],
       "attempts": [
         {
-          "attempt": "1.t1.a1-0a81",
+          "attempt": "1.t1.a1-e1a4",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t2.a1-56bc",
+          "attempt": "1.t2.a1-996c",
           "robot": "gripper_01",
           "skill": "pick_object",
           "status": "succeeded"
@@ -356,7 +356,7 @@
         "label": "AgenticROS / Corebrum Synapse",
         "verified_transport": true,
         "connected": true,
-        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 2 round trip(s) this run"
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v2.patch, rosbridge ws://127.0.0.1:9090; 2 round trip(s) this run"
       }
     },
     {
@@ -364,7 +364,7 @@
       "expected": "canceled",
       "final": "canceled",
       "pass": true,
-      "run_id": "run-c1ed4aee",
+      "run_id": "run-899001db",
       "revisions": [
         {
           "rev": 1,
@@ -382,7 +382,7 @@
       ],
       "attempts": [
         {
-          "attempt": "1.t1.a1-b9b6",
+          "attempt": "1.t1.a1-c368",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "canceled"
@@ -403,7 +403,7 @@
         "label": "AgenticROS / Corebrum Synapse",
         "verified_transport": true,
         "connected": true,
-        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 1 round trip(s) this run"
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v2.patch, rosbridge ws://127.0.0.1:9090; 1 round trip(s) this run"
       }
     },
     {
@@ -411,7 +411,7 @@
       "expected": "awaiting_approval",
       "final": "awaiting_approval",
       "pass": true,
-      "run_id": "run-b1b3db01",
+      "run_id": "run-384781ea",
       "revisions": [
         {
           "rev": 1,
@@ -437,13 +437,13 @@
       ],
       "attempts": [
         {
-          "attempt": "1.t1.a1-339d",
+          "attempt": "1.t1.a1-e246",
           "robot": "camera_01",
           "skill": "inspect_area",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t2.a1-3e3b",
+          "attempt": "1.t2.a1-2909",
           "robot": "lidar_01",
           "skill": "scan_route",
           "status": "canceled"
@@ -456,13 +456,13 @@
       "outcome": null,
       "carried": {},
       "events_received": 7,
-      "notes": "t2 right after stop: canceling; scan confirmed canceled while camera was accepted; camera finished succeeded; command files: ['runs/run-b1b3db01/agent_commands/camera_01/t1-r1-a1.json', 'runs/run-b1b3db01/agent_commands/lidar_01/t2-r1-a1.json']",
+      "notes": "t2 right after stop: canceling; scan confirmed canceled while camera was accepted; camera finished succeeded; command files: ['runs/run-384781ea/agent_commands/camera_01/t1-r1-a1.json', 'runs/run-384781ea/agent_commands/lidar_01/t2-r1-a1.json']",
       "gateway": {
         "kind": "synapse",
         "label": "AgenticROS / Corebrum Synapse",
         "verified_transport": true,
         "connected": true,
-        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 2 round trip(s) this run"
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v2.patch, rosbridge ws://127.0.0.1:9090; 2 round trip(s) this run"
       }
     },
     {
@@ -470,7 +470,7 @@
       "expected": "blocked",
       "final": "blocked",
       "pass": true,
-      "run_id": "run-b3a09f1f",
+      "run_id": "run-5a4a3898",
       "revisions": [
         {
           "rev": 1,
@@ -488,25 +488,25 @@
       ],
       "attempts": [
         {
-          "attempt": "1.t1.a1-bbd1",
+          "attempt": "1.t1.a1-6897",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t2.a1-604a",
+          "attempt": "1.t2.a1-b947",
           "robot": "gripper_01",
           "skill": "pick_object",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t3.a1-8f17",
+          "attempt": "1.t3.a1-b978",
           "robot": "gripper_01",
           "skill": "navigate_to",
           "status": "succeeded"
         },
         {
-          "attempt": "1.t4.a1-8507",
+          "attempt": "1.t4.a1-2eeb",
           "robot": "gripper_01",
           "skill": "place_object",
           "status": "uncertain"
@@ -529,7 +529,189 @@
         "label": "AgenticROS / Corebrum Synapse",
         "verified_transport": true,
         "connected": true,
-        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v1.patch, rosbridge ws://127.0.0.1:9090; 4 round trip(s) this run"
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v2.patch, rosbridge ws://127.0.0.1:9090; 4 round trip(s) this run"
+      }
+    },
+    {
+      "story": "map the arena (map_area, one map record)",
+      "expected": "completed",
+      "final": "completed",
+      "pass": true,
+      "run_id": "run-7aebe93c",
+      "revisions": [
+        {
+          "rev": 1,
+          "kind": "initial",
+          "scope": "full",
+          "planner": "Baseline (no LLM)",
+          "status": "finished",
+          "tasks": [
+            "t1:lidar_01:map_area"
+          ]
+        }
+      ],
+      "attempts": [
+        {
+          "attempt": "1.t1.a1-0eb6",
+          "robot": "lidar_01",
+          "skill": "map_area",
+          "status": "succeeded"
+        }
+      ],
+      "robots_dispatched": [
+        "lidar_01"
+      ],
+      "outcome": {
+        "status": "completed",
+        "reason": "Mapped arena: 95% coverage (lidar_01)."
+      },
+      "carried": {},
+      "events_received": 5,
+      "notes": "map record: {'coverage': 0.95, 'map_ref': {'id': 'arena-1.t1.a1-0eb6', 'path': 'runs/sim_maps/run-7aebe93c/arena-1.t1.a1-0eb6.synthetic.pgm', 'sha256': '4a90fd101cd7d4e999028cd9a71310ddf00f86491121d8f3c725b9469d17d01d'}}",
+      "gateway": {
+        "kind": "synapse",
+        "label": "AgenticROS / Corebrum Synapse",
+        "verified_transport": true,
+        "connected": true,
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v2.patch, rosbridge ws://127.0.0.1:9090; 1 round trip(s) this run"
+      }
+    },
+    {
+      "story": "partial map -> recovery -> honest blocked outcome",
+      "expected": "blocked",
+      "final": "blocked",
+      "pass": true,
+      "run_id": "run-e288c9d6",
+      "revisions": [
+        {
+          "rev": 1,
+          "kind": "initial",
+          "scope": "full",
+          "planner": "Baseline (no LLM)",
+          "status": "finished",
+          "tasks": [
+            "t1:lidar_01:map_area"
+          ]
+        },
+        {
+          "rev": 2,
+          "kind": "recovery",
+          "scope": "full",
+          "planner": "Baseline (no LLM)",
+          "status": "finished",
+          "tasks": [
+            "t1:lidar_01:map_area"
+          ]
+        }
+      ],
+      "attempts": [
+        {
+          "attempt": "1.t1.a1-b215",
+          "robot": "lidar_01",
+          "skill": "map_area",
+          "status": "failed"
+        },
+        {
+          "attempt": "2.t1.a1-89c4",
+          "robot": "lidar_01",
+          "skill": "map_area",
+          "status": "failed"
+        }
+      ],
+      "robots_dispatched": [
+        "lidar_01"
+      ],
+      "outcome": {
+        "status": "blocked",
+        "reason": "Recovery already used for this mission; no further automatic proposals."
+      },
+      "carried": {},
+      "events_received": 10,
+      "notes": "error codes: ['COVERAGE_INCOMPLETE', 'COVERAGE_INCOMPLETE']",
+      "gateway": {
+        "kind": "synapse",
+        "label": "AgenticROS / Corebrum Synapse",
+        "verified_transport": true,
+        "connected": true,
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v2.patch, rosbridge ws://127.0.0.1:9090; 2 round trip(s) this run"
+      }
+    },
+    {
+      "story": "pick up (object_held: find, then pick, no place)",
+      "expected": "completed",
+      "final": "completed",
+      "pass": true,
+      "run_id": "run-dd494446",
+      "revisions": [
+        {
+          "rev": 1,
+          "kind": "initial",
+          "scope": "observation_stage",
+          "planner": "Baseline (no LLM)",
+          "status": "finished",
+          "tasks": [
+            "t1:camera_01:inspect_area",
+            "t2:lidar_01:scan_route"
+          ]
+        },
+        {
+          "rev": 2,
+          "kind": "continuation",
+          "scope": "full",
+          "planner": "Baseline (no LLM)",
+          "status": "finished",
+          "tasks": [
+            "t1:gripper_01:navigate_to",
+            "t2:gripper_01:pick_object"
+          ]
+        }
+      ],
+      "attempts": [
+        {
+          "attempt": "1.t1.a1-64b1",
+          "robot": "camera_01",
+          "skill": "inspect_area",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "1.t2.a1-ad7c",
+          "robot": "lidar_01",
+          "skill": "scan_route",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "2.t1.a1-4851",
+          "robot": "gripper_01",
+          "skill": "navigate_to",
+          "status": "succeeded"
+        },
+        {
+          "attempt": "2.t2.a1-1429",
+          "robot": "gripper_01",
+          "skill": "pick_object",
+          "status": "succeeded"
+        }
+      ],
+      "robots_dispatched": [
+        "camera_01",
+        "gripper_01",
+        "lidar_01"
+      ],
+      "outcome": {
+        "status": "completed",
+        "reason": "All mission goals satisfied by confirmed results."
+      },
+      "carried": {
+        "gripper_01": "red_block_1"
+      },
+      "events_received": 20,
+      "notes": "held by gripper_01: red_block_1",
+      "gateway": {
+        "kind": "synapse",
+        "label": "AgenticROS / Corebrum Synapse",
+        "verified_transport": true,
+        "connected": true,
+        "detail": "@corebrum/core 0.8.16 @ Synapse 6f7b7840e2, patch corebrum-core-rosbridge-actions.v2.patch, rosbridge ws://127.0.0.1:9090; 4 round trip(s) this run"
       }
     }
   ]

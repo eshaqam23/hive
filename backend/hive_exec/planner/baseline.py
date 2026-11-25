@@ -24,7 +24,8 @@ LABEL_PHRASES = sorted({name.replace("_", " "): p.label for p in OBJECT_PROFILES
 
 # Open vocabulary: the noun phrase after an action verb ("find the mystery crate" -> mystery_crate).
 OBJECT_VERBS = re.compile(r"\b(?:find|locate|look for|search for|search|check for|check on|where is|where's|"
-                          r"inspect|bring|fetch|get|grab|deliver|carry|move|take|transport|pick up)\s+"
+                          r"inspect|bring|fetch|get|grab|deliver|carry|move|take|transport|pick up|grip|secure|"
+                          r"acquire)\s+"
                           r"(?:(?:me|us)\s+)?(?:(?:the|a|an|my|that|this|some|any)\s+)?")
 NOUN_STOP = {"in", "at", "on", "to", "from", "and", "near", "back", "over", "into", "onto", "inside", "around",
              "by", "for", "with", "then", "please", "here", "there", "of", "is", "off", "up", "down", "out",
@@ -102,7 +103,7 @@ FLEET_WORDS = re.compile(r"\b(cars?|robots?|fleet|gripper|camera|lidar|rovers?|y
 # A8: "map (out) (the) arena|room|field" and "explore" ask for a map of the arena (map_area on lidar_01).
 MAP = re.compile(r"\b(?:map(?:ping)?\s+(?:out\s+)?(?:the\s+)?(?:arena|room|field)|explor(?:e|ing))\b")
 ACTION_WORDS = re.compile(r"\b(bring|deliver|carry|move|transport|fetch|get|grab|find|locate|look for|search|"
-                          r"picture|photo|image|snapshot|scan|inspect|survey|pick up|"
+                          r"picture|photo|image|snapshot|scan|inspect|survey|pick up|grip|secure|acquire|"
                           r"map(?:ping)?\s+(?:out\s+)?(?:the\s+)?(?:arena|room|field)|explor(?:e|ing))\b")
 ROBOT_WORDS = {"gripper": "gripper_01", "camera": "camera_01", "lidar": "lidar_01"}
 
@@ -135,6 +136,9 @@ def fleet_answer(text: str, robots: list[dict]) -> str:
     return " ".join(parts)[:600]
 
 
+# A8: pick up / grab / grip / secure / acquire an object with no destination: object_held (ends at pick_object).
+HOLD_VERBS = re.compile(r"\b(?:pick(?:ing)?\s+up|grab|grip|secure|acquire)\b(?!\s+(?:zone|area)\b)")
+CARRY_VERBS = re.compile(r"\b(?:bring|deliver|carry|move|take|transport|fetch|get)\b")
 UNSUPPORTED = re.compile(r"\b(fly|drone|cook|paint|swim|climb|stairs|weld|charge|dance|open the door|elevator)\b")
 
 
@@ -153,8 +157,10 @@ def _task(tid, binding, action, deps=(), robot=None):
 ASK_MOVE = "Which object should I move? (e.g. the red block)"
 ASK_FIND = "Which object should I look for? (e.g. the red block)"
 ASK_DEST = "Where should it go? The gripper car delivers to the drop-off zone (dropoff_zone)."
+ASK_HOLD = "Which object should I pick up? (e.g. the red block)"
 QUESTION_OPTIONS = {
     ASK_MOVE: ["the red block", "the blue block", "the green block"],
+    ASK_HOLD: ["the red block", "the blue block", "the green block"],
     ASK_FIND: ["the red block", "the duck", "the traffic cone"],
     ASK_DEST: ["the drop-off zone"],
 }
@@ -175,6 +181,12 @@ def parse_goals(text: str) -> tuple[list[dict], list[str], Optional[str]]:
             "pickup_zone" if re.search(r"\bpick[- ]?up (zone|area)\b", t) and not deliver else None)
     area = "pickup_zone" if re.search(r"pick[- ]?up (zone|area)", t) and (photo or find) and not deliver else "work_area"
 
+    # "pick up the red block (from the pickup zone)": held, no place. A drop-off destination or another carry
+    # verb ("grab it and bring it to the drop-off zone") keeps it a delivery.
+    if HOLD_VERBS.search(t) and not photo and dest != "dropoff_zone" and not CARRY_VERBS.search(t):
+        if not label:
+            return [], ["no object label given"], ASK_HOLD
+        return [{"kind": "object_held", "object_query": {"label": label}}], [], None
     if deliver and not photo:
         if not label:
             return [], ["no object label given"], ASK_MOVE
@@ -209,22 +221,26 @@ def _why_observers(tasks: list[dict]) -> list[str]:
     return out
 
 
-def _carry_chain(oid: Optional[str], label: str, loc: str, pick_loc: str, dest: str) -> list[dict]:
+def _carry_chain(oid: Optional[str], label: str, loc: str, pick_loc: str, dest: Optional[str]) -> list[dict]:
     """navigate -> pick -> navigate -> place for one carrier, as the baseline plans it once the evidence is in.
 
-    ``oid`` None means the object is not located yet: the chain names it by label (a preview)."""
+    ``oid`` None means the object is not located yet: the chain names it by label (a preview).
+    ``dest`` None (an object_held goal) ends the chain at pick_object."""
     ref = {"object_id": oid} if oid else {"object_query": {"label": label}}
     steps: list[dict] = []
     if loc != pick_loc:
         steps.append({"kind": "navigate_to", "location_id": pick_loc, "route_id": "pickup_corridor"})
     steps.append({"kind": "pick_object", **ref})
+    if dest is None:
+        return [_task(f"t{i + 1}", "carrier", a, [f"t{i}"] if i else [], "gripper_01") for i, a in enumerate(steps)]
     if pick_loc != dest:
         steps.append({"kind": "navigate_to", "location_id": dest, "route_id": "pickup_corridor"})
     steps.append({"kind": "place_object", **ref, "location_id": dest})
     return [_task(f"t{i + 1}", "carrier", a, [f"t{i}"] if i else [], "gripper_01") for i, a in enumerate(steps)]
 
 
-def _next_stage_preview(target: Optional[dict], label: str, dest: str, carrier_loc: str, route: str) -> dict:
+def _next_stage_preview(target: Optional[dict], label: str, dest: Optional[str], carrier_loc: str,
+                        route: str) -> dict:
     """The likely next stage of a staged fetch: the carry itself, waiting on the evidence still missing."""
     waits = []
     if target is None:
@@ -236,7 +252,9 @@ def _next_stage_preview(target: Optional[dict], label: str, dest: str, carrier_l
                          target["location_id"] if target else "pickup_zone", dest)
     for t in tasks:
         t["preferred_robot_id"] = None  # who carries is decided when the stage is planned for real
-    return {"summary": f"Carry {label} to {dest} once the evidence is in.", "tasks": tasks, "waits_for": waits}
+    summary = f"Carry {label} to {dest} once the evidence is in." if dest else \
+        f"Pick up {label} once the evidence is in."
+    return {"summary": summary, "tasks": tasks, "waits_for": waits}
 
 
 def plan_for_goals(goals: list[dict], ctx: PlanningContext) -> PlanProposal:
@@ -245,10 +263,11 @@ def plan_for_goals(goals: list[dict], ctx: PlanningContext) -> PlanProposal:
     robots = {r["robot_id"]: r for r in ctx.robots}
     absences = ctx.observed["absences"]
 
-    deliveries = [g for g in goals if g["kind"] == "object_at"]
+    # object_at (deliver) and object_held (pick up, no place, A8) share the fetch logic; dest None = held.
+    deliveries = [g for g in goals if g["kind"] in ("object_at", "object_held")]
     if deliveries:
         g = deliveries[0]
-        label, dest = g["object_query"]["label"], g["location_id"]
+        label, dest = g["object_query"]["label"], g.get("location_id")
         carrier = robots["gripper_01"]
         held = [o for o in objects if o["label"] == label and o["held_by"]]
         free = [o for o in objects if o["label"] == label and not o["held_by"]]
@@ -256,6 +275,9 @@ def plan_for_goals(goals: list[dict], ctx: PlanningContext) -> PlanProposal:
         if at_dest and not held:
             return _p(disposition="reject", summary=f"{label} is already at {dest}.", mission_goals=goals,
                       issues=["goal already satisfied"])
+        if dest is None and held:
+            return _p(disposition="reject", summary=f"{held[0]['object_id']} is already held by {held[0]['held_by']}.",
+                      mission_goals=goals, issues=["goal already satisfied"])
         if not carrier["available"]:
             return _p(disposition="reject", summary="The gripper robot is unavailable; no carrier can transport.",
                       mission_goals=goals, issues=["gripper_01 unavailable"])
@@ -306,6 +328,13 @@ def plan_for_goals(goals: list[dict], ctx: PlanningContext) -> PlanProposal:
                 add({"kind": "navigate_to", "location_id": target["location_id"], "route_id": "pickup_corridor"})
                 loc = target["location_id"]
             add({"kind": "pick_object", "object_id": oid})
+        if dest is None:
+            why = [f"gripper_01 is the only car that picks, so it picks up {oid}; no destination was given, "
+                   "so it keeps holding it (no place_object).",
+                   "It has no camera or LiDAR and drives by dead reckoning (simulation); it relies on the earlier "
+                   f"camera_01 sighting and the lidar_01 clear scan of {route_id}."]
+            return _p(disposition="plan", scope="full", summary=f"Pick up {oid} and hold it.", mission_goals=goals,
+                      tasks=tasks, rationale=why)
         if loc != dest:
             add({"kind": "navigate_to", "location_id": dest, "route_id": "pickup_corridor"})
         add({"kind": "place_object", "object_id": oid, "location_id": dest})
@@ -367,7 +396,7 @@ def _apply_feedback_text(text: str, feedback: list[str], directives: dict[str, b
     text = NEGATED.sub(" ", ". ".join([text, *feedback]).lower())
     applied = []
     if directives["sensing_only"]:
-        text = DELIVER_VERBS.sub(" ", text)
+        text = HOLD_VERBS.sub(" ", DELIVER_VERBS.sub(" ", text))
         applied.append("find only, no transport")
     if directives["camera_only"]:
         applied.append("camera only, no LiDAR scan")

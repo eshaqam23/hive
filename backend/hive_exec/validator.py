@@ -269,6 +269,9 @@ def validate(
                     if not ok:
                         err("goal_not_projected",
                             f"Plan does not project {g.object_query.label} at {g.location_id}.")
+                if g.kind == "object_held":
+                    if not any(o["label"] == g.object_query.label and o["held_by"] for o in proj_obj.values()):
+                        err("goal_not_projected", f"Plan does not project {g.object_query.label} held.")
         kinds = [t.action for t in proposal.tasks]
         for g in proposal.stage_goals + (goals if proposal.scope == "full" else []):
             if g.kind == "object_located" and not any(

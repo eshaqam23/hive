@@ -1452,6 +1452,10 @@ class Executive:
         if g.kind == "object_at":
             return any(b.label == g.object_query.label and b.location_id == g.location_id and b.held_by is None
                        and b.source in ROBOTS for b in self.world.objects.values())
+        if g.kind == "object_held":
+            # A possession record a fleet robot confirmed (pick_object held true) during the mission.
+            return any(b.label == g.object_query.label and b.held_by in ROBOTS and b.source in ROBOTS
+                       and b.observed_at >= since for b in self.world.objects.values())
         if g.kind == "object_located":
             # A fresh fleet report made during the mission settles a find goal, found or absent;
             # a prior survey (operator_seed) or an older report does not.
@@ -1517,17 +1521,17 @@ class Executive:
             self.log("completed", m.outcome["reason"])
             return
         for g in goals:
-            if g.kind in ("object_at", "object_located"):
+            if g.kind in ("object_at", "object_held", "object_located"):
                 label = g.object_query.label
                 inst = self.world.instances(label)
                 held = [b for b in inst if b.held_by]
-                if g.kind == "object_at" and not inst and self.world.absence("work_area", label):
+                if g.kind in ("object_at", "object_held") and not inst and self.world.absence("work_area", label):
                     return self._block(m, f"Inspection found no {label} in the work area.")
                 if len(inst) > 1 and not held:
                     ids = [b.object_id for b in inst]
                     return self._ask(m, f"Several {label} instances were observed ({', '.join(ids)}). Which one?",
                                      ids, "evaluation")
-            if g.kind == "object_at" and self.world.route_status("pickup_corridor") == "blocked":
+            if g.kind in ("object_at", "object_held") and self.world.route_status("pickup_corridor") == "blocked":
                 return self._block(m, "The pickup corridor is observed blocked; transport cannot proceed.")
         if m.stage_count >= MAX_STAGES:
             return self._block(m, f"Stage limit ({MAX_STAGES}) reached without satisfying the goals.")

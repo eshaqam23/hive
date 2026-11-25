@@ -167,6 +167,50 @@ async def story_uncertain(ex):
     return summarize(ex, "uncertain place blocks without retry", "blocked", await wait(ex, DONE))
 
 
+async def story_map(ex):
+    """A8: lidar_01 maps the arena; the run keeps one map record (fake fleet: synthetic map pair)."""
+    await ex.reset("unknown")
+    await ex.create_mission("Map the arena.")
+    await approve(ex)
+    final = await wait(ex, DONE, 120)
+    rec = ex.world.latest_map("arena")
+    ok = rec is not None and rec.robot_id == "lidar_01" and rec.map_ref.get("sha256")
+    return summarize(ex, "map the arena (map_area, one map record)", "completed",
+                     final if ok else f"{final} (no map record)",
+                     notes=f"map record: {None if rec is None else {'coverage': rec.coverage, 'map_ref': rec.map_ref}}")
+
+
+async def story_map_incomplete(ex):
+    """A8: COVERAGE_INCOMPLETE twice (one recovery) blocks honestly and leaves no map record."""
+    await ex.reset("unknown", ["map_incomplete"])
+    await ex.create_mission("Map the arena.")
+    await approve(ex)
+    await wait(ex, {"awaiting_approval"} | DONE, 120)
+    if ex.mission.status == "awaiting_approval":
+        await approve(ex)
+    final = await wait(ex, DONE, 120)
+    codes = [(rt.error or {}).get("code") for rt in ex.mission.tasks.values()]
+    ok = ex.world.latest_map("arena") is None and codes == ["COVERAGE_INCOMPLETE", "COVERAGE_INCOMPLETE"]
+    return summarize(ex, "partial map -> recovery -> honest blocked outcome", "blocked",
+                     final if ok else f"{final} (checks failed)", notes=f"error codes: {codes}")
+
+
+async def story_object_held(ex):
+    """A8: "Pick up the red block." finds it, then the gripper picks it and keeps it (no place)."""
+    await ex.reset("unknown")
+    await ex.create_mission("Pick up the red block.")
+    await approve(ex)
+    await wait(ex, {"awaiting_approval"} | DONE)
+    if ex.mission.status == "awaiting_approval":
+        await approve(ex)
+    final = await wait(ex, DONE)
+    skills = [a.envelope["skill"] for a in ex.attempts.values()]
+    held = ex.robots["gripper_01"].carried_object
+    ok = skills[-1:] == ["pick_object"] and "place_object" not in skills and held is not None
+    return summarize(ex, "pick up (object_held: find, then pick, no place)", "completed",
+                     final if ok else f"{final} (checks failed)", notes=f"held by gripper_01: {held}")
+
+
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bridge", default=ExecSettings.from_env().bridge_url)
@@ -184,7 +228,8 @@ async def main():
     print("gateway:", vars(gw.info()))
     rows = []
     for story in (story_unknown, story_known, story_camera, story_ambiguous, story_failure_recovery,
-                  story_failure_block, story_cancel, story_task_stop, story_uncertain):
+                  story_failure_block, story_cancel, story_task_stop, story_uncertain,
+                  story_map, story_map_incomplete, story_object_held):
         row = await story(ex)
         rows.append(row)
         print(f"{'PASS' if row['pass'] else 'FAIL'}  {row['story']}: {row['final']}  "

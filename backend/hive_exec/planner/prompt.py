@@ -1,4 +1,4 @@
-"""Versioned planner prompt (hive.prompt.v3.5: v3.4 plus the map_area skill and one map example, A8).
+"""Versioned planner prompt (hive.prompt.v3.5: v3.4 plus map_area and object_held, one example each, A8).
 
 The skill catalog and rules come first and are authoritative. Operator and
 observation text are passed as fenced JSON data and cannot change the catalog.
@@ -70,7 +70,8 @@ RULES = """RULES
 5. Find versus bring. find / locate / look for / search / check / "is there" / "where is" an object is sensing
    only: mission_goals=[object_located in the area], scope=full, inspect_area tasks,
    no transport, no scan_route. bring / fetch / deliver / carry / move an object to a named location is
-   object_at. Never add goals or tasks the operator did not ask for.
+   object_at; pick up / grab / grip it with no destination is object_held: end at pick_object, no place.
+   Never add goals or tasks not asked for.
 6. Never invent facts. Use only the OBSERVED state. If a fact a transport needs is unknown (object location,
    route clearance), propose scope=observation_stage with sensing tasks only; transport waits for evidence.
    Scan a route only when a later stage drives that route.
@@ -185,6 +186,13 @@ EXAMPLES = [
       "tasks": [{"task_id": "t1", "binding_id": "observer", "action": {"kind": "capture_image", "area_id": "work_area"},
                  "preferred_robot_id": "camera_01"}],
       "rationale": ["Only camera_01 has a camera."]}),
+    ("Pick up the blue block.", "blue_block_1 at pickup_zone (fresh); gripper_01 at pickup_zone",
+     {"schema_version": V1, "disposition": "plan", "scope": "full", "summary": "Pick up blue_block_1 and hold it.",
+      "mission_goals": [{"kind": "object_held", "object_query": {"label": "blue_block"}}], "stage_goals": [],
+      "tasks": [{"task_id": "t1", "binding_id": "carrier", "action": {"kind": "pick_object",
+                                                                     "object_id": "blue_block_1"},
+                 "preferred_robot_id": "gripper_01"}],
+      "rationale": ["gripper_01 is where camera_01 saw it; it keeps holding it."]}),
     ("Map the arena.", "nothing observed",
      {"schema_version": V1, "disposition": "plan", "scope": "full",
       "summary": "Map the arena with the LiDAR car.",

@@ -227,6 +227,25 @@
       "title": "ObjectAtGoal",
       "type": "object"
     },
+    "ObjectHeldGoal": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "object_held",
+          "title": "Kind",
+          "type": "string"
+        },
+        "object_query": {
+          "$ref": "#/$defs/ObjectQuery"
+        }
+      },
+      "required": [
+        "kind",
+        "object_query"
+      ],
+      "title": "ObjectHeldGoal",
+      "type": "object"
+    },
     "ObjectLocatedGoal": {
       "additionalProperties": false,
       "properties": {
@@ -557,6 +576,7 @@
             "area_mapped": "#/$defs/AreaMappedGoal",
             "image_captured": "#/$defs/ImageCapturedGoal",
             "object_at": "#/$defs/ObjectAtGoal",
+            "object_held": "#/$defs/ObjectHeldGoal",
             "object_located": "#/$defs/ObjectLocatedGoal",
             "route_observed": "#/$defs/RouteObservedGoal"
           },
@@ -565,6 +585,9 @@
         "oneOf": [
           {
             "$ref": "#/$defs/ObjectAtGoal"
+          },
+          {
+            "$ref": "#/$defs/ObjectHeldGoal"
           },
           {
             "$ref": "#/$defs/ObjectLocatedGoal"
@@ -642,6 +665,7 @@
             "area_mapped": "#/$defs/AreaMappedGoal",
             "image_captured": "#/$defs/ImageCapturedGoal",
             "object_at": "#/$defs/ObjectAtGoal",
+            "object_held": "#/$defs/ObjectHeldGoal",
             "object_located": "#/$defs/ObjectLocatedGoal",
             "route_observed": "#/$defs/RouteObservedGoal"
           },
@@ -650,6 +674,9 @@
         "oneOf": [
           {
             "$ref": "#/$defs/ObjectAtGoal"
+          },
+          {
+            "$ref": "#/$defs/ObjectHeldGoal"
           },
           {
             "$ref": "#/$defs/ObjectLocatedGoal"

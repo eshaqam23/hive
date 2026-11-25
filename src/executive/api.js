@@ -51,6 +51,8 @@ export function describeGoal(goal) {
   switch (goal.kind) {
     case "object_at":
       return `${goal.object_query.label} at ${goal.location_id}`;
+    case "object_held":
+      return `${goal.object_query.label} held`;
     case "object_located":
       return `${goal.object_query.label} located in ${goal.area_id}`;
     case "route_observed":
