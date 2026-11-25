@@ -129,6 +129,7 @@ def test_describe_command():
     assert describe_command("navigate_to", {"location_id": "pickup_zone", "route_id": None}) == \
         'navigate_to(location_id="pickup_zone")'
     assert describe_command("x", {"n": 2.0, "f": True, "o": {"a": 1}}) == 'x(n=2, f=true, o={"a":1})'
+    assert describe_command("map_area", {"area_id": "arena"}) == 'map_area(area_id="arena")'
 
 
 def test_saved_task_envelope_schema_matches_model():
@@ -633,7 +634,7 @@ def test_execution_plan_and_report_defaults_for_the_preview_fields():
 
 
 # ---- A8: per-skill timeouts (an agent's own bounds must fit inside them; the envelope allows 600 s)
-A8_TIMEOUTS = {"navigate_to": 240.0, "pick_object": 300.0, "place_object": 120.0,
+A8_TIMEOUTS = {"navigate_to": 240.0, "pick_object": 300.0, "place_object": 120.0, "map_area": 480.0,
                "inspect_area": 60.0, "capture_image": 60.0, "scan_route": 60.0}
 
 
@@ -646,3 +647,140 @@ def test_a8_every_skill_timeout_fits_the_envelope():
     for skill in catalog.SKILLS.values():
         TaskEnvelope(run_id="r", mission_id="m", revision=1, task_id="t", attempt_id="a", robot_id="camera_01",
                      skill=skill.kind, params={}, timeout_s=skill.timeout_s)
+
+
+# ---- A8: map_area (skill, action, goal, observation) and the fake fleet's synthetic map
+MAP_PLAN = {"schema_version": "hive.plan-proposal.v1", "disposition": "plan", "scope": "full",
+            "summary": "Map the arena.", "mission_goals": [{"kind": "area_mapped", "area_id": "arena"}],
+            "stage_goals": [], "tasks": [{"task_id": "t1", "binding_id": "mapper",
+                                          "action": {"kind": "map_area", "area_id": "arena"}}]}
+
+
+def test_a8_map_area_action_and_area_mapped_goal_parse():
+    from hive_exec.contracts import AreaMappedGoal, MapArea, MapAreaId
+
+    p = PlanProposal.model_validate(MAP_PLAN)
+    assert isinstance(p.tasks[0].action, MapArea) and isinstance(p.mission_goals[0], AreaMappedGoal)
+    assert set(typing.get_args(MapAreaId)) == set(catalog.MAP_AREAS) == {"arena"}
+    for bad in ({"kind": "map_area", "area_id": "work_area"}, {"kind": "map_area"},
+                {"kind": "map_area", "area_id": "arena", "coverage": 0.9}):
+        with pytest.raises(ValidationError):
+            PlanProposal.model_validate({**MAP_PLAN, "tasks": [{"task_id": "t1", "binding_id": "m", "action": bad}]})
+    with pytest.raises(ValidationError):
+        PlanProposal.model_validate({**MAP_PLAN, "mission_goals": [{"kind": "area_mapped", "area_id": "work_area"}]})
+
+
+def test_a8_area_mapped_observation_and_map_area_envelope():
+    from hive_exec.contracts import Observation
+
+    ref = {"id": "m1", "path": "runs/sim_maps/r/m1.synthetic.pgm", "sha256": "0" * 64}
+    o = Observation(kind="area_mapped", entity_id="map:arena", area_id="arena", attrs={"coverage": 0.95, "map_ref": ref})
+    assert o.attrs["map_ref"] == ref
+    env = TaskEnvelope(run_id="r", mission_id="m", revision=1, task_id="t1", attempt_id="a", robot_id="lidar_01",
+                       skill="map_area", params={"area_id": "arena"}, timeout_s=catalog.SKILLS["map_area"].timeout_s)
+    assert env.skill == "map_area" and env.timeout_s == 480.0
+
+
+def test_a8_saved_schemas_offer_map_area():
+    base = Path(catalog.__file__).parent / "schemas"
+    plan = json.loads((base / "plan_proposal.v1.json").read_text())
+    assert {"MapArea", "AreaMappedGoal"} <= set(plan["$defs"])
+    env = json.loads((base / "task_envelope.v1.json").read_text())
+    assert "map_area" in env["properties"]["skill"]["enum"]
+    assert plan["properties"]["schema_version"]["const"] == "hive.plan-proposal.v1"  # the label stays v1
+
+
+def test_a8_catalog_map_area_skill_and_lidar():
+    s = catalog.SKILLS["map_area"]
+    assert s.signature == "map_area(area_id)" and s.timeout_s == 480.0
+    assert s.effect_commit == "robot reports a saved map with coverage >= target"
+    lidar = catalog.ROBOTS["lidar_01"]
+    assert "map_area" in lidar.skills and lidar.map_areas == ("arena",)
+    assert all(r.map_areas == () for rid, r in catalog.ROBOTS.items() if rid != "lidar_01")
+    robots = {r["robot_id"]: r for r in catalog.catalog_dict()["robots"]}
+    assert list(robots["lidar_01"]["map_areas"]) == ["arena"]
+
+
+def test_a8_fake_world_map_areas_match_catalog():
+    for rid, d in catalog.ROBOTS.items():
+        assert fake_world.MAP_AREAS.get(rid, set()) == set(d.map_areas), rid
+    assert "map_incomplete" in fake_world.KNOWN_FAULTS
+
+
+def _pgm_body(data: bytes) -> tuple[int, int, bytes]:
+    lines, rest = [], data
+    while len(lines) < 3:  # magic, "w h", maxval; comment lines are skipped
+        line, rest = rest.split(b"\n", 1)
+        if not line.startswith(b"#"):
+            lines.append(line)
+    assert lines[0] == b"P5" and lines[2] == b"255"
+    w, h = (int(x) for x in lines[1].split())
+    return w, h, rest
+
+
+def _check_map_files(root, ref, coverage):
+    import hashlib
+
+    assert set(ref) == {"id", "path", "sha256"}
+    assert not Path(ref["path"]).is_absolute() and ".." not in Path(ref["path"]).parts
+    assert ref["path"].startswith("runs/sim_maps/")
+    pgm = root / ref["path"]
+    data = pgm.read_bytes()
+    assert hashlib.sha256(data).hexdigest() == ref["sha256"]
+    assert data.startswith(b"P5\n# synthetic")
+    w, h, body = _pgm_body(data)
+    assert (w, h) == (80, 60) and len(body) == w * h
+    assert set(body) <= {0, 205, 254}
+    assert round(1 - body.count(205) / len(body), 4) == coverage
+    yaml_text = pgm.with_suffix(".yaml").read_text()
+    for needle in ("synthetic", f"image: {pgm.name}", "mode: trinary", "resolution: 0.05",
+                   "origin: [0.0, 0.0, 0.0]", "negate: 0", "occupied_thresh: 0.65", "free_thresh: 0.196"):
+        assert needle in yaml_text, needle
+
+
+def test_a8_fake_map_area_writes_a_labelled_synthetic_map(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_SIM_MAP_ROOT", str(tmp_path))
+    w = fake_world.FakeWorld(run_id="run-1")
+    assert w.precheck("lidar_01", "map_area", {"area_id": "arena"}) is None
+    assert w.precheck("camera_01", "map_area", {"area_id": "arena"})["code"] == "unsupported_skill"
+    assert w.precheck("lidar_01", "map_area", {"area_id": "work_area"})["code"] == "not_mappable"
+    out = w.execute("lidar_01", "map_area", {"area_id": "arena"}, attempt_id="run-1:t1:1")
+    assert out.status == "succeeded" and out.error is None
+    assert out.observations == []  # like the agent: the observation rides in the result only
+    res = out.result
+    assert res["area_id"] == "arena" and res["coverage"] == 0.95 and res["synthetic"] is True
+    assert res["map_ref"]["path"].startswith("runs/sim_maps/run-1/")
+    _check_map_files(tmp_path, res["map_ref"], 0.95)
+    assert res["observation"] == {"kind": "area_mapped", "entity_id": "map:arena", "area_id": "arena",
+                                  "attrs": {"coverage": 0.95, "map_ref": res["map_ref"]}}
+    assert out.energy_used_pct == catalog.SKILLS["map_area"].energy_pct
+
+
+def test_a8_fake_map_incomplete_fails_with_the_partial_map(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_SIM_MAP_ROOT", str(tmp_path))
+    w = fake_world.FakeWorld(["map_incomplete"], run_id="run-2")
+    out = w.execute("lidar_01", "map_area", {"area_id": "arena"}, attempt_id="run-2:t1:1")
+    assert out.status == "failed" and out.error["code"] == "COVERAGE_INCOMPLETE"
+    assert out.result["coverage"] == 0.6 and out.result["synthetic"] is True
+    _check_map_files(tmp_path, out.result["map_ref"], 0.6)
+    assert out.result["observation"]["attrs"]["coverage"] == 0.6
+
+
+def test_a8_fake_map_paths_stay_under_runs_sim_maps(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_SIM_MAP_ROOT", str(tmp_path))
+    out = fake_world.FakeWorld(run_id="../../etc").execute("lidar_01", "map_area", {"area_id": "arena"},
+                                                           attempt_id="../x:y/z")
+    path = (tmp_path / out.result["map_ref"]["path"]).resolve()
+    assert path.is_relative_to((tmp_path / "runs" / "sim_maps").resolve())
+    _check_map_files(tmp_path, out.result["map_ref"], 0.95)
+
+
+def test_a8_world_from_args_passes_the_run_id():
+    assert fake_world.world_from_args({"run_id": "r-7"}).run_id == "r-7"
+    assert fake_world.FakeWorld().run_id == ""
+
+
+def test_a8_sim_map_root_defaults_to_the_hive_repo_root(monkeypatch):
+    monkeypatch.delenv("HIVE_SIM_MAP_ROOT", raising=False)
+    root = fake_world.sim_map_root()
+    assert (root / "backend" / "hive_exec" / "sim" / "fake_world.py").is_file()

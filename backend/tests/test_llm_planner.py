@@ -4,6 +4,7 @@ Moved from test_qwen_planner.py; the original assertions are kept, with the
 planner kind now "llm" ("qwen" stays accepted as an alias)."""
 
 import json
+import re
 
 from .conftest import DEMO, approve_latest, wait_for
 from .llm_mock import MOCK_MODEL, scripted_planner
@@ -294,7 +295,7 @@ def _example(prefix):
 def test_prompt_v3_rules_cover_find_answer_and_asking():
     from hive_exec.planner.prompt import PROMPT_VERSION, RULES, system_prompt
 
-    assert PROMPT_VERSION == "hive.prompt.v3.4" and "hive.prompt.v3.4" in system_prompt()
+    assert PROMPT_VERSION == "hive.prompt.v3.5" and "hive.prompt.v3.5" in system_prompt()
     for phrase in ["Write your own summary and rationale for this command; do not reuse example text.",
                    "object_located", "no scan_route", "the field", "work_area", "ONE short question",
                    "Never map an unnamed destination to dropoff_zone", "operator's own noun",
@@ -393,7 +394,7 @@ def test_prompt_growth_for_rationale_stays_under_600_chars():
     # v3 -> v3.1 added < 600; v3.1 -> v3.2 (preview) may add PROMPT_WS4_BUDGET more (see the WS4 test below)
     from hive_exec.planner.prompt import system_prompt
 
-    assert len(system_prompt()) - PROMPT_V3_CHARS < 600 + PROMPT_WS4_BUDGET + PROMPT_FIX_BUDGET
+    assert len(system_prompt()) - PROMPT_V3_CHARS < 600 + PROMPT_WS4_BUDGET + PROMPT_FIX_BUDGET + PROMPT_A8_BUDGET
 
 
 def test_prompt_with_rationale_still_fits_the_token_budget():
@@ -430,10 +431,10 @@ def _preview_context(preview=True):
                          robots=initial_robot_states(), world=w, canonical_goals=[goal], previous_preview=prev)
 
 
-def test_prompt_is_v3_4_and_says_so():
+def test_prompt_is_v3_5_and_says_so():
     from hive_exec.planner.prompt import PROMPT_VERSION, system_prompt
 
-    assert PROMPT_VERSION == "hive.prompt.v3.4" and "hive.prompt.v3.4" in system_prompt()
+    assert PROMPT_VERSION == "hive.prompt.v3.5" and "hive.prompt.v3.5" in system_prompt()
 
 
 def test_prompt_rules_ask_for_a_preview_and_for_changes_on_continuation():
@@ -481,7 +482,7 @@ def test_continuation_user_prompt_carries_the_previous_preview_and_points_at_the
 def test_prompt_growth_for_preview_and_carry_overs_is_budgeted():
     from hive_exec.planner.prompt import system_prompt
 
-    assert len(system_prompt()) - PROMPT_V31_CHARS < PROMPT_WS4_BUDGET + PROMPT_FIX_BUDGET
+    assert len(system_prompt()) - PROMPT_V31_CHARS < PROMPT_WS4_BUDGET + PROMPT_FIX_BUDGET + PROMPT_A8_BUDGET
 
 
 def test_schema_with_a_nested_optional_preview_still_fits_the_structured_output_budget():
@@ -572,4 +573,36 @@ def test_localization_texts_no_longer_repeat_what_a_robot_observes():
 def test_prompt_growth_for_the_f6_fix_is_small():
     from hive_exec.planner.prompt import system_prompt
 
-    assert PROMPT_V32_WS4_CHARS < len(system_prompt()) <= PROMPT_V32_WS4_CHARS + PROMPT_FIX_BUDGET
+    assert PROMPT_V32_WS4_CHARS < len(system_prompt()) <= PROMPT_V32_WS4_CHARS + PROMPT_FIX_BUDGET + PROMPT_A8_BUDGET
+
+
+# ---------------------------------------------------------------- A8: map_area in the prompt
+PROMPT_V34_CHARS = 12667  # len(system_prompt()) of hive.prompt.v3.4 at 4d0ae65 (A8 baseline)
+PROMPT_A8_MAP_BUDGET = 650  # A8 step 3: map_area catalog line, "maps arena", one example; measured +610 (DECISIONS)
+PROMPT_A8_BUDGET = PROMPT_A8_MAP_BUDGET
+
+
+def test_prompt_lists_map_area_and_who_maps_what():
+    from hive_exec.catalog import ROBOTS, SKILLS
+    from hive_exec.planner.prompt import _catalog_text
+
+    text = _catalog_text()
+    assert f"- map_area(area_id): {SKILLS['map_area'].description}" in text
+    lines = {ln.split(":")[0][2:]: ln for ln in text.splitlines() if ln.startswith("- ") and ": skills " in ln}
+    for rid, r in ROBOTS.items():
+        maps = re.search(r"maps ([a-z_, ]+?)(?:;|$)", lines[rid])
+        assert (set(x.strip() for x in maps.group(1).split(",")) if maps else set()) == set(r.map_areas), rid
+
+
+def test_prompt_has_one_map_example_that_validates():
+    p = _example("Map the arena")
+    assert p.disposition == "plan" and p.scope == "full"
+    assert [(g.kind, g.area_id) for g in p.mission_goals] == [("area_mapped", "arena")]
+    assert [(t.action.kind, t.preferred_robot_id) for t in p.tasks] == [("map_area", "lidar_01")]
+    assert sum(cmd.lower().startswith("map ") for cmd, _ in _examples()) == 1
+
+
+def test_prompt_growth_for_map_area_is_budgeted():
+    from hive_exec.planner.prompt import system_prompt
+
+    assert PROMPT_V34_CHARS < len(system_prompt()) <= PROMPT_V34_CHARS + PROMPT_A8_BUDGET

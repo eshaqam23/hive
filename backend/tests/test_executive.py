@@ -1515,3 +1515,118 @@ async def test_edit_that_changes_nothing_is_refused_but_a_real_edit_still_makes_
     assert "Edit changes nothing" in await refused_edit(
         ex, [{"op": "set_robot", "binding_id": "observer", "robot_id": "camera_01"}])
 
+
+
+# ---------------------------------------------------------------- A8: map_area through the fake fleet
+
+MAP_REF = {"id": "m1", "path": "runs/sim_maps/r/m1.synthetic.pgm", "sha256": "a" * 64}
+
+
+def _mapped(area="arena", coverage=0.95, ref=None):
+    return {"kind": "area_mapped", "entity_id": f"map:{area}", "area_id": area,
+            "attrs": {"coverage": coverage, "map_ref": MAP_REF if ref is None else ref}}
+
+
+async def test_a8_story_map_the_arena_saves_a_map_record(make_exec):
+    ex = await make_exec()
+    await ex.create_mission("Map the arena.")
+    rev = ex.mission.revisions[-1]
+    assert rev.proposal.scope == "full" and [t.skill for t in rev.tasks] == ["map_area"]
+    assert [t.robot_id for t in rev.tasks] == ["lidar_01"]
+    assert [g.kind for g in rev.proposal.mission_goals] == ["area_mapped"]
+    await approve_latest(ex)
+    assert await wait_for(ex, DONE) == "completed"
+    rec = ex.world.latest_map("arena")
+    assert rec is not None and rec.robot_id == "lidar_01" and rec.source == "lidar_01"
+    assert rec.coverage == 0.95 and rec.map_ref["path"].startswith(f"runs/sim_maps/{ex.run_id}/")
+    assert rec.attempt_id in ex.attempts and rec.seq == 1 and rec.id
+    assert [m["area_id"] for m in ex.world.snapshot()["maps"]] == ["arena"]
+    assert any(e["kind"] == "effect" and "Map saved" in e["message"] for e in ex.timeline)
+    assert "95% coverage" in ex.mission.outcome["reason"]
+
+
+async def test_a8_story_map_incomplete_leaves_no_map_and_blocks_after_one_recovery(make_exec):
+    ex = await make_exec("unknown", ["map_incomplete"])
+    await ex.create_mission("Map the arena.")
+    await approve_latest(ex)
+    await wait_for(ex, {"awaiting_approval"} | DONE)
+    assert ex.mission.recovery_used and ex.mission.revisions[-1].kind == "recovery"
+    assert [t.skill for t in ex.mission.revisions[-1].tasks] == ["map_area"]
+    await approve_latest(ex)
+    assert await wait_for(ex, DONE) == "blocked"
+    errors = [(rt.error or {}).get("code") for rt in ex.mission.tasks.values()]
+    assert errors == ["COVERAGE_INCOMPLETE", "COVERAGE_INCOMPLETE"]
+    assert ex.world.latest_map("arena") is None and ex.world.snapshot()["maps"] == []
+
+
+def test_a8_map_report_takes_the_observation_from_the_result_or_the_event():
+    from hive_exec.executive import map_report
+    from hive_exec.contracts import Observation
+
+    obs, why = map_report("arena", {"observation": _mapped()}, [])
+    assert obs is not None and obs.attrs["coverage"] == 0.95 and why == ""
+    obs, _ = map_report("arena", {}, [Observation(**_mapped(coverage=0.9))])
+    assert obs.attrs["coverage"] == 0.9  # an observations entry wins over result.observation
+
+
+@pytest.mark.parametrize("result", [
+    {},
+    {"observation": "not a dict"},
+    {"observation": _mapped(area="work_area")},
+    {"observation": _mapped(coverage=1.5)},
+    {"observation": _mapped(coverage=True)},
+    {"observation": _mapped(coverage="0.9")},
+    {"observation": _mapped(ref={"id": "m1", "path": "x.pgm"})},
+    {"observation": _mapped(ref={"id": "m1", "path": "x.pgm", "sha256": 7})},
+    {"observation": {**_mapped(), "kind": "image"}},
+])
+def test_a8_map_report_refuses_bad_evidence(result):
+    from hive_exec.executive import map_report
+
+    obs, why = map_report("arena", result, [])
+    assert obs is None and why
+
+
+def test_a8_world_map_records_count_only_from_the_mission_start():
+    from hive_exec.contracts import Observation
+
+    t = [100.0]
+    w = ObservedWorld(clock=lambda: t[0])
+    rep = w.accept(Observation(**_mapped()), "lidar_01", "a1")
+    assert w.latest_map() is None  # an area_mapped report alone is no map record
+    rec = w.record_map(Observation(**_mapped()), "lidar_01", "a1")
+    assert rec.seq == 1 and rec.observed_at == 100.0 and w.latest_map("arena") is rec
+    assert w.map_for("arena", since=100.0) is rec and w.map_for("arena", since=101.0) is None
+    assert w.map_for("lab", since=0) is None and rep.kind == "area_mapped"
+    t[0] = 200.0
+    rec2 = w.record_map(Observation(**_mapped(coverage=0.97)), "lidar_01", "a2")
+    assert rec2.seq == 2 and rec2.id != rec.id and w.latest_map() is rec2
+    assert w.copy().latest_map().coverage == 0.97
+
+
+async def test_a8_area_mapped_goal_needs_a_map_recorded_during_the_mission(make_exec):
+    from hive_exec.contracts import AreaMappedGoal
+    from hive_exec.contracts import Observation
+
+    ex = await make_exec()
+    g = AreaMappedGoal(kind="area_mapped", area_id="arena")
+    assert not ex.goal_satisfied(g, 0.0)
+    ex.world.record_map(Observation(**_mapped()), "lidar_01", "a1")
+    assert ex.goal_satisfied(g, 0.0)
+    assert not ex.goal_satisfied(g, ex.world.clock() + 10)
+
+
+@pytest.mark.parametrize("cmd", ["Map the arena.", "map the room", "Explore.", "explore the field",
+                                 "Map arena", "start mapping the arena", "Can the lidar map the arena?"])
+async def test_a8_baseline_maps_the_arena_in_one_full_task(cmd):
+    p = await baseline_propose(cmd)
+    assert p.disposition == "plan" and p.scope == "full", (cmd, p.disposition, p.issues)
+    assert [(g.kind, g.area_id) for g in p.mission_goals] == [("area_mapped", "arena")]
+    assert [(t.action.kind, t.action.area_id, t.preferred_robot_id) for t in p.tasks] == \
+        [("map_area", "arena", "lidar_01")]
+    assert p.rationale
+
+
+def test_a8_parse_goals_map_does_not_swallow_other_intents():
+    assert parse_goals("find the duck on the map")[0][0]["kind"] == "object_located"
+    assert parse_goals("Map the arena.")[0] == [{"kind": "area_mapped", "area_id": "arena"}]

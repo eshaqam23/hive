@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeAction, errorText } from "./api.js";
+import { describeAction, describeGoal, errorText } from "./api.js";
 
 // Must match describe_command in backend/hive_exec/agent_commands.py (tested there with the same cases).
 describe("describeAction", () => {
@@ -19,6 +19,16 @@ describe("describeAction", () => {
 
   it("is empty for no action", () => {
     expect(describeAction(null)).toBe("");
+  });
+
+  it("renders the A8 map_area command", () => {
+    expect(describeAction({ kind: "map_area", area_id: "arena" })).toBe('map_area(area_id="arena")');
+  });
+});
+
+describe("describeGoal", () => {
+  it("names an area_mapped goal", () => {
+    expect(describeGoal({ kind: "area_mapped", area_id: "arena" })).toBe("arena mapped");
   });
 });
 

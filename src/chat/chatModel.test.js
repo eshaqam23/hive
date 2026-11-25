@@ -141,6 +141,7 @@ describe("rows", () => {
     expect(describeWhat({ kind: "capture_image", area_id: "pickup_zone" }, awaiting.catalog)).toBe("Photograph Pickup zone");
     expect(describeWhat({ kind: "scan_route", route_id: "pickup_corridor" }, null)).toBe("Scan pickup corridor");
     expect(describeWhat({ kind: "pick_object", object_query: { label: "blue_block" } }, null)).toBe("Pick up blue block");
+    expect(describeWhat({ kind: "map_area", area_id: "arena" }, null)).toBe("Map arena");
     expect(describeWhat({ kind: "wave" }, null)).toBe("wave");
     expect(describeWhat(null, null)).toBe("");
   });
@@ -161,6 +162,19 @@ describe("rows", () => {
     expect(reportLine(undefined, world)).toBeNull();
     expect(reportLine({ state: "running", result: null }, world)).toBeNull();
     expect(formatResult({ found: [], ok: false, x: null, o: { a: 1 } })).toBe('found: none · not ok · o: {"a":1}');
+  });
+
+  it("reads a saved map as map saved with its coverage, and a partial map by its error", () => {
+    const mapRef = { id: "arena-a1", path: "runs/sim_maps/r1/arena-a1.synthetic.pgm", sha256: "ab" };
+    const done = { state: "succeeded", attempt_ids: ["a1"], result: { area_id: "arena", coverage: 0.95, map_ref: mapRef, synthetic: true } };
+    expect(reportLine(done, { reports: [] })).toEqual({ tone: "muted", text: "map saved · 95% coverage" });
+    const partial = {
+      state: "failed",
+      attempt_ids: ["a2"],
+      result: { area_id: "arena", coverage: 0.6, map_ref: mapRef },
+      error: { code: "COVERAGE_INCOMPLETE", message: "coverage 0.60 below target 0.95 (synthetic)" },
+    };
+    expect(reportLine(partial, { reports: [] })).toEqual({ tone: "danger", text: "coverage 0.60 below target 0.95 (synthetic)" });
   });
 });
 
@@ -415,7 +429,7 @@ describe("next-stage preview helpers", () => {
   const catalog = {
     robots: [
       { robot_id: "camera_01", skills: ["inspect_area", "capture_image", "navigate_to"], reachable_locations: ["camera_post"], observable_areas: ["work_area", "pickup_zone"], observable_routes: [] },
-      { robot_id: "lidar_01", skills: ["scan_route", "navigate_to"], reachable_locations: ["lidar_post"], observable_areas: [], observable_routes: ["pickup_corridor"] },
+      { robot_id: "lidar_01", skills: ["scan_route", "navigate_to", "map_area"], reachable_locations: ["lidar_post"], observable_areas: [], observable_routes: ["pickup_corridor"], map_areas: ["arena"] },
       { robot_id: "gripper_01", skills: ["pick_object", "place_object", "navigate_to"], reachable_locations: ["dropoff_zone", "pickup_zone"], observable_areas: [], observable_routes: [] },
     ],
   };
@@ -423,6 +437,8 @@ describe("next-stage preview helpers", () => {
     expect(likelyRobots({ kind: "navigate_to", location_id: "pickup_zone" }, catalog)).toEqual(["gripper_01"]);
     expect(likelyRobots({ kind: "inspect_area", area_id: "work_area" }, catalog)).toEqual(["camera_01"]);
     expect(likelyRobots({ kind: "scan_route", route_id: "pickup_corridor" }, catalog)).toEqual(["lidar_01"]);
+    expect(likelyRobots({ kind: "map_area", area_id: "arena" }, catalog)).toEqual(["lidar_01"]);
+    expect(likelyRobots({ kind: "map_area", area_id: "warehouse" }, catalog)).toEqual([]);
     expect(likelyRobots({ kind: "inspect_area", area_id: "dropoff_zone" }, catalog)).toEqual([]);
     expect(likelyRobots({ kind: "pick_object", object_query: { label: "x" } }, catalog, "camera_01")).toEqual(["gripper_01"]);
     expect(likelyRobots({ kind: "pick_object", object_query: { label: "x" } }, catalog, "gripper_01")).toEqual(["gripper_01"]);

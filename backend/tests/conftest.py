@@ -19,6 +19,8 @@ def _isolated_provider_store(tmp_path, monkeypatch):
     """
     saved = dict(os.environ)
     monkeypatch.setenv("HIVE_PROVIDERS_FILE", str(tmp_path / "providers.yaml"))
+    # A8: the fake fleet's synthetic maps land under the test's tmp dir, never in the repo's runs/.
+    monkeypatch.setenv("HIVE_SIM_MAP_ROOT", str(tmp_path / "sim_map_root"))
     yield
     for var in set(os.environ) - set(saved):
         os.environ.pop(var, None)

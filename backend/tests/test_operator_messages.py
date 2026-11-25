@@ -1044,7 +1044,7 @@ SHAPES = {
 # fix 3: with one token per UTF-8 byte, the 1000-character commands and the 3x500 emoji answers no longer fit:
 # (first pass fits, repair pass fits). Over the budget the planner refuses (ContextBudgetExceeded): fail closed.
 SHAPE_FITS = {
-    "emoji_command_500_and_emoji_feedback": (True, True),
+    "emoji_command_500_and_emoji_feedback": (True, False),  # A8: v3.5 + map_area schema; repair 9348 fails closed
     "emoji_command_1000": (False, False),
     "cjk_command_1000": (True, False),
     "emoji_answers_3x500": (False, False),
@@ -1113,7 +1113,7 @@ def test_v34_injected_delimiters_stay_one_json_string_line():
 def test_v34_prompt_version():
     from hive_exec.planner.prompt import PROMPT_VERSION, system_prompt
 
-    assert PROMPT_VERSION == "hive.prompt.v3.4" and "hive.prompt.v3.4" in system_prompt()
+    assert PROMPT_VERSION == "hive.prompt.v3.5" and "hive.prompt.v3.5" in system_prompt()  # A8 bumped v3.4
 
 
 class ThreeHoldingGateway(HoldingGateway):

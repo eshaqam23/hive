@@ -322,3 +322,42 @@ def test_preview_check_that_raises_becomes_one_info_note():
 
     notes = validate_preview(p, Boom(), initial_robot_states(), ObservedWorld())
     assert [(n.code, n.severity) for n in notes] == [("preview_unchecked", "info")]
+
+
+# ---------------------------------------------------------------- A8: map_area needs a robot that maps the area
+MAP = {"kind": "map_area", "area_id": "arena"}
+MAPPED = [{"kind": "area_mapped", "area_id": "arena"}]
+
+
+def test_a8_map_area_is_allocated_to_the_lidar_car():
+    res, alloc = run(_proposal([_t("t1", "mapper", MAP)], goals=MAPPED))
+    assert res.report.ok, res.report.findings
+    assert alloc.robots == {"mapper": "lidar_01"}
+    assert alloc.ineligible["mapper"]["camera_01"] == "lacks skill map_area"
+
+
+def test_a8_map_area_on_a_robot_that_does_not_map_the_area_is_refused():
+    res, _ = run(_proposal([_t("t1", "mapper", MAP)], goals=MAPPED), constraints={"mapper": "gripper_01"})
+    assert "unsupported_assignment" in codes(res)
+
+
+def test_a8_no_robot_maps_the_area_is_no_eligible_robot(monkeypatch):
+    import dataclasses
+
+    from hive_exec import allocator, catalog
+
+    robots = dict(catalog.ROBOTS)
+    robots["lidar_01"] = dataclasses.replace(robots["lidar_01"], map_areas=())
+    monkeypatch.setattr(allocator, "ROBOTS", robots)
+    assert allocator.static_ineligibility(robots["lidar_01"], _proposal([_t("t1", "m", MAP)], goals=MAPPED).tasks) \
+        == "cannot map arena"
+    res, alloc = run(_proposal([_t("t1", "mapper", MAP)], goals=MAPPED))
+    assert "no_eligible_robot" in codes(res)
+    assert alloc.ineligible["mapper"]["lidar_01"] == "cannot map arena"
+
+
+def test_a8_area_mapped_goal_without_a_map_task_is_warned():
+    scan = {"kind": "scan_route", "route_id": "pickup_corridor"}
+    res, _ = run(_proposal([_t("t1", "surveyor", scan)], goals=MAPPED))
+    warn = [f for f in res.report.findings if f.code == "stage_goal_uncovered"]
+    assert warn and warn[0].severity == "warning" and "arena" in warn[0].message
